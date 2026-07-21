@@ -1,0 +1,16 @@
+# Herramienta Integral de Activos Fijos — dependencias
+# (sqlite3 viene incluido con Python; no se lista)
+flet>=0.85           # interfaz de escritorio (Material)
+PyMuPDF>=1.24        # lectura y rasterizado de PDF (módulo 'fitz')
+pytesseract>=0.3.10  # conector al motor Tesseract (binario aparte)
+Pillow>=10.0         # manejo de imágenes para el OCR
+openpyxl>=3.1        # generación/lectura de archivos Excel (.xlsx)
+playwright>=1.60     # automatización del navegador para el RPA del SIPP
+
+# Requisitos externos (no son paquetes de Python):
+#   Tesseract OCR  -> https://github.com/UB-Mannheim/tesseract/wiki
+#     Instalado en: C:\Program Files\Tesseract-OCR\tesseract.exe
+#     Idioma español (recomendado): paquete 'spa'
+#
+#   Navegador de Playwright (Chromium) -> instalar una vez con:
+#       python -m playwright install chromium

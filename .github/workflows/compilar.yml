@@ -1,0 +1,110 @@
+name: Pipeline de Compilación y Empaquetado Automático
+
+# Se dispara al PUBLICAR un Release en GitHub (no en push/merge a main).
+# El AutoUpdater de la app lee releases/latest, así que el flujo natural es:
+#   crear el Release con su tag (mayor que el anterior) -> publicar.
+on:
+  release:
+    types: [published]
+
+# Permite que el GITHUB_TOKEN automático suba el instalador al Release.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # Sincroniza la versión de la app con el TAG del Release, de forma que el
+      # instalador SIEMPRE reporte exactamente su propio tag. Esto evita el bucle
+      # de actualización: si version.py quedara por debajo del tag, la app se
+      # actualizaría en cada arranque sin avanzar nunca.
+      - name: Sincronizar versión con el tag del Release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          $ver = $tag -replace '^v', ''
+          Write-Host "Tag del release: $tag  ->  version: $ver"
+          (Get-Content core/version.py) `
+            -replace '^\s*__version__\s*=.*', "__version__ = `"$ver`"" `
+            | Set-Content core/version.py -Encoding utf8
+          (Get-Content instalador.iss) `
+            -replace '^AppVersion=.*', "AppVersion=$ver" `
+            | Set-Content instalador.iss -Encoding utf8
+          Write-Host "--- version.py ---"; Get-Content core/version.py | Select-String '__version__'
+          Write-Host "--- instalador.iss ---"; Get-Content instalador.iss | Select-String '^AppVersion='
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install flet pyinstaller
+          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+
+      # Smoke test de imports: importa app + todos los modulos de core/ y ui/ para
+      # detectar imports rotos o modulos faltantes ANTES de compilar y publicar.
+      # Si algo no importa, el build FALLA aqui y el Release roto no llega a nadie.
+      - name: Smoke test de imports (falla si algo no importa)
+        shell: pwsh
+        run: python scripts/smoke_import.py
+
+      # 1. Compilar la app con flet pack (onedir). Incluye el driver de Playwright
+      #    via --collect-all. NO empaqueta Chromium: se descarga en la 1ra
+      #    ejecución del RPA en la PC del usuario. tessdata no va (no está en el
+      #    repo); Imagenes sí (está versionada).
+      - name: Compilar con flet pack
+        shell: pwsh
+        run: >
+          flet pack app.py -n "ActivosFijos" -D
+          --add-data "Imagenes:Imagenes"
+          --hidden-import openpyxl
+          --pyinstaller-build-args=--collect-all=playwright
+          -y
+
+      # 2. Preparar el motor Tesseract OCR para empaquetarlo con la app, de modo
+      #    que funcione en una maquina limpia sin instalarlo aparte.
+      - name: Preparar Tesseract OCR para empaquetar
+        shell: pwsh
+        run: |
+          choco install tesseract --no-progress -y
+          $tess = "C:\Program Files\Tesseract-OCR"
+          if (-not (Test-Path $tess)) { $tess = "C:\Program Files (x86)\Tesseract-OCR" }
+          New-Item -ItemType Directory -Force -Path tesseract_bundle | Out-Null
+          Copy-Item "$tess\*" tesseract_bundle -Recurse -Force
+          $td = "tesseract_bundle\tessdata"
+          New-Item -ItemType Directory -Force -Path $td | Out-Null
+          foreach ($lang in @("spa", "osd")) {
+            $dest = "$td\$lang.traineddata"
+            if (-not (Test-Path $dest)) {
+              Invoke-WebRequest "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata" -OutFile $dest
+            }
+          }
+          Write-Host "--- tesseract_bundle ---"; Get-ChildItem tesseract_bundle
+          Write-Host "--- tessdata ---"; Get-ChildItem $td | Select-Object Name
+
+      # 3. Instalar Inno Setup y compilar el instalador (instalador.iss).
+      - name: Instalar Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Compilar Instalador con Inno Setup
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" instalador.iss'
+
+      # 4. Publicar el instalador como asset del Release (nombre exacto que busca
+      #    el AutoUpdater: Instalador_ActivosFijos.exe).
+      - name: Subir Instalador al Release de GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/Instalador_ActivosFijos.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

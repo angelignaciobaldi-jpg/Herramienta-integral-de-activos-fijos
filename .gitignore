@@ -1,0 +1,45 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== Empaquetado (PyInstaller / flet pack) =====
+build/
+dist/
+*.spec
+# Salida del instalador de Inno Setup
+Output/
+# Motor Tesseract empaquetado para el instalador (lo prepara el CI; pesado)
+tesseract_bundle/
+
+# ===== Datos en runtime (se generan/actualizan; no van al repo) =====
+activos_fijos.db
+*.db
+# Preferencias locales (estado de ventana, tema, etc.) por máquina
+preferencias.json
+# Estado del auto-updater
+actualizador_estado.json
+# Diagnósticos del RPA (capturas + HTML del portal real; datos sensibles)
+_diagnostico_rpa/
+# Credenciales del SIPP cifradas por usuario (DPAPI)
+credenciales_rpa.json
+# Token de la API cifrado con DPAPI (por maquina; NUNCA al repo)
+token_api.json
+# Navegador de Playwright descargado en tiempo de ejecución
+ms-playwright/
+
+# ===== Secretos / configuración sensible =====
+# Variables de entorno con tokens (PAT de GitHub, etc.). El .env.example sí va.
+.env
+
+# ===== Modelos de OCR (pesados; se obtienen aparte) =====
+tessdata/
+
+# ===== Datos sensibles y de referencia (NO subir: datos reales) =====
+# Páginas HTML de referencia del portal SIPP (DOM real para afinar el RPA)
+Paginas html/
+# Documentos de prueba (facturas / resguardos con datos reales)
+Documentos de pruebas/
+descargas/
