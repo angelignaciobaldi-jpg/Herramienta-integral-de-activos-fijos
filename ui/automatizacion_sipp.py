@@ -29,7 +29,7 @@ class SeccionAutomatizacionSipp:
     def _construir(self) -> None:
         self.dd_empresa = ft.Dropdown(
             label="Empresa", dense=True, width=360,
-            options=[ft.dropdown.Option(n) for n in NOMBRES_EMPRESAS])
+            options=[ft.dropdown.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
         self.tf_sucursal = ft.TextField(
             label="Sucursal", dense=True, width=360, hint_text="Corporativo")
         self.progreso = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)

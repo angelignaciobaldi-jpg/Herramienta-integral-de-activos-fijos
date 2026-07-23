@@ -137,8 +137,10 @@ class SesionSipp:
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
     # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    BASE_URL = "https://dev.sipp.petroil.dev"
-    # BASE_URL = "https://sipp.petroil.com.mx"   # productivo
+    # Ambiente de PRUEBAS (stage): se opera aquí mientras se desarrolla el módulo.
+    BASE_URL = "https://stage.sipp.petroil.dev"
+    # BASE_URL = "https://dev.sipp.petroil.dev"   # desarrollo
+    # BASE_URL = "https://sipp.petroil.com.mx"    # productivo
     URL_LOGIN = BASE_URL + "/login.html"
     URL_CONFIG_SESION = BASE_URL + "/index.cfm#/configuracionsession"
 
