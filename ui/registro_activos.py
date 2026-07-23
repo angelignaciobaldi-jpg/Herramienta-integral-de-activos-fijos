@@ -26,8 +26,10 @@ import os
 
 import flet as ft
 
-from core import db
+from core import credenciales, db
 from core.proveedor_activos import proveedor_por_defecto
+from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
+from core.tipos_activo import campos_de_tipo, nombre_tipo
 from ui.captura_activo import DialogoCapturaActivo
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
@@ -213,12 +215,12 @@ class SeccionRegistroActivos:
         self._safe_update()
 
     def _actualizar_barra_rpa(self) -> None:
-        """Muestra el botón de RPA correspondiente a la pestaña (deshabilitado en
-        Fase 1)."""
+        """Muestra el botón de RPA correspondiente a la pestaña activa."""
         if self._tab == db.EST_NO_DADO_ALTA:
             self._barra_rpa.content = ft.FilledButton(
-                "Iniciar registro en SIPP", icon=ft.Icons.SMART_TOY, disabled=True,
-                tooltip="Disponible en Fase 2 (RPA de alta con campos por tipo)")
+                "Iniciar registro en SIPP", icon=ft.Icons.SMART_TOY,
+                tooltip="Da de alta en el SIPP los activos que ya tienen datos capturados",
+                on_click=self._iniciar_registro_sipp)
         elif self._tab == db.EST_DADO_ALTA:
             self._barra_rpa.content = ft.FilledButton(
                 "Realizar modificación en SIPP", icon=ft.Icons.EDIT_NOTE, disabled=True,
@@ -482,6 +484,124 @@ class SeccionRegistroActivos:
         self.app.avisar(
             f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta.",
             VERDE)
+
+    # ------------------------------------------------ RPA: alta en el SIPP
+    def _payload_alta(self, r: "db.Levantamiento") -> tuple:
+        """Traduce lo capturado en el formulario dinámico a lo que espera el RPA:
+        (nombre del tipo, [(ng_model, valor, control)], {etiqueta: valor}).
+
+        Los campos con `detalle=True` son las características del insumo
+        (camposDetalle), que el RPA empareja por rótulo y no por ng-model."""
+        datos = r.datos()
+        campos, detalles = [], {}
+        for campo in campos_de_tipo(r.id_tipo_activo):
+            if campo.clave == "id_TipoActivo":
+                continue  # el tipo se elige aparte (dispara las características)
+            valor = (datos.get(campo.clave) or "").strip()
+            if not valor:
+                continue
+            if campo.detalle:
+                detalles[campo.etiqueta] = valor
+            else:
+                campos.append((campo.ng_model, valor, campo.control))
+        return nombre_tipo(r.id_tipo_activo), campos, detalles
+
+    async def _iniciar_registro_sipp(self, _e=None) -> None:
+        """Da de alta en el SIPP (vía RPA) los activos 'No dados de alta' que ya
+        tienen sus datos capturados. Corre en un hilo aparte para no congelar la
+        interfaz, con progreso y opción de detener."""
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+        todos = db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA)
+        pendientes = [r for r in todos if r.id_tipo_activo is not None]
+        if not pendientes:
+            self.app.avisar(
+                "Ningún activo tiene datos capturados. Usa el botón de captura "
+                "(📋) en cada fila para definir el tipo y sus campos.", NARANJA)
+            return
+
+        total = len(pendientes)
+        bucle = BucleRpa()
+        ctrl = ControlRpa(bucle.loop)
+        ui_loop = asyncio.get_running_loop()
+
+        txt = ft.Text(f"Preparando… (0/{total})", size=13)
+        barra = ft.ProgressBar(value=0)
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Registrando activos en el SIPP"),
+            content=ft.Container(
+                ft.Column([txt, barra,
+                           ft.Text("Se abrirá un navegador; no lo cierres.",
+                                   size=11, color=GRIS)],
+                          tight=True, spacing=12),
+                width=420),
+            actions=[ft.TextButton("Detener", on_click=lambda _e: ctrl.detener())],
+        )
+        self.page.show_dialog(dlg)
+        self.page.update()
+
+        def avance(i: int, nombre: str) -> None:
+            """Actualiza el progreso desde el hilo del RPA (marshalado a la UI)."""
+            def aplicar() -> None:
+                txt.value = f"({i}/{total}) {nombre}"
+                barra.value = i / total
+                try:
+                    dlg.update()
+                except (RuntimeError, AssertionError):
+                    pass
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        exitosos, fallidos = 0, []
+
+        async def flujo() -> None:
+            nonlocal exitosos
+            async with SesionSipp(headless=False) as sipp:
+                await sipp.login(usuario, contrasena)
+                # Contexto de sesión: se toma del primer registro (un levantamiento
+                # suele ser de una misma empresa/sucursal).
+                primero = pendientes[0]
+                if primero.empresa and primero.sucursal:
+                    try:
+                        await sipp.seleccionar_empresa_sucursal(
+                            primero.empresa, primero.sucursal)
+                    except ErrorSipp as exc:
+                        fallidos.append(f"Selección de empresa/sucursal: {exc}")
+                for i, r in enumerate(pendientes, 1):
+                    await ctrl.punto_control()
+                    avance(i, r.nombre_insumo)
+                    tipo, campos, detalles = self._payload_alta(r)
+                    try:
+                        await sipp.alta_activo(tipo, campos, detalles)
+                        db.actualizar_estatus_levantamiento(r.id, db.EST_DADO_ALTA)
+                        exitosos += 1
+                    except ErrorSipp as exc:
+                        fallidos.append(f"{r.nombre_insumo} ({r.no_serie}): {exc}")
+
+        detenido = False
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        except RpaDetenido:
+            detenido = True
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            fallidos.append(str(exc))
+        finally:
+            bucle.cerrar()
+            self.page.pop_dialog()
+            self._refrescar()
+
+        if detenido:
+            self.app.avisar(f"Proceso detenido. {exitosos} activo(s) registrado(s).",
+                            NARANJA)
+        elif fallidos:
+            self.app.avisar(
+                f"{exitosos} registrado(s), {len(fallidos)} con error: {fallidos[0]}",
+                ROJO, duracion=9000)
+        else:
+            self.app.avisar(f"{exitosos} activo(s) registrado(s) en el SIPP.", VERDE)
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando
