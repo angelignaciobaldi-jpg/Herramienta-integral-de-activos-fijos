@@ -27,10 +27,12 @@ Uso típico:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import glob
 import os
 import re
 import sys
+import threading
 from datetime import datetime
 
 from playwright.async_api import (
@@ -132,6 +134,46 @@ _JS_ELEGIR_OPCION = r"""(args) => {
 }"""
 
 
+# JS que llena las CARACTERÍSTICAS dinámicas del insumo ("Detalles Insumo").
+# En el SIPP se renderizan con ng-repeat="(key, item) in camposDetalle": el rótulo
+# es item.NB_CAMPODETALLE y el valor va en camposDetalle[$index]['DE_VALORCAMPODETALLE'].
+# Como no hay un ng-model fijo por campo, se emparejan por el RÓTULO: se recorren
+# los inputs de DE_VALORCAMPODETALLE, se lee la etiqueta de su fila y se escribe el
+# valor que corresponda. Recibe {items:[{etiqueta, valor}]}.
+_JS_LLENAR_CAMPOS_DETALLE = r"""(args) => {
+    const {items} = args;
+    const norm = s => (s || '')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/\s+/g, ' ').replace(/\s*:\s*$/, '').trim().toLowerCase();
+    const inputs = [...document.querySelectorAll(
+        "[ng-model*='DE_VALORCAMPODETALLE']")].filter(el => el.offsetParent !== null);
+    const pend = items.map(it => ({et: norm(it.etiqueta), val: it.valor, ok: false}));
+    for (const inp of inputs) {
+        // Etiqueta de la fila: se busca el <label> del contenedor más cercano;
+        // si no hay, se usa el texto del contenedor (sin el propio input).
+        const cont = inp.closest('.form-group, .row, td, li, div');
+        let etiqueta = '';
+        if (cont) {
+            const lab = cont.querySelector('label');
+            etiqueta = lab ? lab.textContent : cont.textContent;
+        }
+        const e = norm(etiqueta);
+        if (!e) continue;
+        const p = pend.find(p => !p.ok && p.et && e.includes(p.et));
+        if (!p) continue;
+        inp.value = p.val;
+        inp.dispatchEvent(new Event('input', {bubbles: true}));
+        inp.dispatchEvent(new Event('change', {bubbles: true}));
+        p.ok = true;
+    }
+    return {
+        llenados: pend.filter(p => p.ok).map(p => p.et),
+        faltantes: pend.filter(p => !p.ok).map(p => p.et),
+        inputs_detectados: inputs.length,
+    };
+}"""
+
+
 class SesionSipp:
     """Maneja una sesión automatizada del SIPP: navegador, login y selección
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
@@ -143,6 +185,9 @@ class SesionSipp:
     # BASE_URL = "https://sipp.petroil.com.mx"    # productivo
     URL_LOGIN = BASE_URL + "/login.html"
     URL_CONFIG_SESION = BASE_URL + "/index.cfm#/configuracionsession"
+    # Rutas SPA del módulo de Activos Fijos (confirmadas en el DOM real).
+    URL_CATALOGO_ACTIVOS = BASE_URL + "/index.cfm#/ActivosFijosNuevo"
+    URL_BANDEJA_COMPRAS = BASE_URL + "/index.cfm#/BandejaCompraActivos"
 
     # --- Tiempos de espera (ms) ---
     TIMEOUT_NAV = 30_000        # navegación / carga de página
@@ -355,11 +400,189 @@ class SesionSipp:
         await page.goto(url, wait_until="domcontentloaded", timeout=self.TIMEOUT_NAV)
         try:
             await ancla.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
+            return
+        except PlaywrightTimeoutError:
+            pass
+        # Si ya se estaba en index.cfm, cambiar solo el hash puede NO disparar la
+        # transición de ui-router; un reload fuerza a la SPA a montar la ruta.
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=self.TIMEOUT_NAV)
+            await ancla.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
         except PlaywrightTimeoutError as exc:
             await self._capturar_diagnostico(etiqueta_diag)
             raise ErrorSipp(mensaje_error) from exc
 
+    # ------------------------------------------------ llenado de formularios
+    async def set_combo(self, ng_model: str, texto: str, esperar: bool = False) -> None:
+        """Elige `texto` en un <select> de AngularJS (con o sin 'chosen') por su
+        ng-model. Si `esperar`, reintenta mientras la opción aún no exista (útil
+        para combos que se cargan por AJAX en cascada)."""
+        if not texto:
+            return
+        page = self._exigir_pagina()
+        fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
+        ultimo: dict = {}
+        while True:
+            ultimo = await page.evaluate(
+                _JS_ELEGIR_OPCION, {"ngModel": ng_model, "texto": texto})
+            if ultimo.get("ok"):
+                return
+            if not esperar or asyncio.get_event_loop().time() >= fin:
+                break
+            await asyncio.sleep(0.25)
+        disponibles = ultimo.get("disponibles")
+        detalle = ""
+        if disponibles:
+            detalle = (" Opciones: " + ", ".join(disponibles[:8])
+                       + ("…" if len(disponibles) > 8 else ""))
+        raise ErrorSipp(
+            "No se pudo elegir '%s' en el combo '%s'.%s" % (texto, ng_model, detalle))
+
+    async def set_input(self, ng_model: str, valor: str) -> None:
+        """Escribe `valor` en un input por su ng-model. Se filtra por ':visible'
+        porque el portal repite ng-models en paneles ocultos (ng-hide)."""
+        page = self._exigir_pagina()
+        campo = page.locator(f'[ng-model="{ng_model}"]:visible').first
+        try:
+            await campo.fill(valor, timeout=3_000)
+        except Exception:  # noqa: BLE001 — respaldo: fijar por JS y avisar a Angular
+            await campo.evaluate(
+                "(el, v) => { el.value = v;"
+                " el.dispatchEvent(new Event('input', {bubbles:true}));"
+                " el.dispatchEvent(new Event('change', {bubbles:true})); }",
+                valor)
+
+    async def set_fecha(self, ng_model: str, valor: str) -> None:
+        """Escribe una fecha (DD/MM/AAAA) en un input con máscara. Se usa `fill`,
+        que enfoca SIN clic real: así no se abre el calendario y Angular sí
+        registra el valor (dispara 'input')."""
+        page = self._exigir_pagina()
+        campo = page.locator(f'[ng-model="{ng_model}"]:visible').first
+        await campo.fill(valor)
+
+    async def llenar_campos_detalle(self, detalles: dict) -> dict:
+        """Llena las CARACTERÍSTICAS del insumo ('Detalles Insumo'), que en el SIPP
+        son dinámicas (camposDetalle) y se emparejan por su rótulo. `detalles` es
+        {etiqueta -> valor}. Devuelve {llenados, faltantes, inputs_detectados}."""
+        items = [{"etiqueta": k, "valor": v} for k, v in (detalles or {}).items() if v]
+        if not items:
+            return {"llenados": [], "faltantes": [], "inputs_detectados": 0}
+        page = self._exigir_pagina()
+        return await page.evaluate(_JS_LLENAR_CAMPOS_DETALLE, {"items": items})
+
+    # ------------------------------------------------ módulo de Activos Fijos
+    async def ir_a_catalogo_activos(self) -> None:
+        """Navega al catálogo de Activos Fijos (#/ActivosFijosNuevo) y espera a que
+        cargue el filtro del listado."""
+        page = self._exigir_pagina()
+        await self._ir_a_ruta_spa(
+            self.URL_CATALOGO_ACTIVOS,
+            page.locator("[ng-model='js_filtroListado.de_SerieActivo']").first,
+            "No se cargó el catálogo de Activos Fijos (no apareció el filtro de "
+            "No. de serie del listado).",
+            "catalogo_activos")
+
+    async def buscar_serie_en_listado(self, no_serie: str) -> int:
+        """Filtra el listado del catálogo por No. de serie y devuelve cuántas filas
+        resultaron (0 = el activo NO está dado de alta)."""
+        page = self._exigir_pagina()
+        await self.ir_a_catalogo_activos()
+        await self.set_input("js_filtroListado.de_SerieActivo", no_serie)
+        boton = await self._primer_visible(
+            [
+                page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
+                page.locator("button.btn-buscar25p"),
+            ],
+            "botón de buscar del listado de activos")
+        await self._click_seguro(boton)
+        await page.wait_for_timeout(2_500)  # la grid recarga por AJAX
+        return await self._contar_filas_grid()
+
+    async def _contar_filas_grid(self) -> int:
+        """Cuenta las filas renderizadas del ngGrid visible."""
+        page = self._exigir_pagina()
+        try:
+            return await page.evaluate(
+                "() => document.querySelectorAll('.ngRow').length")
+        except Exception:  # noqa: BLE001
+            return 0
+
+    async def alta_activo(self, tipo_nombre: str, campos: list,
+                          detalles: "dict | None" = None) -> None:
+        """Da de alta un activo en el SIPP.
+
+        Args:
+            tipo_nombre: nombre del tipo de activo (se elige en el combo).
+            campos: lista de (ng_model, valor, control) donde control es
+                'text' | 'number' | 'date' | 'select'.
+            detalles: características del insumo {etiqueta -> valor} (camposDetalle).
+
+        Abre el formulario, elige el tipo (lo que dispara la carga de las
+        características), llena todo y pulsa Guardar, aceptando el aviso final.
+        """
+        page = self._exigir_pagina()
+        await self.ir_a_catalogo_activos()
+        boton_agregar = await self._primer_visible(
+            [
+                page.locator("[ng-click*='confAgregarActivo']"),
+                page.get_by_role("button", name=re.compile(r"agregar", re.I)),
+            ],
+            "botón para agregar un activo")
+        await self._click_seguro(boton_agregar)
+
+        # El tipo va primero: de él dependen las características del insumo.
+        await self.set_combo("filtrosAgregar.id_TipoActivo", tipo_nombre, esperar=True)
+        await page.wait_for_timeout(800)
+
+        for ng_model, valor, control in campos:
+            if not valor or not ng_model:
+                continue
+            if control == "select":
+                try:
+                    await self.set_combo(ng_model, valor)
+                except ErrorSipp:
+                    # Algunos "select" del portal son en realidad campos de texto
+                    # con búsqueda; se intenta escribirlos.
+                    await self.set_input(ng_model, valor)
+            elif control == "date":
+                await self.set_fecha(ng_model, valor)
+            else:
+                await self.set_input(ng_model, valor)
+
+        if detalles:
+            await self.llenar_campos_detalle(detalles)
+
+        guardar = await self._primer_visible(
+            [
+                page.locator("[ng-click*='guardarActivoFijo()']"),
+                page.get_by_role("button", name=re.compile(r"^\s*guardar\s*$", re.I)),
+            ],
+            "botón Guardar del alta de activo")
+        await self._click_seguro(guardar)
+        await self.confirmar_aviso_si_hay(3_000)
+
     # --------------------------------------------------------- utilidades
+    async def _click_seguro(self, locator: Locator) -> None:
+        """Clic robusto: normal y, si algo lo intercepta (overlay/flotante), por DOM."""
+        try:
+            await locator.click(timeout=self.TIMEOUT_ELEMENTO)
+        except Exception:  # noqa: BLE001 — respaldo por JS
+            await locator.evaluate("el => el.click()")
+
+    async def confirmar_aviso_si_hay(self, timeout: int = 2_000) -> bool:
+        """Si aparece un aviso con botón 'Aceptar', lo pulsa. Best-effort."""
+        page = self._exigir_pagina()
+        aceptar = page.get_by_role("button", name=re.compile(r"^\s*aceptar\s*$", re.I))
+        try:
+            await aceptar.first.wait_for(state="visible", timeout=timeout)
+        except PlaywrightTimeoutError:
+            return False
+        try:
+            await self._click_seguro(aceptar.first)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     async def _primer_visible(
         self, candidatos: list[Locator], descripcion: str, timeout: int | None = None,
     ) -> Locator:
@@ -393,3 +616,90 @@ class SesionSipp:
                 fh.write(html)
         except Exception:  # noqa: BLE001 — el diagnóstico nunca debe tumbar el flujo
             pass
+
+
+# =========================================================================
+# Infraestructura para correr el RPA desde la interfaz (Flet) sin congelarla
+# =========================================================================
+
+class BucleRpa:
+    """Bucle de asyncio en un hilo dedicado para correr el RPA.
+
+    Sirve para dos cosas al integrarlo con una GUI (Flet):
+      - No congelar la interfaz: el navegador se opera en otro hilo.
+      - En Windows, Playwright necesita un ProactorEventLoop para lanzar el
+        navegador (subprocesos); `new_event_loop()` lo provee por defecto.
+
+    Todas las corrutinas enviadas corren en el MISMO bucle/hilo, requisito de
+    Playwright (sus objetos quedan atados al loop donde se crearon).
+    """
+
+    def __init__(self):
+        self._loop = asyncio.new_event_loop()
+        self._hilo = threading.Thread(target=self._run, name="rpa-loop", daemon=True)
+        self._hilo.start()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    @property
+    def loop(self) -> "asyncio.AbstractEventLoop":
+        """El bucle del hilo del RPA (lo necesita ControlRpa)."""
+        return self._loop
+
+    def enviar(self, coro) -> "concurrent.futures.Future":
+        """Programa una corrutina en el bucle y devuelve un Future. Desde un
+        manejador async de Flet: `await asyncio.wrap_future(bucle.enviar(coro))`."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def cerrar(self) -> None:
+        """Detiene el bucle (el hilo es daemon, así que muere con la app)."""
+        self._loop.call_soon_threadsafe(self._loop.stop)
+
+
+class RpaDetenido(Exception):
+    """El flujo del RPA se abortó a petición del usuario (Detener).
+
+    No es un error: el llamador lo trata como una parada limpia (sin diálogo de
+    error)."""
+
+
+class ControlRpa:
+    """Control cooperativo de pausa / reanudación / detención del flujo del RPA.
+
+    Se construye desde el hilo de la UI pasando el `loop` del BucleRpa. Como una
+    asyncio.Event no es segura de modificar entre hilos, los cambios de estado se
+    agendan en ESE bucle con call_soon_threadsafe. El flujo del RPA llama a
+    `await punto_control()` en puntos seguros (entre iteraciones): ahí se queda
+    en pausa o aborta lanzando RpaDetenido.
+    """
+
+    def __init__(self, loop: "asyncio.AbstractEventLoop"):
+        self._loop = loop
+        self._reanudar = asyncio.Event()
+        self._reanudar.set()  # arranca corriendo (no pausado)
+        self._detenido = False
+
+    @property
+    def detenido(self) -> bool:
+        return self._detenido
+
+    def pausar(self) -> None:
+        self._loop.call_soon_threadsafe(self._reanudar.clear)
+
+    def reanudar(self) -> None:
+        self._loop.call_soon_threadsafe(self._reanudar.set)
+
+    def detener(self) -> None:
+        self._detenido = True
+        # Despierta si estaba en pausa, para que llegue al punto de control y aborte.
+        self._loop.call_soon_threadsafe(self._reanudar.set)
+
+    async def punto_control(self) -> None:
+        """Punto seguro para pausar/abortar; se llama ENTRE operaciones del flujo."""
+        if self._detenido:
+            raise RpaDetenido()
+        await self._reanudar.wait()
+        if self._detenido:
+            raise RpaDetenido()
