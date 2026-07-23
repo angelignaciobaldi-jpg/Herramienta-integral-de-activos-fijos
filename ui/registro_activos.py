@@ -28,6 +28,7 @@ import flet as ft
 
 from core import db
 from core.proveedor_activos import proveedor_por_defecto
+from ui.captura_activo import DialogoCapturaActivo
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
 
@@ -66,6 +67,8 @@ class SeccionRegistroActivos:
         self.proveedor = proveedor_por_defecto()
         self._tab = _TAB_TODOS
         self._seleccionados: set[int] = set()
+        # Formulario dinámico de captura por tipo de activo (prepara el alta en SIPP).
+        self.dialogo_captura = DialogoCapturaActivo(app, al_guardar=self._refrescar)
         self._construir()
 
     # ------------------------------------------------------------ UI
@@ -148,10 +151,10 @@ class SeccionRegistroActivos:
             ColumnaTabla("Empresa", 14, ancho_min_px=155),
             ColumnaTabla("Sucursal", 14, ancho_min_px=155),
             ColumnaTabla("Departamento", 14, ancho_min_px=155),
-            ColumnaTabla("Nombre insumo", 20, ancho_min_px=140),
+            ColumnaTabla("Nombre insumo", 19, ancho_min_px=140),
             ColumnaTabla("No. de serie", 13, ancho_min_px=110),
             ColumnaTabla("Estatus", 10, ancho_min_px=100),
-            ColumnaTabla("Acciones", 11, ancho_min_px=110),
+            ColumnaTabla("Acciones", 12, ancho_min_px=145),
         ]
         self.tabla = TablaResponsiva(self.page, columnas)
         self._area_tabla = ft.Column([self.tabla.control], scroll=ft.ScrollMode.AUTO,
@@ -275,8 +278,15 @@ class SeccionRegistroActivos:
         dep = ft.Container(dep_ctrl, width=_W, height=_H)
         etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
         estatus = ft.Text(etiqueta, size=12, color=color, weight=ft.FontWeight.W_500)
+        capturado = r.id_tipo_activo is not None
         acciones = ft.Row(
             [
+                ft.IconButton(
+                    icon=ft.Icons.ASSIGNMENT, icon_size=20,
+                    icon_color=VERDE if capturado else None,
+                    tooltip=("Datos capturados — editar" if capturado
+                             else "Capturar datos para el alta"),
+                    on_click=lambda _e, reg=r: self.dialogo_captura.abrir(reg)),
                 ft.IconButton(
                     icon=ft.Icons.IMAGE, tooltip="Ver imagen original", icon_size=20,
                     on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
