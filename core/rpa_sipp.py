@@ -336,6 +336,16 @@ class SesionSipp:
                 "botón Guardar de la configuración de sesión",
             )
             await boton_guardar.click()
+            # El guardado de la sesión es AJAX: si se navega a un módulo antes de
+            # que persista, el SIPP rebota a esta misma pantalla de configuración.
+            # Se espera a que la sesión quede activa (se sale de configuracionsession)
+            # o, en su defecto, un margen fijo.
+            try:
+                await page.wait_for_function(
+                    "() => !location.hash.toLowerCase().includes('configuracionsession')",
+                    timeout=self.TIMEOUT_ELEMENTO)
+            except PlaywrightTimeoutError:
+                await page.wait_for_timeout(2500)
 
     async def _elegir_opcion_chosen(
         self, etiqueta: str, texto: str, esperar_opcion: bool = False,
@@ -473,14 +483,27 @@ class SesionSipp:
     # ------------------------------------------------ módulo de Activos Fijos
     async def ir_a_catalogo_activos(self) -> None:
         """Navega al catálogo de Activos Fijos (#/ActivosFijosNuevo) y espera a que
-        cargue el filtro del listado."""
+        cargue el filtro del listado. La SPA + su grid tardan en montar, así que se
+        da un margen mayor que el de un elemento normal."""
         page = self._exigir_pagina()
-        await self._ir_a_ruta_spa(
-            self.URL_CATALOGO_ACTIVOS,
-            page.locator("[ng-model='js_filtroListado.de_SerieActivo']").first,
-            "No se cargó el catálogo de Activos Fijos (no apareció el filtro de "
-            "No. de serie del listado).",
-            "catalogo_activos")
+        ancla = page.locator("[ng-model='js_filtroListado.de_SerieActivo']").first
+        await page.goto(self.URL_CATALOGO_ACTIVOS, wait_until="domcontentloaded",
+                        timeout=self.TIMEOUT_NAV)
+        try:
+            await ancla.wait_for(state="visible", timeout=self.TIMEOUT_NAV)
+            return
+        except PlaywrightTimeoutError:
+            pass
+        # Un reload fuerza a la SPA a montar la ruta si el cambio de hash no la
+        # disparó (o si venía rebotada de la config de sesión).
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=self.TIMEOUT_NAV)
+            await ancla.wait_for(state="visible", timeout=self.TIMEOUT_NAV)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("catalogo_activos")
+            raise ErrorSipp(
+                "No se cargó el catálogo de Activos Fijos (no apareció el filtro "
+                "de No. de serie del listado).") from exc
 
     async def buscar_en_listado(self, valor: str, por_etiqueta: bool = False) -> int:
         """Filtra el listado del catálogo por No. de serie o por ETIQUETA (número
