@@ -29,7 +29,7 @@ import flet as ft
 from core import credenciales, db
 from core.proveedor_activos import proveedor_por_defecto
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
-from core.tipos_activo import campos_de_tipo, nombre_tipo
+from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.captura_activo import DialogoCapturaActivo
 from ui.carga_masiva import DialogoCargaMasiva
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
@@ -153,15 +153,31 @@ class SeccionRegistroActivos:
             controles_tab.append(cont)
         fila_tabs = ft.Row(controles_tab, spacing=6)
 
+        # Buscador: con miles de activos importados es la forma práctica de
+        # aislar un grupo (p. ej. todas las LAPTOP) y clasificarlo de golpe.
+        # Filtra al pulsar Enter (no en cada tecla: repintar la tabla cuesta).
+        self.tf_buscar = ft.TextField(
+            hint_text="Buscar insumo, etiqueta, serie o ubicación… (Enter)",
+            dense=True, width=340, height=40, content_padding=8,
+            prefix_icon=ft.Icons.SEARCH, on_submit=self._aplicar_filtro)
+        self._filtro = ""
+        self._btn_limpiar = ft.IconButton(
+            icon=ft.Icons.CLOSE, icon_size=18, tooltip="Limpiar búsqueda",
+            visible=False, on_click=self._limpiar_filtro)
+
         # Acciones masivas.
         self.barra_masiva = ft.Row(
             [
+                self.tf_buscar, self._btn_limpiar,
                 ft.TextButton("Seleccionar todos", icon=ft.Icons.SELECT_ALL,
                               on_click=self._seleccionar_todos),
+                ft.TextButton("Asignar tipo", icon=ft.Icons.CATEGORY,
+                              tooltip="Asigna el tipo de activo a los seleccionados",
+                              on_click=self._abrir_asignar_tipo),
                 ft.TextButton("Eliminar seleccionados", icon=ft.Icons.DELETE_SWEEP,
                               on_click=self._eliminar_seleccionados),
             ],
-            spacing=6,
+            spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         # Barra contextual de RPA (según la pestaña activa).
@@ -276,9 +292,27 @@ class SeccionRegistroActivos:
         self._refrescar()
 
     def _filas_actuales(self) -> list["db.Levantamiento"]:
-        if self._tab == _TAB_TODOS:
-            return db.listar_levantamiento()
-        return db.listar_levantamiento_por_estatus(self._tab)
+        """Registros de la pestaña activa, aplicando el filtro de búsqueda."""
+        registros = (db.listar_levantamiento() if self._tab == _TAB_TODOS
+                     else db.listar_levantamiento_por_estatus(self._tab))
+        if not self._filtro:
+            return registros
+        f = self._filtro
+        return [r for r in registros
+                if f in (r.nombre_insumo or "").lower()
+                or f in (r.etiqueta or "").lower()
+                or f in (r.no_serie or "").lower()
+                or f in (r.ubicacion or "").lower()]
+
+    def _aplicar_filtro(self, _e=None) -> None:
+        self._filtro = (self.tf_buscar.value or "").strip().lower()
+        self._btn_limpiar.visible = bool(self._filtro)
+        self._pagina = 0
+        self._refrescar()
+
+    def _limpiar_filtro(self, _e=None) -> None:
+        self.tf_buscar.value = ""
+        self._aplicar_filtro()
 
     def _refrescar(self) -> None:
         registros = self._filas_actuales()
@@ -473,6 +507,56 @@ class SeccionRegistroActivos:
                 actions=[
                     ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
                     ft.FilledButton("Eliminar", icon=ft.Icons.DELETE, on_click=eliminar),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    # ------------------------------------------- asignación masiva de tipo
+    def _abrir_asignar_tipo(self, _e=None) -> None:
+        """Asigna un tipo de activo a TODOS los registros seleccionados.
+
+        El inventario importado llega sin tipo y el alta en el SIPP lo exige;
+        clasificarlos uno por uno sería inviable con miles de activos. Lo práctico
+        es filtrar un grupo (p. ej. «laptop»), seleccionarlo y clasificarlo aquí."""
+        ids = list(self._seleccionados)
+        if not ids:
+            self.app.avisar(
+                "Selecciona primero los activos a clasificar (puedes filtrar y "
+                "usar «Seleccionar todos»).", NARANJA)
+            return
+
+        dd = ft.DropdownM2(
+            label="Tipo de activo", dense=True, width=340,
+            options=[ft.dropdownm2.Option(key=n, text=n) for n in TIPOS_ACTIVO.values()])
+
+        def aplicar(_e=None) -> None:
+            nombre = dd.value
+            if not nombre:
+                self.app.avisar("Elige un tipo de activo.", ROJO)
+                return
+            n = db.actualizar_tipo_lote(ids, ID_POR_NOMBRE.get(nombre))
+            self.page.pop_dialog()
+            self._refrescar()
+            self.app.avisar(f"{n} activo(s) clasificados como «{nombre}».", VERDE)
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Asignar tipo de activo"),
+                content=ft.Container(
+                    ft.Column(
+                        [ft.Text(f"Se aplicará a {len(ids)} activo(s) seleccionado(s).",
+                                 size=13),
+                         dd,
+                         ft.Text("Los campos particulares de cada tipo se capturan "
+                                 "después, en el formulario de cada activo.",
+                                 size=11, color=GRIS)],
+                        spacing=12, tight=True),
+                    width=380),
+                actions=[
+                    ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
+                    ft.FilledButton("Asignar", icon=ft.Icons.CHECK, on_click=aplicar),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )

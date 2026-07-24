@@ -403,6 +403,27 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
         con.execute(f"UPDATE levantamiento SET {', '.join(sets)} WHERE id = ?", valores)
 
 
+def actualizar_tipo_lote(ids: list[int], id_tipo: int | None) -> int:
+    """Asigna el mismo tipo de activo a muchos registros de una vez.
+
+    Pensado para el inventario importado, que llega sin tipo: seleccionar cientos
+    de activos y clasificarlos de golpe. Devuelve cuántos se actualizaron.
+
+    Los ids se procesan por bloques porque SQLite limita el número de parámetros
+    de una sola sentencia."""
+    if not ids:
+        return 0
+    TAM = 500
+    with _conectar() as con:
+        for i in range(0, len(ids), TAM):
+            bloque = ids[i:i + TAM]
+            marcadores = ", ".join(["?"] * len(bloque))
+            con.execute(
+                f"UPDATE levantamiento SET id_tipo_activo = ? WHERE id IN ({marcadores})",
+                [id_tipo, *bloque])
+    return len(ids)
+
+
 def eliminar_levantamiento(id_lev: int) -> None:
     with _conectar() as con:
         con.execute("DELETE FROM levantamiento WHERE id = ?", (id_lev,))
