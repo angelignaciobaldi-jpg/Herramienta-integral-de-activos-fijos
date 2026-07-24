@@ -279,3 +279,7 @@ que la actualización sobrescriba en sitio.
   usuario con `avisar()` o la pantalla de error.
 - **Trabajo pesado fuera del hilo de UI**: `asyncio.to_thread(...)` (OCR, red,
   descargas) para no congelar la interfaz.
+- **Fechas siempre por calendario**: ningún campo de fecha se teclea. Se usa el
+  componente `ui/comun.CampoFecha` (TextField de solo lectura + DatePicker de
+  Material en español), que expone `.value` como `'DD/MM/AAAA'`. Formato único en
+  `comun.FORMATO_FECHA`.

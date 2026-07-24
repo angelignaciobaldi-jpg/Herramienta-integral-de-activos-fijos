@@ -8,6 +8,7 @@ aquí sus colores, helpers y el catálogo de empresas.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 import flet as ft
 
@@ -95,3 +96,90 @@ def parse_monto(texto: str | None) -> float | None:
 
 def fmt_monto(monto: float | None) -> str:
     return "" if monto is None else f"{monto:,.2f}"
+
+
+# --- Fechas --------------------------------------------------------------
+# Formato ÚNICO de fecha en toda la app (México). Si algún día cambia, se
+# cambia aquí y en CampoFecha.
+FORMATO_FECHA = "%d/%m/%Y"
+_FECHA_MIN = datetime(1990, 1, 1)
+_FECHA_MAX = datetime(2100, 12, 31)
+
+
+def parse_fecha(texto: str | None) -> "datetime | None":
+    """Convierte 'DD/MM/AAAA' a datetime (None si vacío o inválido)."""
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    for fmt in (FORMATO_FECHA, "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(texto, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def fmt_fecha(fecha: "datetime | None") -> str:
+    return fecha.strftime(FORMATO_FECHA) if fecha else ""
+
+
+class CampoFecha:
+    """Campo de fecha con SELECCIÓN POR CALENDARIO (estándar del proyecto).
+
+    Estándar acordado: TODAS las fechas de la app se capturan con calendario, no
+    tecleadas. Este componente encapsula ese comportamiento para reusarlo:
+
+        f = CampoFecha(page, "Fecha de adquisición", valor="01/07/2026")
+        columna.controls.append(f.control)     # se coloca en la UI
+        ...                                     # más tarde:
+        texto = f.value                         # 'DD/MM/AAAA' (o '')
+
+    Visualmente es un campo de solo lectura (no se puede teclear) con un ícono de
+    calendario; al pulsarlo abre el DatePicker de Material en español. Expone
+    `.value` (str 'DD/MM/AAAA') igual que un TextField, para que el código que lo
+    consume no necesite un caso especial.
+    """
+
+    def __init__(self, page, label: str, valor: str = "", on_change=None,
+                 dense: bool = True):
+        self.page = page
+        self._on_change = on_change
+        self._campo = ft.TextField(
+            label=label, value=valor or "", read_only=True, dense=dense,
+            hint_text="DD/MM/AAAA",
+            suffix=ft.IconButton(
+                icon=ft.Icons.CALENDAR_MONTH, icon_size=20,
+                tooltip="Elegir fecha", on_click=self._abrir))
+
+    @property
+    def control(self) -> ft.Control:
+        return self._campo
+
+    @property
+    def value(self) -> str:
+        return self._campo.value or ""
+
+    @value.setter
+    def value(self, v: str) -> None:
+        self._campo.value = v or ""
+
+    def _abrir(self, _e=None) -> None:
+        selector = ft.DatePicker(
+            value=parse_fecha(self._campo.value),
+            first_date=_FECHA_MIN, last_date=_FECHA_MAX,
+            locale=ft.Locale("es", "MX"),
+            help_text="Selecciona la fecha", cancel_text="Cancelar",
+            confirm_text="Aceptar", on_change=self._elegido)
+        self.page.show_dialog(selector)
+
+    def _elegido(self, e) -> None:
+        fecha = getattr(e.control, "value", None)
+        if not fecha:
+            return
+        self._campo.value = fmt_fecha(fecha)
+        try:
+            self._campo.update()
+        except (RuntimeError, AssertionError):
+            pass
+        if callable(self._on_change):
+            self._on_change(self._campo.value)

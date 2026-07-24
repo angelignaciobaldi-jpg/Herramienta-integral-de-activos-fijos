@@ -22,7 +22,7 @@ import flet as ft
 
 from core import db
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
-from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE
+from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE, CampoFecha
 
 _ANCHO = 620
 _ALTO_CAMPOS = 420
@@ -119,7 +119,8 @@ class DialogoCapturaActivo:
             for campo in campos:
                 ctrl = self._control_para(campo, self._valor_inicial(campo, datos))
                 self._controles[campo.clave] = (campo, ctrl)
-                filas.append(ctrl)
+                # CampoFecha es un envoltorio: en la UI va su .control.
+                filas.append(ctrl.control if isinstance(ctrl, CampoFecha) else ctrl)
             secciones.append(
                 ft.Column(
                     [ft.Text(grupo, size=13, weight=ft.FontWeight.BOLD,
@@ -175,8 +176,8 @@ class DialogoCapturaActivo:
                                 hint_text="Catálogo del SIPP (se busca por nombre)",
                                 data=campo.clave)
         if campo.control == "date":
-            return ft.TextField(label=etiqueta, value=valor, dense=True,
-                                hint_text="DD/MM/AAAA", data=campo.clave)
+            # Estándar del proyecto: las fechas se eligen por calendario.
+            return CampoFecha(self.page, etiqueta, valor)
         if campo.control == "number":
             return ft.TextField(label=etiqueta, value=valor, dense=True,
                                 hint_text="0.00", data=campo.clave)
