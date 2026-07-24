@@ -46,3 +46,6 @@ descargas/
 
 # Inventarios reales en Excel (pesados y con datos del negocio)
 *.xlsx
+
+# Imágenes extraídas de los ZIP de levantamiento (datos reales)
+imagenes_levantamiento/

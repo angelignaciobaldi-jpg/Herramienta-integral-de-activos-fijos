@@ -26,7 +26,7 @@ import os
 
 import flet as ft
 
-from core import credenciales, db
+from core import archivos, credenciales, db
 from core.proveedor_activos import proveedor_por_defecto
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
@@ -121,6 +121,10 @@ class SeccionRegistroActivos:
                                 on_click=self._subir_archivos),
                 ft.OutlinedButton("Subir carpeta", icon=ft.Icons.FOLDER_OPEN,
                                   on_click=self._subir_carpeta),
+                ft.OutlinedButton("Subir ZIP", icon=ft.Icons.FOLDER_ZIP,
+                                  tooltip="Carpeta comprimida del levantamiento: "
+                                          "se extrae y se procesa igual",
+                                  on_click=self._subir_zip),
                 ft.OutlinedButton("Carga masiva (Excel)", icon=ft.Icons.TABLE_VIEW,
                                   tooltip="Importa un inventario completo desde Excel",
                                   on_click=self.dialogo_carga.abrir),
@@ -579,16 +583,14 @@ class SeccionRegistroActivos:
         self._registrar_imagenes([(a.name, a.path) for a in archivos])
 
     async def _subir_carpeta(self, _e=None) -> None:
+        """Carga una carpeta de imágenes, incluyendo sus SUBCARPETAS (los
+        levantamientos suelen venir organizados por área)."""
         carpeta = await self.app.picker.get_directory_path(
             dialog_title="Selecciona la carpeta con las imágenes")
         if not carpeta:
             return
         try:
-            entradas = [
-                (nombre, os.path.join(carpeta, nombre))
-                for nombre in sorted(os.listdir(carpeta))
-                if os.path.splitext(nombre)[1].lower().lstrip(".") in IMG_EXT
-            ]
+            entradas = archivos.listar_imagenes(carpeta)
         except OSError as exc:
             self.app.avisar(f"No se pudo leer la carpeta: {exc}", ROJO)
             return
@@ -596,6 +598,33 @@ class SeccionRegistroActivos:
             self.app.avisar("La carpeta no contiene imágenes compatibles.", NARANJA)
             return
         self._registrar_imagenes(entradas)
+
+    async def _subir_zip(self, _e=None) -> None:
+        """Carga un levantamiento comprimido (.zip): lo extrae y sigue el proceso
+        normal. Las imágenes se guardan en la carpeta de datos de la app para que
+        se puedan seguir abriendo desde la tabla."""
+        seleccion = await self.app.picker.pick_files(
+            dialog_title="Selecciona el ZIP del levantamiento",
+            allowed_extensions=["zip"], allow_multiple=False)
+        if not seleccion:
+            return
+        self._set_cargando(True, f"Extrayendo «{seleccion[0].name}»…")
+        try:
+            carpeta, extraidas = await asyncio.to_thread(
+                archivos.extraer_zip, seleccion[0].path)
+        except archivos.ErrorArchivo as exc:
+            self._set_cargando(False)
+            self.app.avisar(str(exc), ROJO)
+            return
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            self._set_cargando(False)
+            self.app.avisar(f"No se pudo procesar el ZIP: {exc}", ROJO)
+            return
+        self._set_cargando(False)
+        if not extraidas:
+            self.app.avisar("El ZIP no contiene imágenes compatibles.", NARANJA)
+            return
+        self._registrar_imagenes(archivos.listar_imagenes(carpeta))
 
     def _registrar_imagenes(self, entradas: list[tuple[str, str]]) -> None:
         """Da de alta un registro por imagen (parseando su nombre) etiquetándolo con
