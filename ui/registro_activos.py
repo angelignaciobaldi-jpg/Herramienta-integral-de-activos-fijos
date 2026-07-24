@@ -223,8 +223,9 @@ class SeccionRegistroActivos:
                 on_click=self._iniciar_registro_sipp)
         elif self._tab == db.EST_DADO_ALTA:
             self._barra_rpa.content = ft.FilledButton(
-                "Realizar modificación en SIPP", icon=ft.Icons.EDIT_NOTE, disabled=True,
-                tooltip="Disponible en Fase 2 (RPA de modificación)")
+                "Realizar modificación en SIPP", icon=ft.Icons.EDIT_NOTE,
+                tooltip="Reenvía al SIPP los activos que editaste después de darlos de alta",
+                on_click=self._modificar_en_sipp)
         else:
             self._barra_rpa.content = None
 
@@ -263,18 +264,22 @@ class SeccionRegistroActivos:
         # DropdownM2 se expande al ancho de la columna y se ve distinto a los
         # TextField. El texto de los TextField se centra (text_align).
         _W, _H, _PAD = 145, 38, 8
+        _alta = r.estatus_registro == db.EST_DADO_ALTA  # editar => marcar modificado
         emp_ctrl = ft.DropdownM2(
             value=r.empresa or None, dense=True, text_size=12, content_padding=_PAD,
             options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS],
-            on_change=lambda e, i=r.id: self._set_ubic(i, empresa=e.control.value or ""))
+            on_change=lambda e, i=r.id, a=_alta: self._set_ubic(
+                i, empresa=e.control.value or "", ya_de_alta=a))
         suc_ctrl = ft.TextField(
             value=r.sucursal or "", dense=True, text_size=12, content_padding=_PAD,
             text_align=ft.TextAlign.CENTER,
-            on_blur=lambda e, i=r.id: self._set_ubic(i, sucursal=(e.control.value or "").strip()))
+            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
+                i, sucursal=(e.control.value or "").strip(), ya_de_alta=a))
         dep_ctrl = ft.TextField(
             value=r.departamento or "", dense=True, text_size=12, content_padding=_PAD,
             text_align=ft.TextAlign.CENTER,
-            on_blur=lambda e, i=r.id: self._set_ubic(i, departamento=(e.control.value or "").strip()))
+            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
+                i, departamento=(e.control.value or "").strip(), ya_de_alta=a))
         emp = ft.Container(emp_ctrl, width=_W, height=_H)
         suc = ft.Container(suc_ctrl, width=_W, height=_H)
         dep = ft.Container(dep_ctrl, width=_W, height=_H)
@@ -311,11 +316,17 @@ class SeccionRegistroActivos:
         ])
 
     def _set_ubic(self, id_lev: int, empresa: "str | None" = None,
-                  sucursal: "str | None" = None, departamento: "str | None" = None) -> None:
+                  sucursal: "str | None" = None, departamento: "str | None" = None,
+                  ya_de_alta: bool = False) -> None:
         """Persiste la edición de empresa/sucursal/departamento de una fila. No
-        reconstruye la tabla (conserva foco y scroll durante la captura)."""
+        reconstruye la tabla (conserva foco y scroll durante la captura).
+
+        Si el activo ya está dado de alta en el SIPP, lo marca como MODIFICADO
+        para que el RPA de modificación lo reenvíe al portal."""
         db.actualizar_ubicacion_levantamiento(
             id_lev, empresa=empresa, sucursal=sucursal, departamento=departamento)
+        if ya_de_alta:
+            db.actualizar_datos_levantamiento(id_lev, modificado=True)
 
     def _actualizar_conteos(self) -> None:
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
@@ -602,6 +613,122 @@ class SeccionRegistroActivos:
                 ROJO, duracion=9000)
         else:
             self.app.avisar(f"{exitosos} activo(s) registrado(s) en el SIPP.", VERDE)
+
+    # --------------------------------------------- RPA: modificación en SIPP
+    @staticmethod
+    def _a_ng_model_edicion(ng_model: str) -> str:
+        """Traduce el localizador del ALTA al del formulario de EDICIÓN del SIPP:
+        filtrosAgregar.X -> filtrosEditar.X  y  FH_X -> FH_X_EDITAR."""
+        if ng_model.startswith("filtrosAgregar."):
+            return ng_model.replace("filtrosAgregar.", "filtrosEditar.", 1)
+        if ng_model.startswith("FH_") and not ng_model.endswith("_EDITAR"):
+            return ng_model + "_EDITAR"
+        return ng_model
+
+    def _payload_modificacion(self, r: "db.Levantamiento") -> tuple:
+        """Igual que _payload_alta pero con los localizadores del formulario de
+        edición."""
+        tipo, campos, detalles = self._payload_alta(r)
+        campos_edicion = [(self._a_ng_model_edicion(ng), v, c) for ng, v, c in campos]
+        return tipo, campos_edicion, detalles
+
+    async def _modificar_en_sipp(self, _e=None) -> None:
+        """Reenvía al SIPP (vía RPA) los activos dados de alta que fueron EDITADOS
+        en la herramienta (marca `modificado`)."""
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+        pendientes = [r for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                      if r.modificado and r.id_tipo_activo is not None]
+        if not pendientes:
+            self.app.avisar(
+                "No hay cambios por enviar. Edita un activo dado de alta (con el "
+                "botón de captura 📋 o sus celdas) y vuelve a intentar.", NARANJA)
+            return
+
+        total = len(pendientes)
+        bucle = BucleRpa()
+        ctrl = ControlRpa(bucle.loop)
+        ui_loop = asyncio.get_running_loop()
+        txt = ft.Text(f"Preparando… (0/{total})", size=13)
+        barra = ft.ProgressBar(value=0)
+        dlg = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Aplicando modificaciones en el SIPP"),
+            content=ft.Container(
+                ft.Column([txt, barra,
+                           ft.Text("Se abrirá un navegador; no lo cierres.",
+                                   size=11, color=GRIS)], tight=True, spacing=12),
+                width=420),
+            actions=[ft.TextButton("Detener", on_click=lambda _e: ctrl.detener())],
+        )
+        self.page.show_dialog(dlg)
+        self.page.update()
+
+        def avance(i: int, nombre: str) -> None:
+            def aplicar() -> None:
+                txt.value = f"({i}/{total}) {nombre}"
+                barra.value = i / total
+                try:
+                    dlg.update()
+                except (RuntimeError, AssertionError):
+                    pass
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        exitosos, fallidos, omitidos = 0, [], []
+
+        async def flujo() -> None:
+            nonlocal exitosos
+            async with SesionSipp(headless=False) as sipp:
+                await sipp.login(usuario, contrasena)
+                primero = pendientes[0]
+                if primero.empresa and primero.sucursal:
+                    try:
+                        await sipp.seleccionar_empresa_sucursal(
+                            primero.empresa, primero.sucursal)
+                    except ErrorSipp as exc:
+                        fallidos.append(f"Selección de empresa/sucursal: {exc}")
+                for i, r in enumerate(pendientes, 1):
+                    await ctrl.punto_control()
+                    avance(i, r.nombre_insumo)
+                    _tipo, campos, detalles = self._payload_modificacion(r)
+                    try:
+                        no_aplicados = await sipp.modificar_activo(
+                            r.no_serie, campos, detalles)
+                        db.actualizar_datos_levantamiento(r.id, modificado=False)
+                        exitosos += 1
+                        if no_aplicados:
+                            omitidos.append(f"{r.nombre_insumo}: {len(no_aplicados)} campo(s)")
+                    except ErrorSipp as exc:
+                        fallidos.append(f"{r.nombre_insumo} ({r.no_serie}): {exc}")
+
+        detenido = False
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        except RpaDetenido:
+            detenido = True
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            fallidos.append(str(exc))
+        finally:
+            bucle.cerrar()
+            self.page.pop_dialog()
+            self._refrescar()
+
+        if detenido:
+            self.app.avisar(f"Proceso detenido. {exitosos} activo(s) actualizado(s).",
+                            NARANJA)
+        elif fallidos:
+            self.app.avisar(
+                f"{exitosos} actualizado(s), {len(fallidos)} con error: {fallidos[0]}",
+                ROJO, duracion=9000)
+        elif omitidos:
+            self.app.avisar(
+                f"{exitosos} actualizado(s). Sin aplicar (no existen en edición): "
+                + "; ".join(omitidos[:3]), NARANJA, duracion=9000)
+        else:
+            self.app.avisar(f"{exitosos} activo(s) actualizado(s) en el SIPP.", VERDE)
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando

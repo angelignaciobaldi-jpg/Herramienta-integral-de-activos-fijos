@@ -39,6 +39,12 @@ TIPOS_ACTIVO: dict[int, str] = {
     12: "Activos Intangibles",
 }
 
+# Mapeo inverso nombre -> id. Útil porque en la interfaz los combos se manejan
+# por NOMBRE (es lo que ve el usuario y lo que el RPA busca en el SIPP), pero se
+# persiste el id del tipo.
+ID_POR_NOMBRE: dict[str, int] = {v: k for k, v in TIPOS_ACTIVO.items()}
+
+
 # --- Situación del activo (id -> nombre) --------------------------------------
 SITUACIONES: dict[int, str] = {
     0: "Activo Fijo",

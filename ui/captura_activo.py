@@ -21,7 +21,7 @@ from __future__ import annotations
 import flet as ft
 
 from core import db
-from core.tipos_activo import TIPOS_ACTIVO, campos_de_tipo
+from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE
 
 _ANCHO = 620
@@ -41,10 +41,13 @@ class DialogoCapturaActivo:
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
+        # OJO: DropdownM2 muestra el `key` de la opción, no el `text`. Por eso el
+        # key es el NOMBRE del tipo (lo que ve el usuario y lo que el RPA busca en
+        # el combo del SIPP); el id se resuelve con ID_POR_NOMBRE al guardar.
         self.dd_tipo = ft.DropdownM2(
             label="Tipo de activo *", dense=True, width=_ANCHO - 40,
-            options=[ft.dropdownm2.Option(key=str(i), text=n)
-                     for i, n in TIPOS_ACTIVO.items()],
+            options=[ft.dropdownm2.Option(key=n, text=n)
+                     for n in TIPOS_ACTIVO.values()],
             on_change=self._cambiar_tipo)
         self._subtitulo = ft.Text("", size=12, color=GRIS)
         self._area_campos = ft.Column(
@@ -74,8 +77,7 @@ class DialogoCapturaActivo:
         self._registro = registro
         self._subtitulo.value = (
             f"{registro.nombre_insumo} · Serie: {registro.no_serie or '—'}")
-        self.dd_tipo.value = (
-            str(registro.id_tipo_activo) if registro.id_tipo_activo is not None else None)
+        self.dd_tipo.value = nombre_tipo(registro.id_tipo_activo) or None
         self._render_campos()
         self.page.show_dialog(self.dialogo)
 
@@ -85,10 +87,8 @@ class DialogoCapturaActivo:
 
     # -------------------------------------------------- render dinámico
     def _tipo_actual(self) -> "int | None":
-        try:
-            return int(self.dd_tipo.value) if self.dd_tipo.value else None
-        except (TypeError, ValueError):
-            return None
+        """id del tipo seleccionado (el combo maneja NOMBRES; se traduce a id)."""
+        return ID_POR_NOMBRE.get(self.dd_tipo.value) if self.dd_tipo.value else None
 
     def _render_campos(self) -> None:
         """Arma los campos del tipo elegido, agrupados, precargando valores."""
@@ -158,8 +158,10 @@ class DialogoCapturaActivo:
         if campo.control == "select":
             opciones = None
             if campo.opciones:
-                opciones = [ft.dropdownm2.Option(key=str(k), text=str(v))
-                            for k, v in campo.opciones.items()]
+                # El key es la ETIQUETA (DropdownM2 muestra el key) y además es el
+                # texto que el RPA buscará en el combo equivalente del SIPP.
+                opciones = [ft.dropdownm2.Option(key=str(v), text=str(v))
+                            for v in campo.opciones.values()]
             elif "empresa" in campo.clave.lower():
                 # Catálogo local del Grupo Petroil para los campos de empresa.
                 opciones = [ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS]
@@ -199,8 +201,13 @@ class DialogoCapturaActivo:
                 "Faltan campos obligatorios: " + ", ".join(faltantes[:5])
                 + ("…" if len(faltantes) > 5 else ""), ROJO)
             return
+        # Si el activo YA está dado de alta en el SIPP, editar sus datos lo deja
+        # marcado como "modificado": así el RPA de modificación sabe cuáles
+        # reenviar al portal.
+        ya_de_alta = self._registro.estatus_registro == db.EST_DADO_ALTA
         db.actualizar_datos_levantamiento(
-            self._registro.id, id_tipo_activo=tipo, datos=valores)
+            self._registro.id, id_tipo_activo=tipo, datos=valores,
+            modificado=True if ya_de_alta else None)
         self.page.pop_dialog()
         self.app.avisar("Datos del activo guardados.", VERDE)
         if callable(self.al_guardar):

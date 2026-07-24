@@ -561,6 +561,72 @@ class SesionSipp:
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
 
+    async def modificar_activo(self, no_serie: str, campos: list,
+                               detalles: "dict | None" = None) -> list:
+        """Busca un activo por No. de serie, abre su edición, aplica los campos y
+        guarda. Devuelve la lista de campos que NO se pudieron aplicar (el
+        formulario de edición no expone exactamente los mismos que el alta, así que
+        un campo ausente no aborta el resto).
+
+        `campos`: [(ng_model, valor, control)] ya en su forma de EDICIÓN
+        (filtrosEditar.* / FH_*_EDITAR)."""
+        page = self._exigir_pagina()
+        filas = await self.buscar_serie_en_listado(no_serie)
+        if filas == 0:
+            raise ErrorSipp(
+                f"No se encontró en el listado un activo con la serie '{no_serie}'.")
+
+        # Abrir la edición de la fila encontrada. El portal usa un botón/ícono de
+        # acción por fila; se prueban varios localizadores y, si ninguno aparece,
+        # se guarda diagnóstico para afinar el selector con el DOM real.
+        abrir = await self._primer_visible(
+            [
+                page.locator("[ng-click*='confEditarActivo']"),
+                page.locator("[ng-click*='editarActivo']"),
+                page.locator("[ng-click*='Editar']"),
+                page.locator(".ngRow [title*='ditar']"),
+            ],
+            "acción de editar del listado de activos")
+        await self._click_seguro(abrir)
+
+        try:
+            await page.locator("[ng-model='filtrosEditar.nu_Serie']").first.wait_for(
+                state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("abrir_edicion_activo")
+            raise ErrorSipp(
+                "No se abrió el formulario de edición del activo.") from exc
+
+        no_aplicados = []
+        for ng_model, valor, control in campos:
+            if not valor or not ng_model:
+                continue
+            try:
+                if control == "select":
+                    try:
+                        await self.set_combo(ng_model, valor)
+                    except ErrorSipp:
+                        await self.set_input(ng_model, valor)
+                elif control == "date":
+                    await self.set_fecha(ng_model, valor)
+                else:
+                    await self.set_input(ng_model, valor)
+            except Exception:  # noqa: BLE001 — campo ausente en edición: se reporta
+                no_aplicados.append(ng_model)
+
+        if detalles:
+            await self.llenar_campos_detalle(detalles)
+
+        guardar = await self._primer_visible(
+            [
+                page.locator("[ng-click*='guardarActivoFijoEditar()']"),
+                page.get_by_role("button", name=re.compile(r"^\s*guardar\s*$", re.I)),
+            ],
+            "botón Guardar de la edición del activo")
+        await self._click_seguro(guardar)
+        await self.confirmar_aviso_si_hay(3_000)
+        return no_aplicados
+
     # --------------------------------------------------------- utilidades
     async def _click_seguro(self, locator: Locator) -> None:
         """Clic robusto: normal y, si algo lo intercepta (overlay/flotante), por DOM."""
