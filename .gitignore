@@ -43,3 +43,6 @@ Paginas html/
 # Documentos de prueba (facturas / resguardos con datos reales)
 Documentos de pruebas/
 descargas/
+
+# Inventarios reales en Excel (pesados y con datos del negocio)
+*.xlsx

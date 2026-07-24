@@ -58,6 +58,79 @@ def _conectar() -> sqlite3.Connection:
     return con
 
 
+# Esquema de la tabla del levantamiento. La CLAVE ÚNICA es `clave_unica`, que
+# unifica los dos orígenes de datos (ver clave_levantamiento).
+_SQL_CREAR_LEVANTAMIENTO = """
+    CREATE TABLE IF NOT EXISTS {tabla} (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        empresa        TEXT,
+        sucursal       TEXT,
+        departamento   TEXT,
+        nombre_insumo  TEXT    NOT NULL,
+        etiqueta       TEXT,
+        no_serie       TEXT,
+        responsable    TEXT,
+        ubicacion      TEXT,
+        ruta_imagen    TEXT,
+        estatus_registro TEXT  NOT NULL DEFAULT 'pendiente',
+        id_tipo_activo INTEGER,
+        datos_json     TEXT,
+        factura        TEXT,
+        id_activo_sipp TEXT,
+        modificado     INTEGER NOT NULL DEFAULT 0,
+        clave_unica    TEXT    NOT NULL UNIQUE,
+        creado_en      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+    )
+"""
+
+
+def clave_levantamiento(nombre_insumo: str, etiqueta: str = "",
+                        no_serie: str = "") -> str:
+    """Clave única de un registro del levantamiento.
+
+    Unifica los dos orígenes de datos de la herramienta:
+      - Carga masiva de inventario -> la ETIQUETA (número de inventario) es el
+        identificador real del activo en el SIPP.
+      - Carga de imágenes del levantamiento físico -> no hay etiqueta, así que se
+        identifica por insumo + serie (como venía funcionando).
+    """
+    etiqueta = (etiqueta or "").strip()
+    if etiqueta:
+        return "ETQ:" + etiqueta
+    return "INS:%s|%s" % ((nombre_insumo or "").strip().upper(),
+                          (no_serie or "").strip().upper())
+
+
+def _migrar_levantamiento_a_clave_unica(con: sqlite3.Connection,
+                                        existentes: set) -> None:
+    """Reconstruye `levantamiento` con el esquema nuevo conservando los datos.
+
+    SQLite no permite cambiar una restricción UNIQUE con ALTER TABLE, así que se
+    crea la tabla nueva, se copian las filas (calculando su clave_unica) y se
+    reemplaza. Las filas que colisionen en la nueva clave se descartan (INSERT OR
+    IGNORE): serían duplicados reales del mismo activo."""
+    con.execute("DROP TABLE IF EXISTS _levantamiento_nuevo")
+    con.execute(_SQL_CREAR_LEVANTAMIENTO.format(tabla="_levantamiento_nuevo"))
+    # Solo se copian las columnas que existan en la tabla vieja.
+    comunes = [c for c in (
+        "id", "empresa", "sucursal", "departamento", "nombre_insumo", "no_serie",
+        "ruta_imagen", "estatus_registro", "id_tipo_activo", "datos_json",
+        "factura", "id_activo_sipp", "modificado", "creado_en",
+    ) if c in existentes]
+    filas = con.execute(f"SELECT {', '.join(comunes)} FROM levantamiento").fetchall()
+    for fila in filas:
+        d = dict(fila)
+        d["clave_unica"] = clave_levantamiento(
+            d.get("nombre_insumo", ""), "", d.get("no_serie", ""))
+        cols = list(d.keys())
+        con.execute(
+            f"INSERT OR IGNORE INTO _levantamiento_nuevo ({', '.join(cols)}) "
+            f"VALUES ({', '.join(['?'] * len(cols))})",
+            [d[c] for c in cols])
+    con.execute("DROP TABLE levantamiento")
+    con.execute("ALTER TABLE _levantamiento_nuevo RENAME TO levantamiento")
+
+
 def inicializar() -> None:
     """Crea la tabla de activos si no existe y aplica migraciones incrementales."""
     with _conectar() as con:
@@ -89,33 +162,21 @@ def inicializar() -> None:
                 con.execute(f"ALTER TABLE activos ADD COLUMN {col} {tipos.get(col, 'TEXT')}")
 
         # Tabla del LEVANTAMIENTO (imágenes cargadas y su estatus vs. el SIPP).
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS levantamiento (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                empresa        TEXT,
-                sucursal       TEXT,
-                departamento   TEXT,
-                nombre_insumo  TEXT    NOT NULL,
-                no_serie       TEXT    NOT NULL,
-                ruta_imagen    TEXT,
-                estatus_registro TEXT  NOT NULL DEFAULT 'pendiente',
-                id_tipo_activo INTEGER,
-                datos_json     TEXT,
-                factura        TEXT,
-                id_activo_sipp TEXT,
-                modificado     INTEGER NOT NULL DEFAULT 0,
-                creado_en      TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-                UNIQUE (no_serie, nombre_insumo)
-            )
-            """
-        )
+        con.execute(_SQL_CREAR_LEVANTAMIENTO.format(tabla="levantamiento"))
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
-        tipos_lev = {"id_tipo_activo": "INTEGER", "modificado": "INTEGER"}
-        for col in _COLS_LEV:
-            if col not in existentes_lev:
-                con.execute(
-                    f"ALTER TABLE levantamiento ADD COLUMN {col} {tipos_lev.get(col, 'TEXT')}")
+        if existentes_lev and "clave_unica" not in existentes_lev:
+            # Esquema viejo: la clave única era (no_serie, nombre_insumo), que no
+            # sirve para el inventario masivo (el 82% de los activos NO tiene
+            # serie y la clave real es la ETIQUETA). SQLite no permite cambiar un
+            # UNIQUE con ALTER, así que se reconstruye la tabla conservando datos.
+            _migrar_levantamiento_a_clave_unica(con, existentes_lev)
+        else:
+            tipos_lev = {"id_tipo_activo": "INTEGER", "modificado": "INTEGER"}
+            for col in _COLS_LEV:
+                if col not in existentes_lev:
+                    con.execute(
+                        f"ALTER TABLE levantamiento ADD COLUMN {col} "
+                        f"{tipos_lev.get(col, 'TEXT')}")
 
 
 class InventarioDuplicado(Exception):
@@ -174,7 +235,10 @@ class Levantamiento:
     sucursal: str | None
     departamento: str | None
     nombre_insumo: str
-    no_serie: str
+    etiqueta: str | None
+    no_serie: str | None
+    responsable: str | None
+    ubicacion: str | None
     ruta_imagen: str | None
     estatus_registro: str
     id_tipo_activo: int | None
@@ -182,7 +246,13 @@ class Levantamiento:
     factura: str | None
     id_activo_sipp: str | None
     modificado: int
+    clave_unica: str
     creado_en: str
+
+    def identificador(self) -> str:
+        """Con qué se busca este activo en el SIPP: la etiqueta (número de
+        inventario) y, si no tiene, el número de serie."""
+        return (self.etiqueta or "").strip() or (self.no_serie or "").strip()
 
     def datos(self) -> dict:
         """Campos de alta capturados (datos_json deserializado; {} si vacío)."""
@@ -198,29 +268,70 @@ class Levantamiento:
 # Columnas del levantamiento (fuente única para migraciones incrementales).
 _COLS_LEV = [
     "empresa", "sucursal", "departamento",
-    "nombre_insumo", "no_serie", "ruta_imagen", "estatus_registro",
+    "nombre_insumo", "etiqueta", "no_serie", "responsable", "ubicacion",
+    "ruta_imagen", "estatus_registro",
     "id_tipo_activo", "datos_json", "factura", "id_activo_sipp", "modificado",
 ]
 
 
-def guardar_levantamiento(nombre_insumo: str, no_serie: str,
+def guardar_levantamiento(nombre_insumo: str, no_serie: str = "",
                           ruta_imagen: str | None = None,
                           empresa: str = "", sucursal: str = "",
-                          departamento: str = "") -> int | None:
-    """Inserta un registro del levantamiento (con su empresa/sucursal/departamento).
-    Devuelve su id, o None si ya existía uno con la misma (no_serie, nombre_insumo)
-    — en tal caso se ignora (no duplica)."""
+                          departamento: str = "", etiqueta: str = "",
+                          responsable: str = "", ubicacion: str = "") -> int | None:
+    """Inserta un registro del levantamiento. Devuelve su id, o None si ya existía
+    otro con la misma clave (ver clave_levantamiento): misma ETIQUETA, o mismo
+    insumo+serie cuando no hay etiqueta. En ese caso se ignora (no duplica)."""
+    clave = clave_levantamiento(nombre_insumo, etiqueta, no_serie)
     try:
         with _conectar() as con:
             cur = con.execute(
                 """INSERT INTO levantamiento
-                   (empresa, sucursal, departamento, nombre_insumo, no_serie, ruta_imagen)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (empresa, sucursal, departamento, nombre_insumo, no_serie, ruta_imagen),
+                   (empresa, sucursal, departamento, nombre_insumo, etiqueta,
+                    no_serie, responsable, ubicacion, ruta_imagen, clave_unica)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (empresa, sucursal, departamento, nombre_insumo, etiqueta or None,
+                 no_serie, responsable, ubicacion, ruta_imagen, clave),
             )
             return cur.lastrowid
     except sqlite3.IntegrityError:
-        return None  # ya existe esa (serie, insumo): no se duplica
+        return None  # ya existe ese activo: no se duplica
+
+
+def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
+    """Inserta muchos registros del levantamiento en UNA sola transacción.
+
+    Pensado para la carga masiva desde Excel (miles de filas): abrir una conexión
+    por registro es órdenes de magnitud más lento. Los que choquen con la clave
+    única se ignoran (son el mismo activo). Devuelve (agregados, duplicados).
+
+    Cada dict acepta: nombre_insumo (obligatorio), etiqueta, no_serie,
+    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen.
+    """
+    if not registros:
+        return 0, 0
+    filas = []
+    for r in registros:
+        insumo = r.get("nombre_insumo", "")
+        etiqueta = (r.get("etiqueta") or "").strip()
+        serie = r.get("no_serie", "") or ""
+        filas.append((
+            r.get("empresa", ""), r.get("sucursal", ""), r.get("departamento", ""),
+            insumo, etiqueta or None, serie, r.get("responsable", ""),
+            r.get("ubicacion", ""), r.get("ruta_imagen"),
+            clave_levantamiento(insumo, etiqueta, serie),
+        ))
+    with _conectar() as con:
+        antes = con.execute("SELECT COUNT(*) FROM levantamiento").fetchone()[0]
+        con.executemany(
+            """INSERT OR IGNORE INTO levantamiento
+               (empresa, sucursal, departamento, nombre_insumo, etiqueta,
+                no_serie, responsable, ubicacion, ruta_imagen, clave_unica)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            filas)
+        despues = con.execute("SELECT COUNT(*) FROM levantamiento").fetchone()[0]
+    agregados = despues - antes
+    return agregados, len(filas) - agregados
 
 
 def actualizar_ubicacion_levantamiento(id_lev: int, empresa: str | None = None,

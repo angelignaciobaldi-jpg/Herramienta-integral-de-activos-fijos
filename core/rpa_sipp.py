@@ -482,6 +482,26 @@ class SesionSipp:
             "No. de serie del listado).",
             "catalogo_activos")
 
+    async def buscar_en_listado(self, valor: str, por_etiqueta: bool = False) -> int:
+        """Filtra el listado del catálogo por No. de serie o por ETIQUETA (número
+        de inventario) y devuelve cuántas filas resultaron (0 = no está dado de
+        alta). En los inventarios reales la mayoría de los activos no tiene serie,
+        así que la etiqueta es el identificador habitual."""
+        campo = ("js_filtroListado.de_Etiqueta" if por_etiqueta
+                 else "js_filtroListado.de_SerieActivo")
+        page = self._exigir_pagina()
+        await self.ir_a_catalogo_activos()
+        await self.set_input(campo, valor)
+        boton = await self._primer_visible(
+            [
+                page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
+                page.locator("button.btn-buscar25p"),
+            ],
+            "botón de buscar del listado de activos")
+        await self._click_seguro(boton)
+        await page.wait_for_timeout(2_500)  # la grid recarga por AJAX
+        return await self._contar_filas_grid()
+
     async def buscar_serie_en_listado(self, no_serie: str) -> int:
         """Filtra el listado del catálogo por No. de serie y devuelve cuántas filas
         resultaron (0 = el activo NO está dado de alta)."""

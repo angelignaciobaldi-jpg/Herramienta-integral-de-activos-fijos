@@ -31,6 +31,7 @@ from core.proveedor_activos import proveedor_por_defecto
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
 from core.tipos_activo import campos_de_tipo, nombre_tipo
 from ui.captura_activo import DialogoCapturaActivo
+from ui.carga_masiva import DialogoCargaMasiva
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
 
@@ -46,6 +47,9 @@ _ESTATUS_UI = {
 
 # Pestañas: clave interna -> etiqueta base.
 _TAB_TODOS = "todos"
+
+# Tamaños de página disponibles (el primero es el de arranque).
+_POR_PAGINA = [100, 250, 500]
 
 
 def parsear_nombre(nombre_archivo: str) -> tuple[str, str]:
@@ -69,9 +73,23 @@ class SeccionRegistroActivos:
         self.proveedor = proveedor_por_defecto()
         self._tab = _TAB_TODOS
         self._seleccionados: set[int] = set()
+        # Paginación: un inventario completo son miles de activos y cada fila
+        # lleva controles editables; pintarlos todos vuelve la pantalla inusable.
+        self._pagina = 0
+        self._por_pagina = _POR_PAGINA[0]
         # Formulario dinámico de captura por tipo de activo (prepara el alta en SIPP).
         self.dialogo_captura = DialogoCapturaActivo(app, al_guardar=self._refrescar)
+        # Carga masiva desde Excel: toma el contexto de los selectores de arriba.
+        self.dialogo_carga = DialogoCargaMasiva(
+            app, contexto=self._contexto_actual, al_terminar=self._refrescar)
         self._construir()
+
+    def _contexto_actual(self) -> tuple:
+        """(empresa, sucursal, departamento) de los selectores, para etiquetar lo
+        que se cargue (el Excel no trae esos datos)."""
+        return (self.dd_empresa.value or "",
+                (self.tf_sucursal.value or "").strip(),
+                (self.tf_departamento.value or "").strip())
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
@@ -101,6 +119,9 @@ class SeccionRegistroActivos:
                                 on_click=self._subir_archivos),
                 ft.OutlinedButton("Subir carpeta", icon=ft.Icons.FOLDER_OPEN,
                                   on_click=self._subir_carpeta),
+                ft.OutlinedButton("Carga masiva (Excel)", icon=ft.Icons.TABLE_VIEW,
+                                  tooltip="Importa un inventario completo desde Excel",
+                                  on_click=self.dialogo_carga.abrir),
                 ft.OutlinedButton("Buscar en SIPP", icon=ft.Icons.SEARCH,
                                   on_click=self._buscar),
                 self.progreso,
@@ -143,20 +164,38 @@ class SeccionRegistroActivos:
             spacing=6,
         )
 
-        # Barra contextual de RPA (según la pestaña activa). Fase 2: deshabilitada.
+        # Barra contextual de RPA (según la pestaña activa).
         self._barra_rpa = ft.Container()
+
+        # Paginación (imprescindible con inventarios de miles de activos).
+        self._lbl_pagina = ft.Text("", size=12, color=GRIS)
+        self._btn_prev = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, icon_size=20,
+                                       tooltip="Página anterior",
+                                       on_click=lambda _e: self._mover_pagina(-1))
+        self._btn_next = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, icon_size=20,
+                                       tooltip="Página siguiente",
+                                       on_click=lambda _e: self._mover_pagina(1))
+        self._dd_por_pagina = ft.DropdownM2(
+            value=str(self._por_pagina), dense=True, width=90, text_size=12,
+            options=[ft.dropdownm2.Option(key=str(n), text=str(n)) for n in _POR_PAGINA],
+            on_change=self._cambiar_por_pagina)
+        self.barra_paginacion = ft.Row(
+            [self._lbl_pagina, self._btn_prev, self._btn_next,
+             ft.Text("por página:", size=12, color=GRIS), self._dd_por_pagina],
+            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         # Tabla responsiva.
         self._chk_general = ft.Checkbox(value=False, on_change=self._on_chk_general)
         columnas = [
             ColumnaTabla("", 4, encabezado_control=self._chk_general, ancho_min_px=40),
-            ColumnaTabla("Empresa", 14, ancho_min_px=155),
-            ColumnaTabla("Sucursal", 14, ancho_min_px=155),
-            ColumnaTabla("Departamento", 14, ancho_min_px=155),
-            ColumnaTabla("Nombre insumo", 19, ancho_min_px=140),
-            ColumnaTabla("No. de serie", 13, ancho_min_px=110),
-            ColumnaTabla("Estatus", 10, ancho_min_px=100),
-            ColumnaTabla("Acciones", 12, ancho_min_px=145),
+            ColumnaTabla("Empresa", 13, ancho_min_px=155),
+            ColumnaTabla("Sucursal", 13, ancho_min_px=155),
+            ColumnaTabla("Departamento", 13, ancho_min_px=155),
+            ColumnaTabla("Nombre insumo", 17, ancho_min_px=140),
+            ColumnaTabla("Etiqueta", 10, ancho_min_px=100),
+            ColumnaTabla("No. de serie", 10, ancho_min_px=100),
+            ColumnaTabla("Estatus", 9, ancho_min_px=95),
+            ColumnaTabla("Acciones", 11, ancho_min_px=145),
         ]
         self.tabla = TablaResponsiva(self.page, columnas)
         self._area_tabla = ft.Column([self.tabla.control], scroll=ft.ScrollMode.AUTO,
@@ -188,6 +227,7 @@ class SeccionRegistroActivos:
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Stack([self._area_tabla, self.txt_vacio], expand=True),
+                self.barra_paginacion,
             ],
             expand=True, spacing=12,
         )
@@ -209,6 +249,7 @@ class SeccionRegistroActivos:
         if clave == self._tab:
             return
         self._tab = clave
+        self._pagina = 0  # cada pestaña arranca en su primera página
         self._estilo_tabs()
         self._actualizar_barra_rpa()
         self._refrescar()
@@ -244,13 +285,52 @@ class SeccionRegistroActivos:
         # Limpia de la selección los ids que ya no existen en esta vista.
         ids_vista = {r.id for r in registros}
         self._seleccionados &= ids_vista
-        filas = [self._fila(r) for r in registros]
-        self.tabla.set_contenido(filas)
+        # Solo se pinta la PÁGINA actual: un inventario completo son miles de
+        # activos y cada fila lleva controles editables.
+        pagina = self._registros_pagina(registros)
+        self.tabla.set_contenido([self._fila(r) for r in pagina])
         self.txt_vacio.visible = not registros
         self._area_tabla.visible = bool(registros)
         self._actualizar_conteos()
-        self._sincronizar_chk_general(registros)
+        self._actualizar_paginacion(len(registros))
+        self._sincronizar_chk_general(pagina)
         self._safe_update()
+
+    # ------------------------------------------------------ paginación
+    def _registros_pagina(self, registros: list) -> list:
+        """Recorta `registros` a la página actual (ajustando si se salió de rango)."""
+        total = len(registros)
+        ultima = max(0, (total - 1) // self._por_pagina) if total else 0
+        self._pagina = min(max(0, self._pagina), ultima)
+        ini = self._pagina * self._por_pagina
+        return registros[ini:ini + self._por_pagina]
+
+    def _actualizar_paginacion(self, total: int) -> None:
+        if not total:
+            self._lbl_pagina.value = ""
+            self._btn_prev.disabled = self._btn_next.disabled = True
+            self.barra_paginacion.visible = False
+            return
+        self.barra_paginacion.visible = True
+        ini = self._pagina * self._por_pagina + 1
+        fin = min(total, (self._pagina + 1) * self._por_pagina)
+        paginas = max(1, (total + self._por_pagina - 1) // self._por_pagina)
+        self._lbl_pagina.value = (
+            f"{ini}–{fin} de {total}   (página {self._pagina + 1} de {paginas})")
+        self._btn_prev.disabled = self._pagina == 0
+        self._btn_next.disabled = self._pagina >= paginas - 1
+
+    def _mover_pagina(self, delta: int) -> None:
+        self._pagina += delta
+        self._refrescar()
+
+    def _cambiar_por_pagina(self, e) -> None:
+        try:
+            self._por_pagina = int(e.control.value)
+        except (TypeError, ValueError):
+            self._por_pagina = _POR_PAGINA[0]
+        self._pagina = 0
+        self._refrescar()
 
     def _fila(self, r: "db.Levantamiento") -> FilaDatos:
         chk = ft.Checkbox(
@@ -310,6 +390,7 @@ class SeccionRegistroActivos:
             suc,
             dep,
             r.nombre_insumo,
+            r.etiqueta or "—",
             r.no_serie or "—",
             estatus,
             acciones,
@@ -343,7 +424,8 @@ class SeccionRegistroActivos:
             self._seleccionados.add(id_lev)
         else:
             self._seleccionados.discard(id_lev)
-        self._sincronizar_chk_general(self._filas_actuales())
+        # El check general refleja la PÁGINA visible.
+        self._sincronizar_chk_general(self._registros_pagina(self._filas_actuales()))
 
     def _sincronizar_chk_general(self, registros: list) -> None:
         ids = {r.id for r in registros}
@@ -354,8 +436,8 @@ class SeccionRegistroActivos:
             pass
 
     def _on_chk_general(self, e) -> None:
-        registros = self._filas_actuales()
-        ids = {r.id for r in registros}
+        """El check del encabezado marca/desmarca solo lo visible en la página."""
+        ids = {r.id for r in self._registros_pagina(self._filas_actuales())}
         if e.control.value:
             self._seleccionados |= ids
         else:
@@ -363,8 +445,11 @@ class SeccionRegistroActivos:
         self._refrescar()
 
     def _seleccionar_todos(self, _e=None) -> None:
-        self._seleccionados |= {r.id for r in self._filas_actuales()}
+        """Selecciona TODOS los registros de la pestaña (no solo la página)."""
+        registros = self._filas_actuales()
+        self._seleccionados |= {r.id for r in registros}
         self._refrescar()
+        self.app.avisar(f"{len(registros)} registro(s) seleccionado(s).", VERDE)
 
     def _eliminar_seleccionados(self, _e=None) -> None:
         ids = list(self._seleccionados)
@@ -463,11 +548,14 @@ class SeccionRegistroActivos:
     # ------------------------------------------------------ búsqueda en SIPP
     async def _buscar(self, _e=None) -> None:
         registros = db.listar_levantamiento()
-        series = sorted({r.no_serie.strip() for r in registros if r.no_serie.strip()})
+        # Se busca por ETIQUETA (número de inventario) y, si el activo no la
+        # tiene, por su número de serie. En los inventarios reales la mayoría de
+        # los activos NO trae serie, así que la etiqueta es el identificador.
+        series = sorted({r.identificador() for r in registros if r.identificador()})
         if not series:
-            self.app.avisar("No hay números de serie que buscar.", ROJO)
+            self.app.avisar("No hay etiquetas ni números de serie que buscar.", ROJO)
             return
-        self._set_cargando(True, f"Buscando {len(series)} serie(s) en el SIPP…")
+        self._set_cargando(True, f"Buscando {len(series)} activo(s) en el SIPP…")
         try:
             resultados = await asyncio.to_thread(self.proveedor.buscar_por_serie, series)
         except NotImplementedError as exc:
@@ -478,9 +566,9 @@ class SeccionRegistroActivos:
             self._set_cargando(False)
             self.app.avisar(f"No se pudo buscar en el SIPP: {exc}", ROJO)
             return
-        # Aplica el resultado a cada registro (por su No. de serie).
+        # Aplica el resultado a cada registro (por su etiqueta o su serie).
         for r in registros:
-            serie = r.no_serie.strip()
+            serie = r.identificador()
             if not serie:
                 continue
             res = resultados.get(serie)
