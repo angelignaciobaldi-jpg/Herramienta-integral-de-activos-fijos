@@ -403,6 +403,66 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
         con.execute(f"UPDATE levantamiento SET {', '.join(sets)} WHERE id = ?", valores)
 
 
+def _filtro_sql(estatus: str | None, filtro: str) -> tuple[str, list]:
+    """Arma el WHERE compartido por las consultas paginadas del levantamiento."""
+    cond, params = [], []
+    if estatus:
+        cond.append("estatus_registro = ?")
+        params.append(estatus)
+    if filtro:
+        like = f"%{filtro.strip().lower()}%"
+        cond.append("(LOWER(nombre_insumo) LIKE ? OR LOWER(IFNULL(etiqueta,'')) LIKE ?"
+                    " OR LOWER(IFNULL(no_serie,'')) LIKE ?"
+                    " OR LOWER(IFNULL(ubicacion,'')) LIKE ?)")
+        params += [like] * 4
+    return (" WHERE " + " AND ".join(cond)) if cond else "", params
+
+
+_ORDEN_LEV = " ORDER BY creado_en DESC, id DESC"
+
+
+def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
+                                limite: int = 25, offset: int = 0) -> list[Levantamiento]:
+    """Devuelve SOLO la página pedida. Con inventarios de miles de activos,
+    materializar la tabla completa para mostrar 25 filas es el mayor costo de la
+    pantalla; aquí el filtrado y el recorte los hace SQLite."""
+    where, params = _filtro_sql(estatus, filtro)
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT * FROM levantamiento{where}{_ORDEN_LEV} LIMIT ? OFFSET ?",
+            [*params, limite, offset]).fetchall()
+    return [Levantamiento(**dict(f)) for f in filas]
+
+
+def contar_levantamiento(estatus: str | None = None, filtro: str = "") -> int:
+    """Cuántos registros cumplen el filtro (para la paginación)."""
+    where, params = _filtro_sql(estatus, filtro)
+    with _conectar() as con:
+        return con.execute(
+            f"SELECT COUNT(*) FROM levantamiento{where}", params).fetchone()[0]
+
+
+def ids_levantamiento(estatus: str | None = None, filtro: str = "") -> list[int]:
+    """Ids de todos los registros que cumplen el filtro (para 'Seleccionar todos'
+    sin traer las filas completas)."""
+    where, params = _filtro_sql(estatus, filtro)
+    with _conectar() as con:
+        return [f[0] for f in con.execute(
+            f"SELECT id FROM levantamiento{where}", params).fetchall()]
+
+
+def contar_levantamiento_por_estatus() -> dict[str, int]:
+    """Devuelve {estatus: cantidad} más 'total'. Es una sola consulta agregada:
+    con miles de registros, listar la tabla completa solo para contarla es caro."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT estatus_registro, COUNT(*) AS n FROM levantamiento "
+            "GROUP BY estatus_registro").fetchall()
+    conteos = {f["estatus_registro"]: f["n"] for f in filas}
+    conteos["total"] = sum(conteos.values())
+    return conteos
+
+
 def actualizar_tipo_lote(ids: list[int], id_tipo: int | None) -> int:
     """Asigna el mismo tipo de activo a muchos registros de una vez.
 

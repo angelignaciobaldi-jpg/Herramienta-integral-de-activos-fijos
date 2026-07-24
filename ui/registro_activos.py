@@ -48,8 +48,10 @@ _ESTATUS_UI = {
 # Pestañas: clave interna -> etiqueta base.
 _TAB_TODOS = "todos"
 
-# Tamaños de página disponibles (el primero es el de arranque).
-_POR_PAGINA = [100, 250, 500]
+# Tamaños de página disponibles (el primero es el de arranque). Se mantienen
+# bajos a propósito: cada fila lleva controles editables (el combo de Empresa
+# solo tiene ~58 opciones) y todo eso viaja al cliente en cada repintado.
+_POR_PAGINA = [25, 50, 100]
 
 
 def parsear_nombre(nombre_archivo: str) -> tuple[str, str]:
@@ -291,18 +293,13 @@ class SeccionRegistroActivos:
         """Carga inicial (la invoca el shell al arrancar) y refresco general."""
         self._refrescar()
 
-    def _filas_actuales(self) -> list["db.Levantamiento"]:
-        """Registros de la pestaña activa, aplicando el filtro de búsqueda."""
-        registros = (db.listar_levantamiento() if self._tab == _TAB_TODOS
-                     else db.listar_levantamiento_por_estatus(self._tab))
-        if not self._filtro:
-            return registros
-        f = self._filtro
-        return [r for r in registros
-                if f in (r.nombre_insumo or "").lower()
-                or f in (r.etiqueta or "").lower()
-                or f in (r.no_serie or "").lower()
-                or f in (r.ubicacion or "").lower()]
+    def _estatus_tab(self) -> "str | None":
+        """Estatus por el que filtra la pestaña activa (None = todas)."""
+        return None if self._tab == _TAB_TODOS else self._tab
+
+    def _ids_actuales(self) -> list[int]:
+        """Ids de TODO lo que cumple pestaña + filtro (sin traer las filas)."""
+        return db.ids_levantamiento(self._estatus_tab(), self._filtro)
 
     def _aplicar_filtro(self, _e=None) -> None:
         self._filtro = (self.tf_buscar.value or "").strip().lower()
@@ -315,29 +312,23 @@ class SeccionRegistroActivos:
         self._aplicar_filtro()
 
     def _refrescar(self) -> None:
-        registros = self._filas_actuales()
-        # Limpia de la selección los ids que ya no existen en esta vista.
-        ids_vista = {r.id for r in registros}
-        self._seleccionados &= ids_vista
-        # Solo se pinta la PÁGINA actual: un inventario completo son miles de
-        # activos y cada fila lleva controles editables.
-        pagina = self._registros_pagina(registros)
-        self.tabla.set_contenido([self._fila(r) for r in pagina])
-        self.txt_vacio.visible = not registros
-        self._area_tabla.visible = bool(registros)
-        self._actualizar_conteos()
-        self._actualizar_paginacion(len(registros))
-        self._sincronizar_chk_general(pagina)
-        self._safe_update()
-
-    # ------------------------------------------------------ paginación
-    def _registros_pagina(self, registros: list) -> list:
-        """Recorta `registros` a la página actual (ajustando si se salió de rango)."""
-        total = len(registros)
+        """Repinta SOLO la página actual, pidiéndosela ya recortada a SQLite."""
+        estatus, filtro = self._estatus_tab(), self._filtro
+        total = db.contar_levantamiento(estatus, filtro)
+        # Ajusta la página si quedó fuera de rango (p. ej. tras filtrar o borrar).
         ultima = max(0, (total - 1) // self._por_pagina) if total else 0
         self._pagina = min(max(0, self._pagina), ultima)
-        ini = self._pagina * self._por_pagina
-        return registros[ini:ini + self._por_pagina]
+        pagina = db.listar_levantamiento_pagina(
+            estatus, filtro, self._por_pagina, self._pagina * self._por_pagina)
+        # Ids visibles: evita re-consultar la tabla en cada clic de checkbox.
+        self._ids_pagina = [r.id for r in pagina]
+        self.tabla.set_contenido([self._fila(r) for r in pagina])
+        self.txt_vacio.visible = total == 0
+        self._area_tabla.visible = total > 0
+        self._actualizar_conteos()
+        self._actualizar_paginacion(total)
+        self._sincronizar_chk_general()
+        self._safe_update()
 
     def _actualizar_paginacion(self, total: int) -> None:
         if not total:
@@ -444,11 +435,11 @@ class SeccionRegistroActivos:
             db.actualizar_datos_levantamiento(id_lev, modificado=True)
 
     def _actualizar_conteos(self) -> None:
-        n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
-        n_no = len(db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA))
-        n_todos = len(db.listar_levantamiento())
-        conteos = {_TAB_TODOS: n_todos, db.EST_DADO_ALTA: n_dado,
-                   db.EST_NO_DADO_ALTA: n_no}
+        """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""
+        c = db.contar_levantamiento_por_estatus()
+        conteos = {_TAB_TODOS: c.get("total", 0),
+                   db.EST_DADO_ALTA: c.get(db.EST_DADO_ALTA, 0),
+                   db.EST_NO_DADO_ALTA: c.get(db.EST_NO_DADO_ALTA, 0)}
         for clave, item in self._tab_items.items():
             item["texto"].value = f"{item['base']} ({conteos.get(clave, 0)})"
 
@@ -458,11 +449,13 @@ class SeccionRegistroActivos:
             self._seleccionados.add(id_lev)
         else:
             self._seleccionados.discard(id_lev)
-        # El check general refleja la PÁGINA visible.
-        self._sincronizar_chk_general(self._registros_pagina(self._filas_actuales()))
+        # Se usan los ids ya conocidos de la página (sin re-consultar la tabla).
+        self._sincronizar_chk_general()
 
-    def _sincronizar_chk_general(self, registros: list) -> None:
-        ids = {r.id for r in registros}
+    def _sincronizar_chk_general(self, registros: list | None = None) -> None:
+        """Marca el check del encabezado si TODA la página está seleccionada."""
+        ids = ({r.id for r in registros} if registros is not None
+               else set(getattr(self, "_ids_pagina", [])))
         self._chk_general.value = bool(ids) and ids <= self._seleccionados
         try:
             self._chk_general.update()
@@ -471,7 +464,7 @@ class SeccionRegistroActivos:
 
     def _on_chk_general(self, e) -> None:
         """El check del encabezado marca/desmarca solo lo visible en la página."""
-        ids = {r.id for r in self._registros_pagina(self._filas_actuales())}
+        ids = set(getattr(self, "_ids_pagina", []))
         if e.control.value:
             self._seleccionados |= ids
         else:
@@ -479,11 +472,12 @@ class SeccionRegistroActivos:
         self._refrescar()
 
     def _seleccionar_todos(self, _e=None) -> None:
-        """Selecciona TODOS los registros de la pestaña (no solo la página)."""
-        registros = self._filas_actuales()
-        self._seleccionados |= {r.id for r in registros}
+        """Selecciona TODO lo que cumple la pestaña + el filtro (no solo la
+        página). Solo trae ids, no las filas completas."""
+        ids = self._ids_actuales()
+        self._seleccionados |= set(ids)
         self._refrescar()
-        self.app.avisar(f"{len(registros)} registro(s) seleccionado(s).", VERDE)
+        self.app.avisar(f"{len(ids)} registro(s) seleccionado(s).", VERDE)
 
     def _eliminar_seleccionados(self, _e=None) -> None:
         ids = list(self._seleccionados)
