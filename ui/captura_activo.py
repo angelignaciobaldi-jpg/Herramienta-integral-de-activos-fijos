@@ -270,9 +270,14 @@ class DialogoCapturaActivo:
         # marcado como "modificado": así el RPA de modificación sabe cuáles
         # reenviar al portal.
         ya_de_alta = self._registro.estatus_registro == db.EST_DADO_ALTA
+        # El No. de serie capturado (nu_Serie) se refleja en la COLUMNA del
+        # registro: es la que se muestra en la tabla y con la que se busca el
+        # insumo (en el listado y en la bandeja de compras).
+        serie = (valores.get("nu_Serie") or "").strip()
         db.actualizar_datos_levantamiento(
             self._registro.id, id_tipo_activo=tipo, datos=valores,
-            modificado=True if ya_de_alta else None)
+            modificado=True if ya_de_alta else None,
+            no_serie=serie if serie else None)
         self.page.pop_dialog()
         self.app.avisar("Datos del activo guardados.", VERDE)
         if callable(self.al_guardar):
