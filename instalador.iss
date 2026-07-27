@@ -26,10 +26,6 @@ PrivilegesRequired=lowest
 ; Carpeta de salida de flet pack/PyInstaller (onedir). El nombre 'ActivosFijos'
 ; debe coincidir con el -n del build (ver README).
 Source: ".\dist\ActivosFijos\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Motor Tesseract OCR empaquetado (lo prepara el CI en '.\tesseract_bundle').
-; skipifsourcedoesntexist: si no esta (build local sin OCR empaquetado) NO rompe
-; la compilacion; la app cae a un Tesseract del sistema si existe.
-Source: ".\tesseract_bundle\*"; DestDir: "{app}\Tesseract-OCR"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 ; Icono para los accesos directos, copiado a la RAIZ de {app}. Se toma del codigo
 ; fuente (no del build): PyInstaller (onedir) mete 'Imagenes' dentro de
 ; {app}\_internal, asi que un IconFilename a {app}\Imagenes\icon.ico no existiria.

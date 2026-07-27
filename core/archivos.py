@@ -72,6 +72,15 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
         raise ErrorArchivo(f"No se encontró el archivo: {ruta_zip}")
     nombre = subcarpeta or os.path.splitext(os.path.basename(ruta_zip))[0]
     destino = os.path.join(carpeta_extraccion(), _sanear(nombre))
+    # Extracción LIMPIA: si ya se extrajo antes este mismo ZIP, se vacía primero.
+    # Si no, los archivos existentes forzarían nombres " (2)", " (3)"… y como el
+    # nombre del archivo lleva la serie, cada re-subida generaría registros
+    # NUEVOS (con serie distinta) en vez de detectarse como duplicados. Al extraer
+    # en limpio, el mismo ZIP produce siempre los mismos nombres y el de-duplicado
+    # por clave (insumo+serie) funciona. Las rutas ya registradas siguen válidas
+    # (se recrean con el mismo nombre).
+    if os.path.isdir(destino):
+        shutil.rmtree(destino, ignore_errors=True)
     os.makedirs(destino, exist_ok=True)
 
     extraidas = 0

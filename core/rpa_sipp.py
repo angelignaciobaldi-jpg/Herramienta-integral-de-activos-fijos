@@ -320,9 +320,9 @@ class SesionSipp:
             "config_sesion",
         )
         try:
-            await self._elegir_opcion_chosen("Empresa", empresa)
-            # Al cambiar la empresa, el portal recarga las sucursales por AJAX; con
-            # esperar_opcion=True se reintenta hasta que la sucursal exista.
+            # esperar_opcion=True en ambas: las empresas cargan por AJAX (el select
+            # arranca vacío) y las sucursales se recargan al elegir la empresa.
+            await self._elegir_opcion_chosen("Empresa", empresa, esperar_opcion=True)
             await self._elegir_opcion_chosen("Sucursal", sucursal, esperar_opcion=True)
         except ErrorSipp:
             await self._capturar_diagnostico("seleccion_empresa_sucursal")
@@ -358,7 +358,9 @@ class SesionSipp:
         await self._ir_a_ruta_spa(
             self.URL_CONFIG_SESION, page.locator(".chosen-container").first,
             "No se cargó la pantalla de configuración de sesión.", "config_sesion")
-        await self._elegir_opcion_chosen("Empresa", empresa)
+        # esperar_opcion=True: las empresas cargan por AJAX (al inicio el select
+        # está vacío); se reintenta hasta que la opción exista.
+        await self._elegir_opcion_chosen("Empresa", empresa, esperar_opcion=True)
         # Espera a que carguen las sucursales (AJAX) y toma la primera real.
         sucursal = ""
         fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
@@ -612,9 +614,41 @@ class SesionSipp:
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
+    async def seleccionar_empleado(self, id_empleado) -> None:
+        """Elige el empleado de resguardo por su ID exacto en el modal 'Buscar
+        Empleado' (Asignación del Activo): abre el modal, teclea el id, busca y
+        pulsa el botón 'agregarEmpleado(row)' de la fila."""
+        page = self._exigir_pagina()
+        abrir = await self._primer_visible(
+            [page.locator("[ng-click*=\"abrirModal('empleados', 2\"]"),
+             page.locator("[ng-click*=\"abrirModal('empleados'\"]")],
+            "botón para abrir el buscador de empleados")
+        await self._click_seguro(abrir)
+        try:
+            await page.locator(
+                "[ng-model='js_filtroModalEmpleado.id_Empleado']").first.wait_for(
+                state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("modal_empleados")
+            raise ErrorSipp("No se abrió el modal 'Buscar Empleado'.") from exc
+        await self.set_input("js_filtroModalEmpleado.id_Empleado", str(id_empleado))
+        await self._click_seguro(
+            page.locator("[ng-click=\"listarDatosGrid('listadoEmpleados')\"]").first)
+        await page.wait_for_timeout(2_500)
+        boton = page.locator("[ng-click*='agregarEmpleado(row)']").first
+        try:
+            await boton.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("empleado_no_encontrado")
+            raise ErrorSipp(
+                f"No apareció el empleado con id {id_empleado} en el catálogo del "
+                "SIPP. ¿El catálogo local está desactualizado?") from exc
+        await self._click_seguro(boton)
+        await page.wait_for_timeout(800)
+
     async def alta_activo(self, tipo_nombre: str, campos: list,
                           detalles: "dict | None" = None,
-                          insumo_id=None) -> None:
+                          insumo_id=None, empleado_id=None) -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -646,6 +680,11 @@ class SesionSipp:
         if insumo_id:
             await self.seleccionar_insumo(insumo_id)
             await page.wait_for_timeout(800)
+
+        # El empleado de resguardo se elige por ID en su propio modal.
+        if empleado_id:
+            await self.seleccionar_empleado(empleado_id)
+            await page.wait_for_timeout(500)
 
         for ng_model, valor, control in campos:
             if not valor or not ng_model:

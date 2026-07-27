@@ -116,18 +116,18 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 "Grupo centro de costo", "select", grupo="Compra"),
     CampoActivo("id_Departamento", "filtrosAgregar.id_Departamento",
                 "Departamento", "select", grupo="Compra"),
-    CampoActivo("FH_ADQUISICION", "FH_ADQUISICION", "Fecha de adquisición", "date",
+    CampoActivo("FH_ADQUISICION", "dt_FH_ADQUISICION", "Fecha de adquisición", "date",
                 grupo="Compra"),
     # Resguardo
     CampoActivo("nb_Empleado", "filtrosAgregar.nb_Empleado", "Empleado (resguardo)",
-                "text", grupo="Resguardo"),
+                "text", requerido=True, grupo="Resguardo"),
     CampoActivo("id_EmpresaResguardo", "filtrosAgregar.id_EmpresaResguardo",
                 "Empresa (resguardo)", "select", grupo="Resguardo"),
     CampoActivo("id_SucursalResguardo", "filtrosAgregar.id_SucursalResguardo",
                 "Sucursal (resguardo)", "select", grupo="Resguardo"),
     CampoActivo("de_Ubicacion", "filtrosAgregar.de_Ubicacion", "Ubicación", "text",
                 grupo="Resguardo"),
-    CampoActivo("FH_ASIGNACION", "FH_ASIGNACION", "Fecha de asignación", "date",
+    CampoActivo("FH_ASIGNACION", "dt_FH_ASIGNACION", "Fecha de asignación", "date",
                 grupo="Resguardo"),
 ]
 
