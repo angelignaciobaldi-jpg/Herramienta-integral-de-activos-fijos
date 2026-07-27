@@ -320,9 +320,9 @@ class SesionSipp:
             "config_sesion",
         )
         try:
-            await self._elegir_opcion_chosen("Empresa", empresa)
-            # Al cambiar la empresa, el portal recarga las sucursales por AJAX; con
-            # esperar_opcion=True se reintenta hasta que la sucursal exista.
+            # esperar_opcion=True en ambas: las empresas cargan por AJAX (el select
+            # arranca vacío) y las sucursales se recargan al elegir la empresa.
+            await self._elegir_opcion_chosen("Empresa", empresa, esperar_opcion=True)
             await self._elegir_opcion_chosen("Sucursal", sucursal, esperar_opcion=True)
         except ErrorSipp:
             await self._capturar_diagnostico("seleccion_empresa_sucursal")
@@ -358,7 +358,9 @@ class SesionSipp:
         await self._ir_a_ruta_spa(
             self.URL_CONFIG_SESION, page.locator(".chosen-container").first,
             "No se cargó la pantalla de configuración de sesión.", "config_sesion")
-        await self._elegir_opcion_chosen("Empresa", empresa)
+        # esperar_opcion=True: las empresas cargan por AJAX (al inicio el select
+        # está vacío); se reintenta hasta que la opción exista.
+        await self._elegir_opcion_chosen("Empresa", empresa, esperar_opcion=True)
         # Espera a que carguen las sucursales (AJAX) y toma la primera real.
         sucursal = ""
         fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
