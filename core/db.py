@@ -163,6 +163,28 @@ def inicializar() -> None:
 
         # Tabla del LEVANTAMIENTO (imágenes cargadas y su estatus vs. el SIPP).
         con.execute(_SQL_CREAR_LEVANTAMIENTO.format(tabla="levantamiento"))
+        # Caché local del catálogo de insumos del SIPP (para elegir el insumo real
+        # sin depender del nombre del levantamiento). Es por empresa del SIPP.
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS insumos_sipp (
+                id_insumo      INTEGER NOT NULL,
+                empresa_id     INTEGER NOT NULL,
+                empresa_nombre TEXT,
+                nombre         TEXT    NOT NULL,
+                unidad         TEXT,
+                familia        TEXT,
+                subfamilia     TEXT,
+                activo_fijo    INTEGER NOT NULL DEFAULT 0,
+                seriado        INTEGER NOT NULL DEFAULT 0,
+                actualizado_en TEXT,
+                PRIMARY KEY (id_insumo, empresa_id)
+            )
+            """
+        )
+        con.execute("CREATE INDEX IF NOT EXISTS ix_insumos_nombre "
+                    "ON insumos_sipp (nombre)")
+
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
             # Esquema viejo: la clave única era (no_serie, nombre_insumo), que no
@@ -487,6 +509,77 @@ def actualizar_tipo_lote(ids: list[int], id_tipo: int | None) -> int:
 def eliminar_levantamiento(id_lev: int) -> None:
     with _conectar() as con:
         con.execute("DELETE FROM levantamiento WHERE id = ?", (id_lev,))
+
+
+# ===========================================================================
+# CATÁLOGO DE INSUMOS DEL SIPP (caché local, por empresa)
+# ===========================================================================
+
+@dataclass
+class Insumo:
+    id_insumo: int
+    empresa_id: int
+    empresa_nombre: str | None
+    nombre: str
+    unidad: str | None
+    familia: str | None
+    subfamilia: str | None
+    activo_fijo: int
+    seriado: int
+
+
+def reemplazar_insumos(empresa_id: int, empresa_nombre: str,
+                       registros: list[dict], actualizado_en: str) -> int:
+    """Reemplaza el catálogo de insumos cacheado de una empresa por `registros`.
+
+    Cada dict: id_insumo, nombre, unidad, familia, subfamilia, activo_fijo,
+    seriado. Se hace en una transacción (borrar + insertar en lote). Devuelve
+    cuántos se guardaron."""
+    with _conectar() as con:
+        con.execute("DELETE FROM insumos_sipp WHERE empresa_id = ?", (empresa_id,))
+        con.executemany(
+            """INSERT OR REPLACE INTO insumos_sipp
+               (id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia,
+                subfamilia, activo_fijo, seriado, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(r["id_insumo"], empresa_id, empresa_nombre, r["nombre"], r.get("unidad"),
+              r.get("familia"), r.get("subfamilia"), 1 if r.get("activo_fijo") else 0,
+              1 if r.get("seriado") else 0, actualizado_en) for r in registros])
+    return len(registros)
+
+
+def buscar_insumos(texto: str = "", empresa_id: int | None = None,
+                   solo_activo_fijo: bool = False, limite: int = 50) -> list[Insumo]:
+    """Busca insumos en el catálogo cacheado por nombre o por id (Cve Insumo)."""
+    cond, params = [], []
+    if empresa_id is not None:
+        cond.append("empresa_id = ?"); params.append(empresa_id)
+    if solo_activo_fijo:
+        cond.append("activo_fijo = 1")
+    texto = (texto or "").strip()
+    if texto:
+        if texto.isdigit():
+            cond.append("(CAST(id_insumo AS TEXT) LIKE ? OR LOWER(nombre) LIKE ?)")
+            params += [f"{texto}%", f"%{texto.lower()}%"]
+        else:
+            cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia, "
+            f"subfamilia, activo_fijo, seriado FROM insumos_sipp{where} "
+            f"ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
+    return [Insumo(**dict(f)) for f in filas]
+
+
+def estado_catalogo_insumos() -> list[dict]:
+    """Por cada empresa cacheada: id, nombre, cuántos insumos y cuándo se bajó."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT empresa_id, empresa_nombre, COUNT(*) AS n, MAX(actualizado_en) AS cuando "
+            "FROM insumos_sipp GROUP BY empresa_id, empresa_nombre "
+            "ORDER BY empresa_nombre").fetchall()
+    return [dict(f) for f in filas]
 
 
 def eliminar_levantamientos(ids: list[int]) -> None:
