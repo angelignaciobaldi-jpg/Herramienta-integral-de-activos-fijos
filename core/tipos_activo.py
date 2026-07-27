@@ -120,7 +120,7 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 grupo="Compra"),
     # Resguardo
     CampoActivo("nb_Empleado", "filtrosAgregar.nb_Empleado", "Empleado (resguardo)",
-                "text", grupo="Resguardo"),
+                "text", requerido=True, grupo="Resguardo"),
     CampoActivo("id_EmpresaResguardo", "filtrosAgregar.id_EmpresaResguardo",
                 "Empresa (resguardo)", "select", grupo="Resguardo"),
     CampoActivo("id_SucursalResguardo", "filtrosAgregar.id_SucursalResguardo",

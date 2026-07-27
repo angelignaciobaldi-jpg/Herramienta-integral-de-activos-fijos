@@ -185,6 +185,21 @@ def inicializar() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS ix_insumos_nombre "
                     "ON insumos_sipp (nombre)")
 
+        # Caché del catálogo de EMPLEADOS del SIPP (global, para el resguardo).
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS empleados_sipp (
+                id_empleado    INTEGER PRIMARY KEY,
+                nombre         TEXT    NOT NULL,
+                puesto         TEXT,
+                email          TEXT,
+                actualizado_en TEXT
+            )
+            """
+        )
+        con.execute("CREATE INDEX IF NOT EXISTS ix_empleados_nombre "
+                    "ON empleados_sipp (nombre)")
+
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
             # Esquema viejo: la clave única era (no_serie, nombre_insumo), que no
@@ -586,6 +601,56 @@ def estado_catalogo_insumos() -> list[dict]:
             "FROM insumos_sipp GROUP BY empresa_id, empresa_nombre "
             "ORDER BY empresa_nombre").fetchall()
     return [dict(f) for f in filas]
+
+
+# --------------------------------------------------------- empleados (SIPP)
+@dataclass
+class Empleado:
+    id_empleado: int
+    nombre: str
+    puesto: str | None
+    email: str | None
+
+
+def reemplazar_empleados(registros: list[dict], actualizado_en: str) -> int:
+    """Reemplaza TODO el catálogo de empleados cacheado (es global, no por empresa).
+    Cada dict: id_empleado, nombre, puesto, email. Devuelve cuántos se guardaron."""
+    with _conectar() as con:
+        con.execute("DELETE FROM empleados_sipp")
+        con.executemany(
+            """INSERT OR REPLACE INTO empleados_sipp
+               (id_empleado, nombre, puesto, email, actualizado_en)
+               VALUES (?, ?, ?, ?, ?)""",
+            [(r["id_empleado"], r["nombre"], r.get("puesto"), r.get("email"),
+              actualizado_en) for r in registros])
+    return len(registros)
+
+
+def buscar_empleados(texto: str = "", limite: int = 50) -> list[Empleado]:
+    """Busca empleados en el catálogo cacheado por nombre o por id."""
+    cond, params = [], []
+    texto = (texto or "").strip()
+    if texto:
+        if texto.isdigit():
+            cond.append("(CAST(id_empleado AS TEXT) LIKE ? OR LOWER(nombre) LIKE ?)")
+            params += [f"{texto}%", f"%{texto.lower()}%"]
+        else:
+            cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT id_empleado, nombre, puesto, email FROM empleados_sipp{where} "
+            f"ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
+    return [Empleado(**dict(f)) for f in filas]
+
+
+def estado_catalogo_empleados() -> dict:
+    """Cuántos empleados hay cacheados y cuándo se bajaron."""
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT COUNT(*) AS n, MAX(actualizado_en) AS cuando "
+            "FROM empleados_sipp").fetchone()
+    return dict(fila)
 
 
 def eliminar_levantamientos(ids: list[int]) -> None:
