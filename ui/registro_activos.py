@@ -245,7 +245,6 @@ class SeccionRegistroActivos:
 
         self.contenido = ft.Column(
             [
-                ft.Text("Registro de activos", size=20, weight=ft.FontWeight.BOLD),
                 contexto,
                 barra_acciones,
                 ft.Divider(),

@@ -23,8 +23,6 @@ class SeccionDashboard:
     def _construir(self) -> None:
         self.contenido = ft.Column(
             [
-                ft.Text("Dashboard activos fijos", size=20, weight=ft.FontWeight.BOLD),
-                ft.Divider(),
                 placeholder(
                     "Tablero en construcción",
                     "Aquí irán los gráficos e indicadores del catálogo de activos fijos.",
