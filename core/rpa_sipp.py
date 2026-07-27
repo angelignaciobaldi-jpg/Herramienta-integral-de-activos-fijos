@@ -347,6 +347,36 @@ class SesionSipp:
             except PlaywrightTimeoutError:
                 await page.wait_for_timeout(2500)
 
+    async def preparar_sesion_empresa(self, empresa: str) -> tuple[str, str]:
+        """Configura la sesión eligiendo `empresa` y su PRIMERA sucursal disponible.
+
+        Útil cuando la sucursal es indistinta (p. ej. para descargar catálogos por
+        empresa). El nombre de empresa se empareja por 'contiene' (las opciones del
+        SIPP traen texto como 'ABASTECEDORA... - (Abastecedora )'). Devuelve
+        (empresa_elegida, sucursal_elegida)."""
+        page = self._exigir_pagina()
+        await self._ir_a_ruta_spa(
+            self.URL_CONFIG_SESION, page.locator(".chosen-container").first,
+            "No se cargó la pantalla de configuración de sesión.", "config_sesion")
+        await self._elegir_opcion_chosen("Empresa", empresa)
+        # Espera a que carguen las sucursales (AJAX) y toma la primera real.
+        sucursal = ""
+        fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
+        while asyncio.get_event_loop().time() < fin:
+            ops = await page.eval_on_selector_all(
+                "select[ng-model='id_Sucursal'] option",
+                "e=>e.filter(o=>o.value&&o.value!=='0'&&o.value!=='')"
+                ".map(o=>o.textContent.trim())")
+            if ops:
+                sucursal = ops[0]
+                break
+            await asyncio.sleep(0.3)
+        if not sucursal:
+            raise ErrorSipp(
+                "No se cargaron sucursales para la empresa '%s'." % empresa)
+        await self.seleccionar_empresa_sucursal(empresa, sucursal)
+        return empresa, sucursal
+
     async def _elegir_opcion_chosen(
         self, etiqueta: str, texto: str, esperar_opcion: bool = False,
     ) -> None:
@@ -550,8 +580,41 @@ class SesionSipp:
         except Exception:  # noqa: BLE001
             return 0
 
+    async def seleccionar_insumo(self, id_insumo) -> None:
+        """Elige el insumo por su ID exacto (Cve Insumo) en el modal 'Buscar
+        Insumo': abre el modal, teclea el id, busca y hace clic en la fila
+        resultante. Es exacto (por id), a diferencia de buscar por nombre."""
+        page = self._exigir_pagina()
+        abrir = await self._primer_visible(
+            [page.locator("[ng-click*=\"abrirModal('insumos')\"]"),
+             page.locator("[ng-click*='insumos']")],
+            "botón para abrir el buscador de insumos")
+        await self._click_seguro(abrir)
+        try:
+            await page.locator("[ng-model='filtrosInsumos.id_Insumo']").first.wait_for(
+                state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("modal_insumos")
+            raise ErrorSipp("No se abrió el modal 'Buscar Insumo'.") from exc
+        await self.set_input("filtrosInsumos.id_Insumo", str(id_insumo))
+        await self._click_seguro(page.locator("[ng-click='listarInsumos()']").first)
+        await page.wait_for_timeout(2_500)  # la grid del modal recarga por AJAX
+        # Cada fila del resultado trae un botón 'agregarInsumo(row)' que lo elige y
+        # cierra el modal. Buscando por id exacto, la primera es la correcta.
+        boton = page.locator("[ng-click='agregarInsumo(row)']").first
+        try:
+            await boton.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("insumo_no_encontrado")
+            raise ErrorSipp(
+                f"No apareció el insumo con id {id_insumo} en el catálogo del "
+                "SIPP. ¿El catálogo local está desactualizado?") from exc
+        await self._click_seguro(boton)
+        await page.wait_for_timeout(800)
+
     async def alta_activo(self, tipo_nombre: str, campos: list,
-                          detalles: "dict | None" = None) -> None:
+                          detalles: "dict | None" = None,
+                          insumo_id=None) -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -559,9 +622,11 @@ class SesionSipp:
             campos: lista de (ng_model, valor, control) donde control es
                 'text' | 'number' | 'date' | 'select'.
             detalles: características del insumo {etiqueta -> valor} (camposDetalle).
+            insumo_id: Cve Insumo del SIPP; se selecciona por el modal 'Buscar
+                Insumo' (el nombre del insumo es de solo lectura, se elige así).
 
-        Abre el formulario, elige el tipo (lo que dispara la carga de las
-        características), llena todo y pulsa Guardar, aceptando el aviso final.
+        Abre el formulario, elige el tipo, selecciona el insumo por id (lo que
+        dispara la carga de las características), llena todo y pulsa Guardar.
         """
         page = self._exigir_pagina()
         await self.ir_a_catalogo_activos()
@@ -576,6 +641,11 @@ class SesionSipp:
         # El tipo va primero: de él dependen las características del insumo.
         await self.set_combo("filtrosAgregar.id_TipoActivo", tipo_nombre, esperar=True)
         await page.wait_for_timeout(800)
+
+        # El insumo se elige por ID en el modal (dispara la carga de camposDetalle).
+        if insumo_id:
+            await self.seleccionar_insumo(insumo_id)
+            await page.wait_for_timeout(800)
 
         for ng_model, valor, control in campos:
             if not valor or not ng_model:

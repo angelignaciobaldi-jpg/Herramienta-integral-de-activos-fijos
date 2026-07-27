@@ -130,6 +130,11 @@ class SeccionRegistroActivos:
                                   on_click=self.dialogo_carga.abrir),
                 ft.OutlinedButton("Buscar en SIPP", icon=ft.Icons.SEARCH,
                                   on_click=self._buscar),
+                ft.OutlinedButton("Actualizar catálogo de insumos",
+                                  icon=ft.Icons.CLOUD_DOWNLOAD,
+                                  tooltip="Descarga del SIPP el catálogo de insumos "
+                                          "de la empresa seleccionada arriba",
+                                  on_click=self._actualizar_insumos),
                 self.progreso,
                 self.estado,
             ],
@@ -694,15 +699,16 @@ class SeccionRegistroActivos:
     # ------------------------------------------------ RPA: alta en el SIPP
     def _payload_alta(self, r: "db.Levantamiento") -> tuple:
         """Traduce lo capturado en el formulario dinámico a lo que espera el RPA:
-        (nombre del tipo, [(ng_model, valor, control)], {etiqueta: valor}).
+        (tipo, [(ng_model, valor, control)], {etiqueta: valor}, insumo_id).
 
         Los campos con `detalle=True` son las características del insumo
-        (camposDetalle), que el RPA empareja por rótulo y no por ng-model."""
+        (camposDetalle), que el RPA empareja por rótulo. El insumo NO va como campo
+        de texto (es de solo lectura): se selecciona por su ID en el modal."""
         datos = r.datos()
         campos, detalles = [], {}
         for campo in campos_de_tipo(r.id_tipo_activo):
-            if campo.clave == "id_TipoActivo":
-                continue  # el tipo se elige aparte (dispara las características)
+            if campo.clave in ("id_TipoActivo", "nb_NombreInsumo"):
+                continue  # tipo e insumo se eligen aparte (disparan las características)
             valor = (datos.get(campo.clave) or "").strip()
             if not valor:
                 continue
@@ -710,7 +716,8 @@ class SeccionRegistroActivos:
                 detalles[campo.etiqueta] = valor
             else:
                 campos.append((campo.ng_model, valor, campo.control))
-        return nombre_tipo(r.id_tipo_activo), campos, detalles
+        insumo_id = (datos.get("id_InsumoOrigen") or "").strip()
+        return nombre_tipo(r.id_tipo_activo), campos, detalles, insumo_id
 
     async def _iniciar_registro_sipp(self, _e=None) -> None:
         """Da de alta en el SIPP (vía RPA) los activos 'No dados de alta' que ya
@@ -779,9 +786,9 @@ class SeccionRegistroActivos:
                 for i, r in enumerate(pendientes, 1):
                     await ctrl.punto_control()
                     avance(i, r.nombre_insumo)
-                    tipo, campos, detalles = self._payload_alta(r)
+                    tipo, campos, detalles, insumo_id = self._payload_alta(r)
                     try:
-                        await sipp.alta_activo(tipo, campos, detalles)
+                        await sipp.alta_activo(tipo, campos, detalles, insumo_id)
                         db.actualizar_estatus_levantamiento(r.id, db.EST_DADO_ALTA)
                         exitosos += 1
                     except ErrorSipp as exc:
@@ -822,8 +829,8 @@ class SeccionRegistroActivos:
 
     def _payload_modificacion(self, r: "db.Levantamiento") -> tuple:
         """Igual que _payload_alta pero con los localizadores del formulario de
-        edición."""
-        tipo, campos, detalles = self._payload_alta(r)
+        edición. (La modificación no cambia el insumo, así que su id no se usa.)"""
+        tipo, campos, detalles, _insumo_id = self._payload_alta(r)
         campos_edicion = [(self._a_ng_model_edicion(ng), v, c) for ng, v, c in campos]
         return tipo, campos_edicion, detalles
 
@@ -924,6 +931,76 @@ class SeccionRegistroActivos:
                 + "; ".join(omitidos[:3]), NARANJA, duracion=9000)
         else:
             self.app.avisar(f"{exitosos} activo(s) actualizado(s) en el SIPP.", VERDE)
+
+    # ------------------------------------ actualizar catálogo de insumos
+    async def _actualizar_insumos(self, _e=None) -> None:
+        """Descarga del SIPP el catálogo de insumos de la empresa seleccionada
+        arriba y lo cachea localmente (para el selector de insumo). Corre el RPA en
+        un hilo, con progreso."""
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+        empresa = self.dd_empresa.value
+        if not empresa:
+            self.app.avisar("Elige arriba la empresa cuyo catálogo quieres descargar.",
+                            NARANJA)
+            return
+
+        bucle = BucleRpa()
+        ui_loop = asyncio.get_running_loop()
+        txt = ft.Text("Conectando al SIPP…", size=13)
+        barra = ft.ProgressBar()
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("Actualizando catálogo de insumos"),
+            content=ft.Container(
+                ft.Column([txt, barra,
+                           ft.Text("Se abrirá un navegador; no lo cierres.",
+                                   size=11, color=GRIS)], tight=True, spacing=12),
+                width=420))
+        self.page.show_dialog(dlg)
+        self.page.update()
+
+        def avance(hechos: int, total: int) -> None:
+            def aplicar() -> None:
+                txt.value = f"Descargando insumos… {hechos}/{total or '?'}"
+                barra.value = (hechos / total) if total else None
+                try:
+                    dlg.update()
+                except (RuntimeError, AssertionError):
+                    pass
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        resultado, error = {}, None
+
+        async def flujo() -> None:
+            nonlocal resultado, error
+            from core import insumos
+            from core.rpa_sipp import SesionSipp
+            try:
+                async with SesionSipp(headless=False) as sipp:
+                    await sipp.login(usuario, contrasena)
+                    await sipp.preparar_sesion_empresa(empresa)
+                    resultado = await insumos.descargar_catalogo(
+                        sipp, progreso=avance, solo_activo_fijo=True)
+            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                error = str(exc)
+
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        finally:
+            bucle.cerrar()
+            self.page.pop_dialog()
+
+        if error:
+            self.app.avisar(f"No se pudo actualizar el catálogo: {error}", ROJO,
+                            duracion=9000)
+        else:
+            self.app.avisar(
+                f"Catálogo actualizado: {resultado.get('guardados', 0)} insumo(s) "
+                f"activo-fijo de «{resultado.get('empresa_nombre', empresa)}».", VERDE,
+                duracion=7000)
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando

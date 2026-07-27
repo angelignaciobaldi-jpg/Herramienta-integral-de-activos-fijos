@@ -23,9 +23,54 @@ import flet as ft
 from core import db
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE, CampoFecha
+from ui.selector_insumo import DialogoSelectorInsumo
 
 _ANCHO = 620
 _ALTO_CAMPOS = 420
+
+
+class _CampoInsumo:
+    """Campo del insumo: se ELIGE del catálogo del SIPP (no se teclea).
+
+    Muestra el nombre del insumo elegido (solo lectura) y un botón que abre el
+    selector. Guarda el id (Cve Insumo) del SIPP, que es lo que el RPA usa para
+    seleccionarlo por ID exacto. Expone `.value` (nombre) e `.id_insumo`."""
+
+    def __init__(self, dialogo, nombre: str = "", id_insumo: str = ""):
+        self._dialogo = dialogo
+        self.id_insumo = str(id_insumo or "")
+        self._tf = ft.TextField(
+            label="Insumo *", value=nombre or "", read_only=True, dense=True,
+            hint_text="Elige el insumo del catálogo del SIPP",
+            suffix=ft.IconButton(icon=ft.Icons.SEARCH, tooltip="Buscar insumo",
+                                 on_click=self._abrir))
+
+    @property
+    def control(self) -> ft.Control:
+        return self._tf
+
+    @property
+    def value(self) -> str:
+        return self._tf.value or ""
+
+    @value.setter
+    def value(self, v: str) -> None:
+        self._tf.value = v or ""
+
+    def _abrir(self, _e=None) -> None:
+        # Sugerencia inicial: el nombre del insumo del levantamiento (o el ya elegido).
+        reg = self._dialogo._registro
+        sug = self.value or (reg.nombre_insumo if reg else "")
+        self._dialogo._campo_insumo = self
+        self._dialogo.selector_insumo.abrir(sugerido=sug)
+
+    def set(self, id_insumo, nombre: str) -> None:
+        self.id_insumo = str(id_insumo)
+        self._tf.value = nombre
+        try:
+            self._tf.update()
+        except (RuntimeError, AssertionError):
+            pass
 
 
 class DialogoCapturaActivo:
@@ -37,7 +82,15 @@ class DialogoCapturaActivo:
         self.al_guardar = al_guardar          # callback tras guardar (p. ej. refrescar)
         self._registro: "db.Levantamiento | None" = None
         self._controles: dict[str, tuple] = {}  # clave -> (CampoActivo, control)
+        self._campo_insumo: "_CampoInsumo | None" = None  # el campo de insumo activo
+        # Selector de insumo (busca en la caché local del catálogo del SIPP).
+        self.selector_insumo = DialogoSelectorInsumo(app, al_elegir=self._insumo_elegido)
         self._construir()
+
+    def _insumo_elegido(self, id_insumo, nombre: str) -> None:
+        """Callback del selector: fija el insumo elegido en el campo activo."""
+        if self._campo_insumo is not None:
+            self._campo_insumo.set(id_insumo, nombre)
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
@@ -119,8 +172,9 @@ class DialogoCapturaActivo:
             for campo in campos:
                 ctrl = self._control_para(campo, self._valor_inicial(campo, datos))
                 self._controles[campo.clave] = (campo, ctrl)
-                # CampoFecha es un envoltorio: en la UI va su .control.
-                filas.append(ctrl.control if isinstance(ctrl, CampoFecha) else ctrl)
+                # CampoFecha / _CampoInsumo son envoltorios: en la UI va su .control.
+                filas.append(ctrl.control
+                             if isinstance(ctrl, (CampoFecha, _CampoInsumo)) else ctrl)
             secciones.append(
                 ft.Column(
                     [ft.Text(grupo, size=13, weight=ft.FontWeight.BOLD,
@@ -151,10 +205,17 @@ class DialogoCapturaActivo:
             return r.departamento or ""
         return ""
 
-    def _control_para(self, campo, valor) -> ft.Control:
+    def _control_para(self, campo, valor):
         """Crea el control adecuado al tipo de campo, precargado con `valor`."""
         etiqueta = campo.etiqueta + (" *" if campo.requerido else "")
         valor = "" if valor is None else str(valor)
+
+        if campo.clave == "nb_NombreInsumo":
+            # El insumo se ELIGE del catálogo del SIPP (no se teclea): así el RPA
+            # tiene el ID exacto para seleccionarlo en el modal "Buscar Insumo".
+            id_ini = (self._registro.datos().get("id_InsumoOrigen", "")
+                      if self._registro else "")
+            return _CampoInsumo(self, nombre=valor, id_insumo=id_ini)
 
         if campo.control == "select":
             opciones = None
@@ -197,6 +258,9 @@ class DialogoCapturaActivo:
             if campo.requerido and not valor:
                 faltantes.append(campo.etiqueta)
             valores[clave] = valor
+            # El insumo guarda además su ID (Cve Insumo), que es lo que el RPA usa.
+            if isinstance(ctrl, _CampoInsumo):
+                valores["id_InsumoOrigen"] = ctrl.id_insumo
         if faltantes:
             self.app.avisar(
                 "Faltan campos obligatorios: " + ", ".join(faltantes[:5])
