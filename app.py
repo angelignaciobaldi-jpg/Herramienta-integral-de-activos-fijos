@@ -4,10 +4,8 @@ Arma la ventana: encabezado con logo y botón de modo claro/oscuro, navegación 
 el área de contenido. Cada pantalla es un módulo independiente en ui/, para que
 se pueda trabajar en colaboración sin pisarse:
 
+    ui/dashboard.py              -> "Dashboard activos fijos"
     ui/registro_activos.py       -> "Registro de activos"
-    ui/extraccion_documentos.py  -> "Extracción de documentos" (OCR)
-    ui/automatizacion_sipp.py    -> "Automatización SIPP" (RPA)
-    ui/exportacion.py            -> "Exportación / Reportes"
     ui/configuracion.py          -> modal de Configuración (credenciales SIPP)
     ui/comun.py                  -> constantes y utilidades compartidas
 
@@ -120,25 +118,19 @@ class AppActivosFijos:
         # Import perezoso de las pantallas: si una estuviera rota, el error se
         # contiene en _arrancar_app (que lo muestra en pantalla) en vez de tumbar
         # todo el proceso.
-        from ui.automatizacion_sipp import SeccionAutomatizacionSipp
         from ui.configuracion import SeccionConfiguracion
-        from ui.exportacion import SeccionExportacion
-        from ui.extraccion_documentos import SeccionExtraccionDocumentos
+        from ui.dashboard import SeccionDashboard
         from ui.registro_activos import SeccionRegistroActivos
 
         self.config = SeccionConfiguracion(self)
+        self.dashboard = SeccionDashboard(self)
         self.registro = SeccionRegistroActivos(self)
-        self.extraccion = SeccionExtraccionDocumentos(self)
-        self.automatizacion = SeccionAutomatizacionSipp(self)
-        self.exportacion = SeccionExportacion(self)
 
         # Área de contenido: todas las pantallas viven aquí; solo se muestra la
         # activa (se alterna 'visible'), en vez de un TabBarView de Material.
         self._secciones = [
+            self.dashboard.contenido,
             self.registro.contenido,
-            self.extraccion.contenido,
-            self.automatizacion.contenido,
-            self.exportacion.contenido,
         ]
         for i, seccion in enumerate(self._secciones):
             seccion.visible = i == 0
@@ -186,8 +178,7 @@ class AppActivosFijos:
         self.page.controls.clear()
         self.page.add(encabezado, self._area, pie)
         # `page.on_resize` es un slot ÚNICO; se despacha a una lista de listeners.
-        for pantalla in (self.registro, self.extraccion, self.automatizacion,
-                         self.exportacion, self.config):
+        for pantalla in (self.dashboard, self.registro, self.config):
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
@@ -201,10 +192,8 @@ class AppActivosFijos:
         self._nav_activa = 0
         self._nav_items: list[dict] = []
         definiciones = [
+            ("Dashboard activos fijos", ft.Icons.DASHBOARD),
             ("Registro de activos", ft.Icons.INVENTORY_2),
-            ("Extracción de documentos", ft.Icons.DOCUMENT_SCANNER),
-            ("Automatización SIPP", ft.Icons.SMART_TOY),
-            ("Exportación / Reportes", ft.Icons.IOS_SHARE),
         ]
         controles = []
         for idx, (texto, icono) in enumerate(definiciones):
@@ -546,21 +535,9 @@ def _configurar_taskbar(page: ft.Page) -> None:
 
 def _arrancar_app(page: ft.Page) -> "AppActivosFijos":
     """Importa (de forma perezosa) y arranca la app completa."""
-    from core import db, ocr
+    from core import db
 
     db.inicializar()
-
-    if not ocr.tesseract_disponible():
-        page.show_dialog(
-            ft.SnackBar(
-                content=ft.Text(
-                    "No se encontró el motor Tesseract. Los PDF con texto se leerán igual, "
-                    "pero los documentos escaneados no podrán procesarse por OCR."
-                ),
-                bgcolor=ft.Colors.AMBER_800,
-            )
-        )
-
     return AppActivosFijos(page)
 
 
