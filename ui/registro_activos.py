@@ -823,7 +823,8 @@ class SeccionRegistroActivos:
         filtrosAgregar.X -> filtrosEditar.X  y  FH_X -> FH_X_EDITAR."""
         if ng_model.startswith("filtrosAgregar."):
             return ng_model.replace("filtrosAgregar.", "filtrosEditar.", 1)
-        if ng_model.startswith("FH_") and not ng_model.endswith("_EDITAR"):
+        # Fechas: FH_X / dt_FH_X -> ..._EDITAR
+        if ("FH_" in ng_model) and not ng_model.endswith("_EDITAR"):
             return ng_model + "_EDITAR"
         return ng_model
 
