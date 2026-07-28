@@ -5,9 +5,10 @@ puede importar y cuántos activos saldrían de cada una (ya expandidas las
 etiquetas múltiples). El usuario marca las hojas y confirma; la importación corre
 en un hilo para no congelar la interfaz.
 
-La empresa/sucursal/departamento se toman de los selectores de la pantalla de
-Registro (el archivo no los trae) y el tipo de activo se deja vacío para
-asignarlo después.
+La EMPRESA se toma del selector de la pantalla de Registro (el archivo no la
+trae). La SUCURSAL y el DEPARTAMENTO se autollenan por fila desde las columnas
+ORIGEN y AREA del archivo cuando existen (si no, se usan los del selector). El
+tipo de activo se deja vacío para asignarlo después.
 """
 
 from __future__ import annotations
@@ -20,6 +21,14 @@ from core import importador_excel
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
 
 _ANCHO = 640
+
+# Campo interno detectado -> cómo se llena en el registro (para mostrarlo en el
+# diálogo y que se vea qué se autollena desde el archivo).
+_CAMPO_A_ETIQUETA = {
+    "insumo": "Insumo", "etiqueta": "Etiqueta", "serie": "Serie",
+    "responsable": "Responsable", "ubicacion": "Ubicación",
+    "origen": "Sucursal", "area": "Departamento",
+}
 
 
 class DialogoCargaMasiva:
@@ -98,12 +107,15 @@ class DialogoCargaMasiva:
             if h.importable:
                 chk = ft.Checkbox(value=True, on_change=lambda _e: self._recalcular())
                 self._checks[h.nombre] = chk
+                campos = ", ".join(
+                    _CAMPO_A_ETIQUETA[c] for c in _CAMPO_A_ETIQUETA if c in h.columnas)
                 controles.append(ft.Row(
                     [chk,
                      ft.Column(
                          [ft.Text(h.nombre, size=13, weight=ft.FontWeight.W_500),
                           ft.Text(f"{h.filas_datos} fila(s) → {h.activos_estimados} activo(s)",
-                                  size=11, color=GRIS)],
+                                  size=11, color=GRIS),
+                          ft.Text(f"Autollena: {campos}", size=11, color=VERDE)],
                          spacing=0, tight=True)],
                     spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER))
             else:

@@ -30,6 +30,8 @@ import openpyxl
 from . import db
 
 # Encabezados que se buscan (en MAYÚSCULAS, sin acentos) -> campo interno.
+# Las sábanas estandarizadas traen, además, ORIGEN (sitio) y AREA (área), que se
+# usan por fila para autollenar sucursal y departamento (ver _importar_hoja).
 _ENCABEZADOS = {
     "INSUMO": "insumo",
     "CANTIDAD": "cantidad",
@@ -37,6 +39,8 @@ _ENCABEZADOS = {
     "SERIE": "serie",
     "RESPONSABLE": "responsable",
     "UBICACION": "ubicacion",
+    "ORIGEN": "origen",
+    "AREA": "area",
 }
 # Cuántos encabezados deben coincidir para dar una fila por "fila de encabezados".
 _MIN_COINCIDENCIAS = 3
@@ -146,9 +150,11 @@ def importar(ruta: str, hojas: list[str], empresa: str = "", sucursal: str = "",
              departamento: str = "", progreso=None) -> ResultadoImportacion:
     """Importa las `hojas` indicadas del archivo al levantamiento.
 
-    Cada fila se expande en un registro por ETIQUETA. La empresa/sucursal/
-    departamento se toman de los argumentos (el archivo no los trae) y el TIPO de
-    activo se deja vacío para asignarlo después desde la herramienta.
+    Cada fila se expande en un registro por ETIQUETA. La EMPRESA se toma del
+    argumento (el archivo no la trae). La SUCURSAL y el DEPARTAMENTO se autollenan
+    por fila desde las columnas ORIGEN y AREA cuando existen; si la hoja no las
+    trae, se usan los valores de `sucursal`/`departamento` como respaldo. El TIPO
+    de activo se deja vacío para asignarlo después desde la herramienta.
 
     `progreso(hecho, total, hoja)`: callback opcional para reflejar el avance.
     """
@@ -186,6 +192,10 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
         series = _partes(valores.get("serie"))
         responsable = str(valores.get("responsable") or "").strip()
         ubicacion = str(valores.get("ubicacion") or "").strip()
+        # Sucursal y departamento se autollenan por fila (ORIGEN/AREA); si la hoja
+        # no trae la columna o la celda está vacía, se usa el valor de la UI.
+        suc_fila = str(valores.get("origen") or "").strip() or sucursal
+        dep_fila = str(valores.get("area") or "").strip() or departamento
 
         if not etiquetas:
             # Sin etiqueta: se guarda un único registro (se identificará por
@@ -204,8 +214,8 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
                 "responsable": responsable,
                 "ubicacion": ubicacion,
                 "empresa": empresa,
-                "sucursal": sucursal,
-                "departamento": departamento,
+                "sucursal": suc_fila,
+                "departamento": dep_fila,
             })
 
     agregados, duplicados = db.guardar_levantamiento_lote(registros)
