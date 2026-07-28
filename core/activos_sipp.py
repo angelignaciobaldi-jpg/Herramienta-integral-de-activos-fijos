@@ -64,12 +64,13 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     query = datos.get("QUERY", datos)
     cols = query.get("COLUMNS") or []
     filas = query.get("DATA") or []
-    # Mapeo tolerante de columnas por nombre.
-    i_etq = _elegir_columna(cols, "ETIQUETA", "DE_ETIQUETA", "NB_ETIQUETA")
-    i_ins = _elegir_columna(cols, "NB_NOMBREINSUMO", "NOMBREINSUMO", "INSUMO")
-    i_ser = _elegir_columna(cols, "DE_SERIEACTIVO", "SERIEACTIVO", "SERIE")
-    i_ubi = _elegir_columna(cols, "UBICACION", "DE_UBICACION")
-    i_emp = _elegir_columna(cols, "EMPLEADO", "RESGUARDO", "NB_EMPLEADO")
+    # Mapeo por los nombres REALES de columna del endpoint (confirmados en vivo).
+    # OJO: no usar "INSUMO" a secas (haría match con ID_INSUMO, un id numérico).
+    i_etq = _elegir_columna(cols, "DE_ETIQUETA")
+    i_ins = _elegir_columna(cols, "NB_ACTIVOFIJO", "DE_DESCRIPCION")
+    i_ser = _elegir_columna(cols, "DE_SERIEACTIVO")
+    i_ubi = _elegir_columna(cols, "NB_UBICACION")
+    i_emp = _elegir_columna(cols, "NB_EMPLEADORESGUARDO")
     i_nomemp = _elegir_columna(cols, "NB_EMPRESA")
 
     def val(fila, i):

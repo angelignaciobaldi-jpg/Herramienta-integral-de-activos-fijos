@@ -112,8 +112,7 @@ class SeccionGeneradorQR:
             modal=True, title=ft.Text("Descargando activos del SIPP"),
             content=ft.Container(
                 ft.Row([ft.ProgressRing(width=26, height=26, stroke_width=3),
-                        ft.Text(f"Consultando activos de «{empresa}»…\n"
-                                "Se abrirá un navegador; no lo cierres.")],
+                        ft.Text(f"Consultando activos de «{empresa}» en el SIPP…")],
                        spacing=16, tight=True),
                 width=420))
         self.page.show_dialog(dlg)
@@ -126,9 +125,12 @@ class SeccionGeneradorQR:
             from core import activos_sipp
             from core.rpa_sipp import SesionSipp
             try:
-                async with SesionSipp(headless=False) as sipp:
+                # El endpoint recibe id_Empresa como parámetro y responde con solo
+                # iniciar sesión, así que NO se configura empresa/sucursal (ese paso
+                # es el que se atoraba y aquí no hace falta). Al no requerir mirar el
+                # navegador, se corre en headless (sin ventana).
+                async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
-                    await sipp.preparar_sesion_empresa(empresa)
                     resultado = await activos_sipp.descargar_activos(sipp, idemp, empresa)
             except Exception as exc:  # noqa: BLE001 — se reporta al usuario
                 error = str(exc)
