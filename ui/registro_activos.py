@@ -129,11 +129,12 @@ class SeccionRegistroActivos:
                                   on_click=self.dialogo_carga.abrir),
                 ft.OutlinedButton("Buscar en SIPP", icon=ft.Icons.SEARCH,
                                   on_click=self._buscar),
-                ft.OutlinedButton("Actualizar catálogos (SIPP)",
-                                  icon=ft.Icons.CLOUD_DOWNLOAD,
-                                  tooltip="Descarga del SIPP los catálogos de insumos "
-                                          "(de la empresa de arriba) y de empleados",
-                                  on_click=self._actualizar_insumos),
+                ft.FilledTonalButton("Actualizar información del SIPP",
+                                     icon=ft.Icons.SYNC,
+                                     tooltip="Descarga del SIPP, para la empresa de "
+                                             "arriba, sus insumos y activos, más el "
+                                             "catálogo de empleados (global)",
+                                     on_click=self._actualizar_sipp),
                 self.progreso,
                 self.estado,
             ],
@@ -1127,88 +1128,15 @@ class SeccionRegistroActivos:
             self.app.avisar(f"{exitosos} activo(s) actualizado(s) en el SIPP.", VERDE)
 
     # ------------------------------------ actualizar catálogo de insumos
-    async def _actualizar_insumos(self, _e=None) -> None:
-        """Descarga del SIPP el catálogo de insumos de la empresa seleccionada
-        arriba y lo cachea localmente (para el selector de insumo). Corre el RPA en
-        un hilo, con progreso."""
-        creds = credenciales.cargar()
-        if not creds or not creds[0]:
-            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
-            return
-        usuario, contrasena = creds
+    async def _actualizar_sipp(self, _e=None) -> None:
+        """Actualiza en una sola sesión la información del SIPP de la empresa
+        seleccionada (insumos + activos) y los empleados (global)."""
+        from core.empresas import ID_POR_EMPRESA
+        from ui.actualizar_sipp import actualizar_info_sipp
         empresa = self.dd_empresa.value
-        if not empresa:
-            self.app.avisar("Elige arriba la empresa cuyo catálogo quieres descargar.",
-                            NARANJA)
-            return
-
-        bucle = BucleRpa()
-        ui_loop = asyncio.get_running_loop()
-        txt = ft.Text("Conectando al SIPP…", size=13)
-        barra = ft.ProgressBar()
-        dlg = ft.AlertDialog(
-            modal=True, title=ft.Text("Actualizando catálogo de insumos"),
-            content=ft.Container(
-                ft.Column([txt, barra,
-                           ft.Text("Se abrirá un navegador; no lo cierres.",
-                                   size=11, color=GRIS)], tight=True, spacing=12),
-                width=420))
-        self.page.show_dialog(dlg)
-        self.page.update()
-
-        def _refrescar_dlg() -> None:
-            try:
-                dlg.update()
-            except (RuntimeError, AssertionError):
-                pass
-
-        def avance(hechos: int, total: int) -> None:
-            def aplicar() -> None:
-                txt.value = f"Descargando insumos… {hechos}/{total or '?'}"
-                barra.value = (hechos / total) if total else None
-                _refrescar_dlg()
-            ui_loop.call_soon_threadsafe(aplicar)
-
-        def mensaje(texto: str) -> None:
-            def aplicar() -> None:
-                txt.value = texto
-                barra.value = None
-                _refrescar_dlg()
-            ui_loop.call_soon_threadsafe(aplicar)
-
-        resultado, error = {}, None
-
-        async def flujo() -> None:
-            nonlocal resultado, error
-            from core import empleados, insumos
-            from core.rpa_sipp import SesionSipp
-            try:
-                async with SesionSipp(headless=False) as sipp:
-                    await sipp.login(usuario, contrasena)
-                    await sipp.preparar_sesion_empresa(empresa)
-                    resultado = await insumos.descargar_catalogo(
-                        sipp, progreso=avance, solo_activo_fijo=True)
-                    # El catálogo de empleados es global (una sola descarga).
-                    mensaje("Descargando empleados…")
-                    resultado["empleados"] = (
-                        await empleados.descargar_catalogo(sipp)).get("guardados", 0)
-            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-                error = str(exc)
-
-        try:
-            await asyncio.wrap_future(bucle.enviar(flujo()))
-        finally:
-            bucle.cerrar()
-            self.page.pop_dialog()
-
-        if error:
-            self.app.avisar(f"No se pudo actualizar el catálogo: {error}", ROJO,
-                            duracion=9000)
-        else:
-            self.app.avisar(
-                f"Catálogos actualizados: {resultado.get('guardados', 0)} insumo(s) "
-                f"de «{resultado.get('empresa_nombre', empresa)}» y "
-                f"{resultado.get('empleados', 0)} empleado(s).", VERDE, duracion=7000)
+        await actualizar_info_sipp(
+            self.app, ID_POR_EMPRESA.get(empresa), empresa,
+            al_terminar=self._refrescar)
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando

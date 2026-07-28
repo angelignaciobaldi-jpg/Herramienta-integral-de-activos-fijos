@@ -7,8 +7,8 @@ aquí (se guarda como preferencia) para poder apuntarla al PWA cuando esté publ
 
 Flujo:
   1. Elegir la empresa y (opcional) fijar la URL base.
-  2. "Descargar activos del SIPP": trae los activos de esa empresa (con su
-     etiqueta) vía RPA/endpoint y los cachea.
+  2. "Actualizar información del SIPP": trae del SIPP los activos e insumos de esa
+     empresa (y los empleados, global) y los cachea (ver ui/actualizar_sipp).
   3. "Generar etiquetas (PDF)": arma la hoja de etiquetas con QR + datos y la
      exporta a PDF para imprimir y pegar.
 """
@@ -19,7 +19,7 @@ import asyncio
 
 import flet as ft
 
-from core import credenciales, db, preferencias
+from core import db, preferencias
 from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
 
@@ -66,9 +66,12 @@ class SeccionGeneradorQR:
                        vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
                 ft.Row(
                     [
-                        ft.FilledButton("Descargar activos del SIPP",
-                                        icon=ft.Icons.CLOUD_DOWNLOAD,
-                                        on_click=self._descargar),
+                        ft.FilledButton("Actualizar información del SIPP",
+                                        icon=ft.Icons.SYNC,
+                                        tooltip="Descarga del SIPP, para la empresa "
+                                                "elegida, sus activos e insumos, más el "
+                                                "catálogo de empleados (global)",
+                                        on_click=self._actualizar_sipp),
                         ft.OutlinedButton("Generar carpeta por departamento",
                                           icon=ft.Icons.FOLDER_ZIP,
                                           tooltip="Un PNG por activo (QR + etiqueta) en "
@@ -116,72 +119,25 @@ class SeccionGeneradorQR:
             self.txt_estado.value = (
                 f"{n} activo(s) con etiqueta en caché para «{self.dd_empresa.value}»{suf}."
                 if n else f"Sin activos descargados para «{self.dd_empresa.value}». "
-                          "Usa «Descargar activos del SIPP».")
+                          "Usa «Actualizar información del SIPP».")
         self._safe_update()
 
     def _guardar_base(self, _e=None) -> None:
         preferencias.guardar_valor(_CLAVE_URL, (self.tf_base.value or "").strip())
 
-    # ------------------------------------------------ descargar activos (RPA)
-    async def _descargar(self, _e=None) -> None:
-        creds = credenciales.cargar()
-        if not creds or not creds[0]:
-            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
-            return
-        usuario, contrasena = creds
-        empresa = self.dd_empresa.value
-        idemp = self._empresa_id()
-        if idemp is None:
-            self.app.avisar("Elige una empresa.", NARANJA)
-            return
+    # ------------------------------------------------ actualizar SIPP (RPA)
+    async def _actualizar_sipp(self, _e=None) -> None:
+        """Actualiza en una sola sesión la información del SIPP de la empresa
+        elegida (activos + insumos) y los empleados (global). Al terminar recarga
+        las sucursales y el estado (los activos alimentan el combo de sucursal)."""
+        from ui.actualizar_sipp import actualizar_info_sipp
 
-        from core.rpa_sipp import BucleRpa
-        bucle = BucleRpa()
-        dlg = ft.AlertDialog(
-            modal=True, title=ft.Text("Descargando activos del SIPP"),
-            content=ft.Container(
-                ft.Row([ft.ProgressRing(width=26, height=26, stroke_width=3),
-                        ft.Text(f"Consultando activos de «{empresa}» en el SIPP…")],
-                       spacing=16, tight=True),
-                width=420))
-        self.page.show_dialog(dlg)
-        self.page.update()
-
-        resultado, error = {}, None
-
-        async def flujo() -> None:
-            nonlocal resultado, error
-            from core import activos_sipp
-            from core.rpa_sipp import SesionSipp
-            try:
-                # El endpoint recibe id_Empresa como parámetro y responde con solo
-                # iniciar sesión, así que NO se configura empresa/sucursal (ese paso
-                # es el que se atoraba y aquí no hace falta). Al no requerir mirar el
-                # navegador, se corre en headless (sin ventana).
-                async with SesionSipp(headless=True) as sipp:
-                    await sipp.login(usuario, contrasena)
-                    resultado = await activos_sipp.descargar_activos(sipp, idemp, empresa)
-            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-                error = str(exc)
-
-        try:
-            await asyncio.wrap_future(bucle.enviar(flujo()))
-        finally:
-            bucle.cerrar()
-            self.page.pop_dialog()
+        def _tras() -> None:
             self._recargar_sucursales()
             self._actualizar_estado()
 
-        if error:
-            self.app.avisar(f"No se pudieron descargar los activos: {error}", ROJO,
-                            duracion=9000)
-        else:
-            n = resultado.get("guardados", 0)
-            color = VERDE if n else NARANJA
-            self.app.avisar(
-                f"{n} activo(s) con etiqueta descargados de «{empresa}»."
-                + (" (La empresa no tiene activos con etiqueta.)" if not n else ""),
-                color, duracion=7000)
+        await actualizar_info_sipp(
+            self.app, self._empresa_id(), self.dd_empresa.value, al_terminar=_tras)
 
     # ------------------------------------------------ generar carpeta por depto
     async def _generar_carpeta(self, _e=None) -> None:
