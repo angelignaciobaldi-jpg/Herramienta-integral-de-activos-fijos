@@ -195,23 +195,28 @@ class SeccionRegistroActivos:
         # distintos; texto (insumo/etiqueta/serie) como "contiene". Se combinan
         # entre sí y con el buscador global; el filtrado lo hace SQLite.
         self._filtros_col: dict = {}
-        self._TODOS = {"empresa": "Todas las empresas",
-                       "sucursal": "Todas las sucursales",
-                       "departamento": "Todos los departamentos"}
-        _WF = 185
+        # Rótulo corto para la opción "sin filtro" (así no se corta en el combo).
+        self._TODOS = {"empresa": "Todas", "sucursal": "Todas",
+                       "departamento": "Todos"}
+        # Mismas medidas para TODOS los controles del filtro (altura, ancho, fuente
+        # y padding) para que queden alineados y parejos.
+        _WF, _HF, _TS = 172, 46, 12
+        _PAD = ft.Padding.symmetric(horizontal=10, vertical=8)
 
         def _mk_dd(col, etiqueta):
             return ft.DropdownM2(
-                label=etiqueta, dense=True, width=_WF, text_size=12,
-                value=self._TODOS[col],
+                label=etiqueta, dense=True, width=_WF, height=_HF, text_size=_TS,
+                content_padding=_PAD, border_radius=8, value=self._TODOS[col],
                 options=[ft.dropdownm2.Option(key=self._TODOS[col], text=self._TODOS[col])],
                 on_change=lambda e, c=col: self._set_filtro_col(c, e.control.value))
 
         def _mk_tf(col, etiqueta):
             return ft.TextField(
-                label=etiqueta, dense=True, width=_WF, height=44, text_size=12,
-                content_padding=8,
-                on_submit=lambda e, c=col: self._set_filtro_col(c, e.control.value))
+                label=etiqueta, dense=True, width=_WF, height=_HF, text_size=_TS,
+                content_padding=_PAD, border_radius=8,
+                text_align=ft.TextAlign.CENTER,
+                on_submit=lambda e, c=col: self._set_filtro_col(c, e.control.value),
+                on_blur=lambda e, c=col: self._set_filtro_col(c, e.control.value))
 
         self.dd_f_empresa = _mk_dd("empresa", "Empresa")
         self.dd_f_sucursal = _mk_dd("sucursal", "Sucursal")
@@ -220,14 +225,16 @@ class SeccionRegistroActivos:
         self.tf_f_etiqueta = _mk_tf("etiqueta", "Etiqueta")
         self.tf_f_serie = _mk_tf("no_serie", "No. de serie")
         self._btn_limpiar_filtros = ft.TextButton(
-            "Limpiar filtros", icon=ft.Icons.FILTER_ALT_OFF,
+            "Limpiar filtros", icon=ft.Icons.FILTER_ALT_OFF, height=_HF,
             on_click=self._limpiar_filtros_col)
         self.barra_filtros = ft.Row(
             [ft.Icon(ft.Icons.FILTER_LIST, size=18, color=GRIS),
              self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
              self._btn_limpiar_filtros],
-            spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+            spacing=10, run_spacing=10, wrap=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         # Barra contextual de RPA (según la pestaña activa).
         self._barra_rpa = ft.Container()
