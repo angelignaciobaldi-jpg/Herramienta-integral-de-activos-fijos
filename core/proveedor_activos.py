@@ -64,6 +64,62 @@ class ProveedorMock(ProveedorActivos):
         return resultado
 
 
+def _norm(valor) -> str:
+    """Normaliza un identificador (etiqueta o serie) para comparar sin ruido."""
+    return str(valor or "").strip().upper()
+
+
+class SinCacheActivos(Exception):
+    """No hay activos del SIPP descargados (cacheados) para esa empresa."""
+
+
+class ProveedorSipp(ProveedorActivos):
+    """Búsqueda REAL contra los activos YA descargados del SIPP (caché
+    `activos_sipp`) de una empresa.
+
+    Un activo del levantamiento se considera *dado de alta* si su ETIQUETA o su
+    NÚMERO DE SERIE coincide con los de algún activo cacheado (match por
+    cualquiera de los dos). El caché se llena desde el módulo de QR
+    ("Descargar activos del SIPP") o el propio botón de búsqueda.
+    """
+
+    def __init__(self, id_empresa: int):
+        self.id_empresa = id_empresa
+
+    def hay_cache(self) -> bool:
+        from . import db
+        return bool(db.listar_activos_sipp(self.id_empresa))
+
+    def _indice(self) -> dict[str, str]:
+        """{identificador normalizado -> id_activo (etiqueta o serie)} con TODAS
+        las etiquetas y series de los activos cacheados de la empresa."""
+        from . import db
+        idx: dict[str, str] = {}
+        for a in db.listar_activos_sipp(self.id_empresa):
+            ident = (a.get("etiqueta") or a.get("serie") or "").strip()
+            for campo in (a.get("etiqueta"), a.get("serie")):
+                clave = _norm(campo)
+                if clave:
+                    idx.setdefault(clave, ident)
+        return idx
+
+    def buscar_por_serie(self, series: list[str]) -> dict[str, ResultadoBusqueda]:
+        idx = self._indice()
+        if not idx:
+            raise SinCacheActivos(
+                "No hay activos del SIPP descargados para esta empresa. "
+                "Descárgalos primero (módulo «Generador de códigos QR»)."
+            )
+        resultado: dict[str, ResultadoBusqueda] = {}
+        for serie in series:
+            match = idx.get(_norm(serie))
+            resultado[serie] = (
+                ResultadoBusqueda(dado_de_alta=True, id_activo_sipp=str(match),
+                                  datos={"origen": "sipp"})
+                if match else ResultadoBusqueda(dado_de_alta=False))
+        return resultado
+
+
 class ProveedorAPI(ProveedorActivos):
     """(Fase 2) Consulta el listado de activos vía los microservicios (core/api.py).
 

@@ -27,7 +27,6 @@ import os
 import flet as ft
 
 from core import archivos, credenciales, db
-from core.proveedor_activos import proveedor_por_defecto
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.captura_activo import DialogoCapturaActivo
@@ -72,7 +71,6 @@ class SeccionRegistroActivos:
     def __init__(self, app):
         self.app = app
         self.page = app.page
-        self.proveedor = proveedor_por_defecto()
         self._tab = _TAB_TODOS
         self._seleccionados: set[int] = set()
         # Paginación: un inventario completo son miles de activos y cada fila
@@ -658,42 +656,91 @@ class SeccionRegistroActivos:
 
     # ------------------------------------------------------ búsqueda en SIPP
     async def _buscar(self, _e=None) -> None:
-        registros = db.listar_levantamiento()
-        # Se busca por ETIQUETA (número de inventario) y, si el activo no la
-        # tiene, por su número de serie. En los inventarios reales la mayoría de
-        # los activos NO trae serie, así que la etiqueta es el identificador.
-        series = sorted({r.identificador() for r in registros if r.identificador()})
-        if not series:
+        """Compara cada activo del levantamiento contra los activos REALES ya
+        descargados del SIPP (caché por empresa): dado de alta si su etiqueta O
+        su número de serie coincide con los de algún activo cacheado."""
+        registros = [r for r in db.listar_levantamiento()
+                     if (r.etiqueta or "").strip() or (r.no_serie or "").strip()]
+        if not registros:
             self.app.avisar("No hay etiquetas ni números de serie que buscar.", ROJO)
             return
-        self._set_cargando(True, f"Buscando {len(series)} activo(s) en el SIPP…")
-        try:
-            resultados = await asyncio.to_thread(self.proveedor.buscar_por_serie, series)
-        except NotImplementedError as exc:
-            self._set_cargando(False)
-            self.app.avisar(str(exc), ROJO)
+        # El caché es por empresa: se agrupan los registros por su empresa.
+        from collections import defaultdict
+
+        from core.empresas import ID_POR_EMPRESA
+        por_empresa: dict[str, list] = defaultdict(list)
+        sin_empresa = 0
+        for r in registros:
+            idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
+            if idemp is None:
+                sin_empresa += 1
+            else:
+                por_empresa[r.empresa].append(r)
+        if not por_empresa:
+            self.app.avisar("Los activos no tienen una empresa válida asignada. "
+                            "Asigna la empresa (columna Empresa) y reintenta.", ROJO)
             return
+
+        self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
+        try:
+            hechos, sin_cache = await asyncio.to_thread(
+                self._buscar_por_empresa, por_empresa)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._set_cargando(False)
             self.app.avisar(f"No se pudo buscar en el SIPP: {exc}", ROJO)
             return
-        # Aplica el resultado a cada registro (por su etiqueta o su serie).
-        for r in registros:
-            serie = r.identificador()
-            if not serie:
-                continue
-            res = resultados.get(serie)
-            if res is None:
-                continue
-            estatus = db.EST_DADO_ALTA if res.dado_de_alta else db.EST_NO_DADO_ALTA
-            db.actualizar_estatus_levantamiento(r.id, estatus, res.id_activo_sipp)
         self._set_cargando(False)
+
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
         n_no = len(db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA))
         self._refrescar()
-        self.app.avisar(
-            f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta.",
-            VERDE)
+        if hechos == 0 and sin_cache:
+            self.app.avisar(
+                "Descarga primero los activos del SIPP de: "
+                + ", ".join(sin_cache)
+                + " (módulo «Generador de códigos QR»).", NARANJA, duracion=9000)
+            return
+        msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
+        extras = []
+        if sin_cache:
+            extras.append("sin caché (descárgalos): " + ", ".join(sin_cache))
+        if sin_empresa:
+            extras.append(f"{sin_empresa} sin empresa asignada")
+        if extras:
+            msg += " · " + " · ".join(extras)
+        self.app.avisar(msg, VERDE if not extras else NARANJA,
+                        duracion=9000 if extras else 6000)
+
+    def _buscar_por_empresa(self, por_empresa: dict) -> tuple[int, list[str]]:
+        """(hilo) Recorre cada empresa, usa su caché del SIPP y actualiza el
+        estatus de sus registros. Devuelve (registros_procesados, empresas_sin_caché)."""
+        from core.empresas import ID_POR_EMPRESA
+        from core.proveedor_activos import ProveedorSipp, SinCacheActivos
+        hechos = 0
+        sin_cache: list[str] = []
+        for empresa, regs in por_empresa.items():
+            proveedor = ProveedorSipp(ID_POR_EMPRESA[empresa])
+            # Se consultan ambos campos de cada registro (etiqueta y serie); el
+            # match por cualquiera cuenta como dado de alta.
+            claves = sorted({v for r in regs
+                             for v in ((r.etiqueta or "").strip(),
+                                       (r.no_serie or "").strip()) if v})
+            try:
+                resultados = proveedor.buscar_por_serie(claves)
+            except SinCacheActivos:
+                sin_cache.append(empresa)
+                continue
+            for r in regs:
+                dado, id_sipp = False, None
+                for campo in ((r.etiqueta or "").strip(), (r.no_serie or "").strip()):
+                    res = resultados.get(campo) if campo else None
+                    if res and res.dado_de_alta:
+                        dado, id_sipp = True, res.id_activo_sipp
+                        break
+                estatus = db.EST_DADO_ALTA if dado else db.EST_NO_DADO_ALTA
+                db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp)
+                hechos += 1
+        return hechos, sin_cache
 
     # ------------------------------------------------ RPA: alta en el SIPP
     def _payload_alta(self, r: "db.Levantamiento") -> tuple:
