@@ -23,13 +23,15 @@ from . import db
 
 _RUTA_PROXY = "/componentes/cfproxy.cfc?method=proxy"
 
-# Argumentos del endpoint (todos los filtros vacíos = todos los activos de la empresa).
+# Argumentos del endpoint. CLAVE: sn_Registro=1 (activos con registro finalizado);
+# sin él el endpoint devuelve 0. Los demás filtros van vacíos = todos los activos
+# de la empresa. (Mismos campos que envía la grid real del portal.)
 _ARG_BASE = {
     "id_Empresa": 0, "id_SucursalAsignado": "", "id_InsumoOrigen": "",
-    "nb_NombreInsumo": "", "de_SerieActivo": "", "de_Etiqueta": "", "sn_Activo": 0,
+    "nb_NombreInsumo": "", "de_SerieActivo": "", "de_Etiqueta": "", "sn_Activo": "",
     "id_GrupoCentroCosto": "", "id_Departamento": "", "id_EmpleadoResguardo": "",
-    "id_TipoActivo": "", "id_SituacionActivo": "", "sn_Borrado": "", "sn_Registro": "",
-    "no_economico": "",
+    "id_CentroCosto": "", "id_TipoActivo": "", "id_SituacionActivo": "",
+    "sn_Registro": 1, "fh_Inicio": "", "fh_Fin": "", "no_economico": "",
 }
 
 
