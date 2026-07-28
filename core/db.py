@@ -211,6 +211,8 @@ def inicializar() -> None:
                 serie          TEXT,
                 ubicacion      TEXT,
                 empleado       TEXT,
+                sucursal       TEXT,
+                departamento   TEXT,
                 actualizado_en TEXT,
                 PRIMARY KEY (id_empresa, etiqueta)
             )
@@ -682,24 +684,41 @@ def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
         con.executemany(
             """INSERT OR REPLACE INTO activos_sipp
                (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
-                empleado, actualizado_en)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                empleado, sucursal, departamento, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
-              r.get("serie"), r.get("ubicacion"), r.get("empleado"), actualizado_en)
+              r.get("serie"), r.get("ubicacion"), r.get("empleado"),
+              r.get("sucursal"), r.get("departamento"), actualizado_en)
              for r in filas])
     return len(filas)
 
 
-def listar_activos_sipp(id_empresa: int) -> list[dict]:
-    """Activos cacheados de una empresa (para generar sus QR/etiquetas)."""
+def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[dict]:
+    """Activos cacheados de una empresa (para generar sus QR/etiquetas). Si se pasa
+    `sucursal`, filtra por ella."""
+    cond, params = ["id_empresa = ?"], [id_empresa]
+    if sucursal:
+        cond.append("IFNULL(sucursal,'') = ?"); params.append(sucursal)
     with _conectar() as con:
         filas = con.execute(
-            "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado "
-            "FROM activos_sipp WHERE id_empresa = ? ORDER BY etiqueta",
-            (id_empresa,)).fetchall()
+            "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado, "
+            "sucursal, departamento FROM activos_sipp "
+            f"WHERE {' AND '.join(cond)} ORDER BY etiqueta", params).fetchall()
     return [{"empresa": f["empresa_nombre"], "etiqueta": f["etiqueta"],
              "insumo": f["insumo"], "serie": f["serie"],
-             "ubicacion": f["ubicacion"], "empleado": f["empleado"]} for f in filas]
+             "ubicacion": f["ubicacion"], "empleado": f["empleado"],
+             "sucursal": f["sucursal"], "departamento": f["departamento"]}
+            for f in filas]
+
+
+def sucursales_activos_sipp(id_empresa: int) -> list[str]:
+    """Sucursales distintas presentes en los activos cacheados de una empresa."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT DISTINCT sucursal FROM activos_sipp "
+            "WHERE id_empresa = ? AND IFNULL(sucursal,'') <> '' ORDER BY sucursal",
+            (id_empresa,)).fetchall()
+    return [f["sucursal"] for f in filas]
 
 
 def estado_activos_sipp() -> list[dict]:

@@ -13,8 +13,12 @@ activo. Aquí solo se generan las etiquetas para imprimir y pegar en los activos
 from __future__ import annotations
 
 import html as _html
+import io
+import os
+import re
 
 import segno
+from PIL import Image, ImageDraw, ImageFont
 
 
 def url_qr(base_url: str, etiqueta: str) -> str:
@@ -106,3 +110,82 @@ async def generar_pdf_etiquetas(activos: list[dict], ruta_pdf: str,
         return 0
     await html_a_pdf(construir_html_etiquetas(con_etiqueta, base_url), ruta_pdf)
     return len(con_etiqueta)
+
+
+# --- QR individuales en PNG organizados por departamento ------------------
+_SIN_DEPTO = "SIN DEPARTAMENTO"
+
+
+def _sanear_nombre(texto: str) -> str:
+    """Nombre válido para archivo/carpeta en Windows (sin < > : " / \\ | ? *)."""
+    limpio = re.sub(r'[<>:"/\\|?*\r\n\t]', "", str(texto or "")).strip().rstrip(".")
+    return limpio or "SIN NOMBRE"
+
+
+def png_etiqueta(activo: dict, base_url: str = "", escala: int = 10) -> bytes:
+    """PNG de un QR con la ETIQUETA (y la serie, si hay) impresa debajo — para que
+    al pegarla/imprimirla se vea el número junto al QR."""
+    etiqueta = str(activo.get("etiqueta") or "").strip()
+    serie = str(activo.get("serie") or "").strip()
+
+    # QR como PNG en memoria.
+    buf = io.BytesIO()
+    segno.make(url_qr(base_url, etiqueta), error="m").save(
+        buf, kind="png", scale=escala, border=2)
+    buf.seek(0)
+    qr_img = Image.open(buf).convert("RGB")
+    w = qr_img.width
+
+    # Lienzo: QR arriba + franja de texto abajo.
+    alto_txt = int(w * 0.22) + (int(w * 0.11) if serie else 0)
+    lienzo = Image.new("RGB", (w, w + alto_txt), "white")
+    lienzo.paste(qr_img, (0, 0))
+    dib = ImageDraw.Draw(lienzo)
+
+    f_etq = ImageFont.load_default(size=max(18, int(w * 0.12)))
+    f_ser = ImageFont.load_default(size=max(14, int(w * 0.075)))
+
+    def centrar(texto, fuente, y):
+        ancho = dib.textlength(texto, font=fuente)
+        dib.text(((w - ancho) / 2, y), texto, fill="black", font=fuente)
+
+    y = w + int(w * 0.03)
+    centrar(etiqueta, f_etq, y)
+    if serie:
+        centrar(f"Serie: {serie}", f_ser, y + int(w * 0.14))
+
+    salida = io.BytesIO()
+    lienzo.save(salida, format="PNG")
+    return salida.getvalue()
+
+
+def generar_carpeta_por_departamento(activos: list[dict], carpeta_raiz: str,
+                                     base_url: str = "", progreso=None) -> dict:
+    """Genera un PNG por activo (QR + etiqueta) dentro de `carpeta_raiz`, en
+    subcarpetas por DEPARTAMENTO. Cada archivo se nombra con la etiqueta.
+
+    `progreso(hechos, total)`: callback opcional. Devuelve
+    {generados, departamentos}."""
+    con_etiqueta = [a for a in activos if (a.get("etiqueta") or "").strip()]
+    total = len(con_etiqueta)
+    os.makedirs(carpeta_raiz, exist_ok=True)
+    departamentos, generados = set(), 0
+    usados: set[str] = set()  # rutas ya escritas (evita pisar etiquetas repetidas)
+    for a in con_etiqueta:
+        depto = _sanear_nombre(a.get("departamento") or _SIN_DEPTO)
+        carpeta = os.path.join(carpeta_raiz, depto)
+        os.makedirs(carpeta, exist_ok=True)
+        departamentos.add(depto)
+        base_arch = _sanear_nombre(a.get("etiqueta"))
+        ruta = os.path.join(carpeta, base_arch + ".png")
+        n = 2
+        while ruta.lower() in usados:
+            ruta = os.path.join(carpeta, f"{base_arch} ({n}).png")
+            n += 1
+        usados.add(ruta.lower())
+        with open(ruta, "wb") as fh:
+            fh.write(png_etiqueta(a, base_url))
+        generados += 1
+        if progreso and (generados % 25 == 0 or generados == total):
+            progreso(generados, total)
+    return {"generados": generados, "departamentos": len(departamentos)}

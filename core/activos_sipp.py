@@ -73,6 +73,8 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     i_ser = _elegir_columna(cols, "DE_SERIEACTIVO")
     i_ubi = _elegir_columna(cols, "NB_UBICACION")
     i_emp = _elegir_columna(cols, "NB_EMPLEADORESGUARDO")
+    i_suc = _elegir_columna(cols, "NB_SUCURSAL")
+    i_dep = _elegir_columna(cols, "NB_DEPARTAMENTO")
     i_nomemp = _elegir_columna(cols, "NB_EMPRESA")
 
     def val(fila, i):
@@ -87,6 +89,7 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
             "etiqueta": str(val(f, i_etq) or "").strip(),
             "insumo": val(f, i_ins), "serie": val(f, i_ser),
             "ubicacion": val(f, i_ubi), "empleado": val(f, i_emp),
+            "sucursal": val(f, i_suc), "departamento": val(f, i_dep),
         })
     guardados = db.reemplazar_activos_sipp(
         id_empresa, nombre_final or empresa_nombre or "", registros,

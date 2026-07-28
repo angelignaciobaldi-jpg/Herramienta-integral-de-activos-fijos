@@ -3,7 +3,8 @@
 flet>=0.85           # interfaz de escritorio (Material)
 openpyxl>=3.1        # lectura de los Excel de inventario (carga masiva)
 playwright>=1.60     # automatización del navegador (RPA del SIPP + PDF de etiquetas)
-segno>=1.6           # generación de códigos QR (SVG)
+segno>=1.6           # generación de códigos QR
+Pillow>=10.1         # componer el QR con la etiqueta/serie en las imágenes PNG
 
 # Requisitos externos (no son paquetes de Python):
 #   Navegador de Playwright (Chromium) -> instalar una vez con:

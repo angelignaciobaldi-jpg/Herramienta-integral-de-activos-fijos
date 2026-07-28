@@ -38,6 +38,9 @@ class SeccionGeneradorQR:
         self.dd_empresa = ft.DropdownM2(
             label="Empresa", dense=True, width=320,
             options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS],
+            on_change=lambda _e: (self._recargar_sucursales(), self._actualizar_estado()))
+        self.dd_sucursal = ft.DropdownM2(
+            label="Sucursal", dense=True, width=280,
             on_change=lambda _e: self._actualizar_estado())
         self.tf_base = ft.TextField(
             label="URL base del QR", dense=True, width=420,
@@ -56,13 +59,18 @@ class SeccionGeneradorQR:
                 self.tf_base,
                 ft.Text("El QR llevará: URL base + la etiqueta del activo.",
                         size=11, color=GRIS),
-                ft.Row([self.dd_empresa, self.progreso], spacing=14,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row([self.dd_empresa, self.dd_sucursal, self.progreso], spacing=14,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
                 ft.Row(
                     [
                         ft.FilledButton("Descargar activos del SIPP",
                                         icon=ft.Icons.CLOUD_DOWNLOAD,
                                         on_click=self._descargar),
+                        ft.OutlinedButton("Generar carpeta por departamento",
+                                          icon=ft.Icons.FOLDER_ZIP,
+                                          tooltip="Un PNG por activo (QR + etiqueta) en "
+                                                  "subcarpetas por departamento",
+                                          on_click=self._generar_carpeta),
                         ft.OutlinedButton("Generar etiquetas (PDF)",
                                           icon=ft.Icons.QR_CODE_2,
                                           on_click=self._generar_pdf),
@@ -78,14 +86,30 @@ class SeccionGeneradorQR:
     def _empresa_id(self) -> "int | None":
         return ID_POR_EMPRESA.get(self.dd_empresa.value) if self.dd_empresa.value else None
 
+    def _sucursal_sel(self) -> str:
+        """Sucursal elegida ('' = todas)."""
+        return self.dd_sucursal.value or ""
+
+    def _recargar_sucursales(self) -> None:
+        """Rellena el combo de sucursal con las presentes en la empresa cacheada."""
+        idemp = self._empresa_id()
+        sucs = db.sucursales_activos_sipp(idemp) if idemp is not None else []
+        self.dd_sucursal.options = (
+            [ft.dropdownm2.Option(key="", text="Todas las sucursales")]
+            + [ft.dropdownm2.Option(key=s, text=s) for s in sucs])
+        self.dd_sucursal.value = ""
+        self._safe_update()
+
     def _actualizar_estado(self) -> None:
         idemp = self._empresa_id()
         if idemp is None:
             self.txt_estado.value = "Elige una empresa."
         else:
-            n = len(db.listar_activos_sipp(idemp))
+            n = len(db.listar_activos_sipp(idemp, self._sucursal_sel() or None))
+            suf = (f" (sucursal «{self._sucursal_sel()}»)" if self._sucursal_sel()
+                   else "")
             self.txt_estado.value = (
-                f"{n} activo(s) con etiqueta en caché para «{self.dd_empresa.value}»."
+                f"{n} activo(s) con etiqueta en caché para «{self.dd_empresa.value}»{suf}."
                 if n else f"Sin activos descargados para «{self.dd_empresa.value}». "
                           "Usa «Descargar activos del SIPP».")
         self._safe_update()
@@ -140,6 +164,7 @@ class SeccionGeneradorQR:
         finally:
             bucle.cerrar()
             self.page.pop_dialog()
+            self._recargar_sucursales()
             self._actualizar_estado()
 
         if error:
@@ -153,13 +178,69 @@ class SeccionGeneradorQR:
                 + (" (La empresa no tiene activos con etiqueta.)" if not n else ""),
                 color, duracion=7000)
 
+    # ------------------------------------------------ generar carpeta por depto
+    async def _generar_carpeta(self, _e=None) -> None:
+        """Genera un PNG por activo (QR + etiqueta) en subcarpetas por departamento."""
+        idemp = self._empresa_id()
+        if idemp is None:
+            self.app.avisar("Elige una empresa.", NARANJA)
+            return
+        activos = db.listar_activos_sipp(idemp, self._sucursal_sel() or None)
+        if not activos:
+            self.app.avisar("No hay activos para esa empresa/sucursal. "
+                            "Descárgalos primero.", NARANJA)
+            return
+        carpeta = await self.app.picker.get_directory_path(
+            dialog_title="Elige dónde crear las carpetas de etiquetas QR")
+        if not carpeta:
+            return
+        import os
+        sub = self._sucursal_sel() or self.dd_empresa.value
+        raiz = os.path.join(carpeta, f"Etiquetas QR - {sub}")
+
+        ui_loop = asyncio.get_running_loop()
+        txt = ft.Text(f"Generando {len(activos)} etiqueta(s)…", size=13)
+        barra = ft.ProgressBar(value=0)
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("Generando carpeta de etiquetas"),
+            content=ft.Container(ft.Column([txt, barra], tight=True, spacing=12),
+                                 width=420))
+        self.page.show_dialog(dlg)
+        self.page.update()
+
+        def avance(hechos: int, total: int) -> None:
+            def aplicar() -> None:
+                txt.value = f"Generando etiquetas… {hechos}/{total}"
+                barra.value = hechos / total if total else None
+                try:
+                    dlg.update()
+                except (RuntimeError, AssertionError):
+                    pass
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        base = (self.tf_base.value or "").strip()
+        from core import qr
+        try:
+            res = await asyncio.to_thread(
+                qr.generar_carpeta_por_departamento, activos, raiz, base, avance)
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            self.page.pop_dialog()
+            self.app.avisar(f"No se pudo generar: {exc}", ROJO)
+            return
+        self.page.pop_dialog()
+        self.app.avisar(
+            f"{res['generados']} etiqueta(s) en {res['departamentos']} carpeta(s) "
+            f"por departamento.", VERDE,
+            accion="Abrir carpeta", on_accion=lambda _e: self.app.abrir_en_sistema(raiz),
+            duracion=8000)
+
     # ------------------------------------------------ generar PDF
     async def _generar_pdf(self, _e=None) -> None:
         idemp = self._empresa_id()
         if idemp is None:
             self.app.avisar("Elige una empresa.", NARANJA)
             return
-        activos = db.listar_activos_sipp(idemp)
+        activos = db.listar_activos_sipp(idemp, self._sucursal_sel() or None)
         if not activos:
             self.app.avisar("No hay activos descargados para esa empresa. "
                             "Descárgalos primero.", NARANJA)

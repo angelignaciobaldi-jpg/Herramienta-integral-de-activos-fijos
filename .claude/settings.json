@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"c:/Users/PROCESOS 3/OneDrive - ADMINISTRACION DE SERVICIOS ASKE/Escritorio/Personal/Norte Operativo/Herramienta activos fijos\" *)",
+      "Read(//c/Users/PROCESOS 3/OneDrive - ADMINISTRACION DE SERVICIOS ASKE/Escritorio/Personal/Norte Operativo/Herramienta activos fijos/**)",
+      "Bash(py -3.14 -c \"import sys,importlib.util as u; print\\(sys.version.split\\(\\)[0], sys.executable\\); print\\('flet:', bool\\(u.find_spec\\('flet'\\)\\), '| segno:', bool\\(u.find_spec\\('segno'\\)\\), '| PIL:', bool\\(u.find_spec\\('PIL'\\)\\), '| playwright:', bool\\(u.find_spec\\('playwright'\\)\\)\\)\")",
+      "Bash(py -3.14 -m pip install \"segno>=1.6\")",
+      "Bash(py -3.14 -c \"import segno, PIL; print\\('segno', segno.__version__, '| Pillow', PIL.__version__\\)\")"
+    ]
+  }
+}
