@@ -7,9 +7,10 @@ Flujo (según levantamiento de requerimientos):
   2) Tabla del levantamiento con checkbox por fila + checkbox general, acciones
      por fila (ver imagen original, eliminar) y masivas (seleccionar todos /
      eliminar seleccionados).
-  3) Botón "Buscar en SIPP": consulta el No. de serie de todos los insumos en el
-     catálogo del SIPP a través de una capa abstracta (core/proveedor_activos).
-     En Fase 1 usa datos de prueba (ProveedorMock).
+  3) Botón "Buscar en SIPP": compara cada insumo contra los activos REALES ya
+     descargados del SIPP (caché activos_sipp, por empresa) vía la capa abstracta
+     core/proveedor_activos (ProveedorSipp). Queda "dado de alta" si su etiqueta o
+     su número de serie coincide con los de algún activo cacheado.
   4) Los registros se separan en "Dados de alta" y "No dados de alta", cada uno
      consultable en su pestaña.
 
