@@ -118,6 +118,8 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 "Departamento", "select", grupo="Compra"),
     CampoActivo("FH_ADQUISICION", "dt_FH_ADQUISICION", "Fecha de adquisición", "date",
                 grupo="Compra"),
+    CampoActivo("FH_GARANTIA", "dt_FH_GARANTIA", "Fecha de garantía", "date",
+                grupo="Compra"),
     # Resguardo
     CampoActivo("nb_Empleado", "filtrosAgregar.nb_Empleado", "Empleado (resguardo)",
                 "text", requerido=True, grupo="Resguardo"),

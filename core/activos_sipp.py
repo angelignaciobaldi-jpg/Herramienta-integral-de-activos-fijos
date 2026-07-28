@@ -80,9 +80,31 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     # y su nombre, para preseleccionarlo en la captura de los dados de alta.
     i_idtipo = _elegir_columna(cols, "ID_TIPOACTIVOFIJO")
     i_tipo = _elegir_columna(cols, "NB_TIPOACTIVOFIJO")
+    # Campos EXTRA del activo (para registrar el detalle del insumo de los dados de
+    # alta): descripción, situación, costo, grupo/centro de costo, fechas e ids.
+    i_desc = _elegir_columna(cols, "DE_DESCRIPCION")
+    i_sit = _elegir_columna(cols, "NB_SITUACIONACTIVOFIJO")
+    i_costo = _elegir_columna(cols, "IM_COSTO")
+    i_gcc = _elegir_columna(cols, "NB_GRUPOCENTROCOSTO")
+    i_cc = _elegir_columna(cols, "NB_CENTROCOSTO")
+    i_fadq = _elegir_columna(cols, "FH_ADQUISICION")
+    i_fgar = _elegir_columna(cols, "FH_GARANTIA")
+    i_fasig = _elegir_columna(cols, "FH_ASIGNACION")
+    i_idemp_res = _elegir_columna(cols, "ID_EMPLEADORESGUARDO")
+    i_idins = _elegir_columna(cols, "ID_INSUMOORIGEN")
 
     def val(fila, i):
         return fila[i] if i is not None and i < len(fila) else None
+
+    def fecha(fila, i):
+        """Convierte una fecha ISO del SIPP ('2026-01-20T00:00:00') a DD/MM/AAAA."""
+        s = str(val(fila, i) or "").strip()
+        if len(s) >= 10 and s[4] == "-":
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+            except ValueError:
+                return ""
+        return s
 
     registros = []
     nombre_final = empresa_nombre
@@ -95,6 +117,19 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
             "ubicacion": val(f, i_ubi), "empleado": val(f, i_emp),
             "sucursal": val(f, i_suc), "departamento": val(f, i_dep),
             "id_tipo": val(f, i_idtipo), "tipo": val(f, i_tipo),
+            # Extra (se guarda como JSON en la caché; ver core/db.reemplazar_activos_sipp).
+            "extra": {
+                "descripcion": val(f, i_desc),
+                "situacion": val(f, i_sit),
+                "costo": val(f, i_costo),
+                "grupo_centro_costo": val(f, i_gcc),
+                "centro_costo": val(f, i_cc),
+                "fecha_adquisicion": fecha(f, i_fadq),
+                "fecha_garantia": fecha(f, i_fgar),
+                "fecha_asignacion": fecha(f, i_fasig),
+                "id_empleado_resguardo": val(f, i_idemp_res),
+                "id_insumo_origen": val(f, i_idins),
+            },
         })
     guardados = db.reemplazar_activos_sipp(
         id_empresa, nombre_final or empresa_nombre or "", registros,

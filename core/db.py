@@ -216,6 +216,7 @@ def inicializar() -> None:
                 departamento   TEXT,
                 id_tipo        INTEGER,
                 tipo           TEXT,
+                extra          TEXT,
                 actualizado_en TEXT,
                 PRIMARY KEY (id_empresa, etiqueta)
             )
@@ -225,7 +226,8 @@ def inicializar() -> None:
         # tabla ya existía y CREATE IF NOT EXISTS no las agrega).
         cols_sipp = {fila["name"] for fila in con.execute("PRAGMA table_info(activos_sipp)")}
         for col, tipo_sql in (("sucursal", "TEXT"), ("departamento", "TEXT"),
-                              ("id_tipo", "INTEGER"), ("tipo", "TEXT")):
+                              ("id_tipo", "INTEGER"), ("tipo", "TEXT"),
+                              ("extra", "TEXT")):
             if col not in cols_sipp:
                 con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} {tipo_sql}")
 
@@ -749,33 +751,46 @@ def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
         con.executemany(
             """INSERT OR REPLACE INTO activos_sipp
                (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
-                empleado, sucursal, departamento, id_tipo, tipo, actualizado_en)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                empleado, sucursal, departamento, id_tipo, tipo, extra, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
               r.get("serie"), r.get("ubicacion"), r.get("empleado"),
               r.get("sucursal"), r.get("departamento"),
-              r.get("id_tipo"), r.get("tipo"), actualizado_en)
+              r.get("id_tipo"), r.get("tipo"),
+              json.dumps(r.get("extra"), ensure_ascii=False) if r.get("extra") else None,
+              actualizado_en)
              for r in filas])
     return len(filas)
 
 
 def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[dict]:
-    """Activos cacheados de una empresa (para generar sus QR/etiquetas). Si se pasa
-    `sucursal`, filtra por ella."""
+    """Activos cacheados de una empresa (para generar sus QR/etiquetas y consultar
+    el detalle). Si se pasa `sucursal`, filtra por ella. Los campos EXTRA (guardados
+    como JSON) se fusionan en el dict de cada activo."""
     cond, params = ["id_empresa = ?"], [id_empresa]
     if sucursal:
         cond.append("IFNULL(sucursal,'') = ?"); params.append(sucursal)
     with _conectar() as con:
         filas = con.execute(
             "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado, "
-            "sucursal, departamento, id_tipo, tipo FROM activos_sipp "
+            "sucursal, departamento, id_tipo, tipo, extra FROM activos_sipp "
             f"WHERE {' AND '.join(cond)} ORDER BY etiqueta", params).fetchall()
-    return [{"empresa": f["empresa_nombre"], "etiqueta": f["etiqueta"],
-             "insumo": f["insumo"], "serie": f["serie"],
-             "ubicacion": f["ubicacion"], "empleado": f["empleado"],
-             "sucursal": f["sucursal"], "departamento": f["departamento"],
-             "id_tipo": f["id_tipo"], "tipo": f["tipo"]}
-            for f in filas]
+    activos = []
+    for f in filas:
+        base = {"empresa": f["empresa_nombre"], "etiqueta": f["etiqueta"],
+                "insumo": f["insumo"], "serie": f["serie"],
+                "ubicacion": f["ubicacion"], "empleado": f["empleado"],
+                "sucursal": f["sucursal"], "departamento": f["departamento"],
+                "id_tipo": f["id_tipo"], "tipo": f["tipo"]}
+        if f["extra"]:
+            try:
+                extra = json.loads(f["extra"])
+                if isinstance(extra, dict):
+                    base.update(extra)
+            except (ValueError, TypeError):
+                pass
+        activos.append(base)
+    return activos
 
 
 def sucursales_activos_sipp(id_empresa: int) -> list[str]:

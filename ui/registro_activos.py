@@ -66,6 +66,36 @@ def parsear_nombre(nombre_archivo: str) -> tuple[str, str]:
     return base.strip(), ""
 
 
+def _prefill_desde_sipp(info: dict) -> dict:
+    """Traduce los datos del SIPP (info_sipp) a las claves del formulario de captura
+    (datos_json), para registrar el detalle del insumo de un activo dado de alta.
+    Solo incluye lo que trae valor."""
+    from core.tipos_activo import SITUACIONES
+    m = {
+        "nb_NombreInsumo": info.get("insumo"),
+        "nu_Serie": info.get("serie"),
+        "de_DescripcionActivo": info.get("descripcion"),
+        "im_Costo": info.get("costo"),
+        "id_GrupoCentroCosto": info.get("grupo_centro_costo"),
+        "id_CentroCosto": info.get("centro_costo"),
+        "id_Departamento": info.get("departamento"),
+        "de_Ubicacion": info.get("ubicacion"),
+        "FH_ADQUISICION": info.get("fecha_adquisicion"),
+        "FH_GARANTIA": info.get("fecha_garantia"),
+        "FH_ASIGNACION": info.get("fecha_asignacion"),
+        "nb_Empleado": info.get("empleado"),
+        "id_EmpleadoResguardo": info.get("id_empleado_resguardo"),
+        "id_InsumoOrigen": info.get("id_insumo_origen"),
+    }
+    # La situación es un combo con opciones fijas: solo se precarga si el nombre
+    # del SIPP coincide con una del catálogo (si no, quedaría en blanco).
+    sit = str(info.get("situacion") or "").strip()
+    if sit in set(SITUACIONES.values()):
+        m["id_Situacion"] = sit
+    return {k: str(v).strip() for k, v in m.items()
+            if v not in (None, "") and str(v).strip()}
+
+
 class SeccionRegistroActivos:
     """Levantamiento: carga de imágenes, tabla, búsqueda y categorización."""
 
@@ -680,11 +710,18 @@ class SeccionRegistroActivos:
             return
         # Campo del SIPP -> etiqueta legible, en el orden en que se muestran.
         campos = [
-            ("etiqueta", "Etiqueta"), ("insumo", "Insumo"), ("serie", "No. de serie"),
-            ("tipo", "Tipo de activo"),
+            ("etiqueta", "Etiqueta"), ("insumo", "Insumo"),
+            ("descripcion", "Descripción"), ("serie", "No. de serie"),
+            ("tipo", "Tipo de activo"), ("situacion", "Situación"),
+            ("costo", "Costo"),
             ("empresa", "Empresa"), ("sucursal", "Sucursal"),
-            ("departamento", "Departamento"), ("ubicacion", "Ubicación"),
-            ("empleado", "Empleado resguardo"),
+            ("departamento", "Departamento"),
+            ("grupo_centro_costo", "Grupo centro de costo"),
+            ("centro_costo", "Centro de costo"),
+            ("ubicacion", "Ubicación"), ("empleado", "Empleado resguardo"),
+            ("fecha_adquisicion", "Fecha de adquisición"),
+            ("fecha_garantia", "Fecha de garantía"),
+            ("fecha_asignacion", "Fecha de asignación"),
         ]
         filas = []
         for clave, etq in campos:
@@ -876,15 +913,20 @@ class SeccionRegistroActivos:
                 # Al dar de alta se guardan los datos reales del SIPP para
                 # consultarlos; si no, se limpian (None) para no dejar rastros.
                 db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp, datos_sipp)
-                # El SIPP conoce el tipo del activo: se preselecciona en la captura
-                # (sin pisar un tipo ya asignado a mano).
-                if dado and r.id_tipo_activo is None and datos_sipp:
+                # El SIPP conoce el tipo y el detalle del activo: se preseleccionan
+                # en la captura, SIN pisar lo que el usuario ya haya capturado.
+                if dado and datos_sipp:
                     try:
                         idt = int(datos_sipp.get("id_tipo"))
                     except (TypeError, ValueError):
                         idt = None
-                    if idt in TIPOS_ACTIVO:
-                        db.actualizar_datos_levantamiento(r.id, id_tipo_activo=idt)
+                    id_tipo_nuevo = (idt if idt in TIPOS_ACTIVO
+                                     and r.id_tipo_activo is None else None)
+                    # Prefill del detalle del insumo solo si aún no hay captura.
+                    prefill = _prefill_desde_sipp(datos_sipp) if not r.datos() else None
+                    if id_tipo_nuevo is not None or prefill:
+                        db.actualizar_datos_levantamiento(
+                            r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill)
                 hechos += 1
         return hechos, sin_cache
 
