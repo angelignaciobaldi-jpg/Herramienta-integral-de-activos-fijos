@@ -218,6 +218,12 @@ def inicializar() -> None:
             )
             """
         )
+        # Migración: las bases creadas antes del filtro de sucursal no tienen
+        # estas columnas (la tabla ya existía y CREATE IF NOT EXISTS no las agrega).
+        cols_sipp = {fila["name"] for fila in con.execute("PRAGMA table_info(activos_sipp)")}
+        for col in ("sucursal", "departamento"):
+            if col not in cols_sipp:
+                con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} TEXT")
 
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
