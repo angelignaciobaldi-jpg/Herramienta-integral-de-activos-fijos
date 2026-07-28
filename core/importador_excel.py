@@ -30,8 +30,8 @@ import openpyxl
 from . import db
 
 # Encabezados que se buscan (en MAYÚSCULAS, sin acentos) -> campo interno.
-# Las sábanas estandarizadas traen, además, ORIGEN (sitio) y AREA (área), que se
-# usan por fila para autollenar sucursal y departamento (ver _importar_hoja).
+# Las sábanas estandarizadas traen EMPRESA, SUCURSAL, ORIGEN (sitio) y AREA (área),
+# que se usan por fila para autollenar el registro (ver _importar_hoja).
 _ENCABEZADOS = {
     "INSUMO": "insumo",
     "CANTIDAD": "cantidad",
@@ -39,6 +39,8 @@ _ENCABEZADOS = {
     "SERIE": "serie",
     "RESPONSABLE": "responsable",
     "UBICACION": "ubicacion",
+    "EMPRESA": "empresa",
+    "SUCURSAL": "sucursal",
     "ORIGEN": "origen",
     "AREA": "area",
 }
@@ -150,11 +152,13 @@ def importar(ruta: str, hojas: list[str], empresa: str = "", sucursal: str = "",
              departamento: str = "", progreso=None) -> ResultadoImportacion:
     """Importa las `hojas` indicadas del archivo al levantamiento.
 
-    Cada fila se expande en un registro por ETIQUETA. La EMPRESA se toma del
-    argumento (el archivo no la trae). La SUCURSAL y el DEPARTAMENTO se autollenan
-    por fila desde las columnas ORIGEN y AREA cuando existen; si la hoja no las
-    trae, se usan los valores de `sucursal`/`departamento` como respaldo. El TIPO
-    de activo se deja vacío para asignarlo después desde la herramienta.
+    Cada fila se expande en un registro por ETIQUETA. EMPRESA, SUCURSAL y
+    DEPARTAMENTO (columna AREA) se autollenan por fila desde el archivo cuando
+    existen esas columnas; si la hoja no las trae, se usan los argumentos
+    `empresa`/`sucursal`/`departamento` como respaldo. La ubicación combina el
+    sitio (ORIGEN) con la UBICACIÓN. En sábanas antiguas sin columna SUCURSAL,
+    ORIGEN se usa como sucursal (compatibilidad). El TIPO de activo se deja vacío
+    para asignarlo después desde la herramienta.
 
     `progreso(hecho, total, hoja)`: callback opcional para reflejar el avance.
     """
@@ -191,11 +195,23 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
         etiquetas = _partes(valores.get("etiqueta"))
         series = _partes(valores.get("serie"))
         responsable = str(valores.get("responsable") or "").strip()
-        ubicacion = str(valores.get("ubicacion") or "").strip()
-        # Sucursal y departamento se autollenan por fila (ORIGEN/AREA); si la hoja
-        # no trae la columna o la celda está vacía, se usa el valor de la UI.
-        suc_fila = str(valores.get("origen") or "").strip() or sucursal
+        # Empresa/sucursal/departamento se autollenan por fila desde sus columnas;
+        # si la hoja no trae la columna (o la celda está vacía) se usa el valor de
+        # la UI como respaldo.
+        emp_fila = str(valores.get("empresa") or "").strip() or empresa
         dep_fila = str(valores.get("area") or "").strip() or departamento
+        origen = str(valores.get("origen") or "").strip()
+        ubic = str(valores.get("ubicacion") or "").strip()
+        suc_col = str(valores.get("sucursal") or "").strip()
+        if suc_col:
+            # Formato con columna SUCURSAL: esa es la sucursal; ORIGEN (el sitio)
+            # enriquece la ubicación para no perderlo.
+            suc_fila = suc_col
+            ubic_fila = " — ".join(p for p in (origen, ubic) if p)
+        else:
+            # Formato anterior sin columna SUCURSAL: ORIGEN es la sucursal.
+            suc_fila = origen or sucursal
+            ubic_fila = ubic
 
         if not etiquetas:
             # Sin etiqueta: se guarda un único registro (se identificará por
@@ -212,8 +228,8 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
                 "etiqueta": etiqueta,
                 "no_serie": series[i] if i < len(series) else "",
                 "responsable": responsable,
-                "ubicacion": ubicacion,
-                "empresa": empresa,
+                "ubicacion": ubic_fila,
+                "empresa": emp_fila,
                 "sucursal": suc_fila,
                 "departamento": dep_fila,
             })

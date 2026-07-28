@@ -23,11 +23,12 @@ from ui.comun import GRIS, NARANJA, ROJO, VERDE
 _ANCHO = 640
 
 # Campo interno detectado -> cómo se llena en el registro (para mostrarlo en el
-# diálogo y que se vea qué se autollena desde el archivo).
+# diálogo y que se vea qué se autollena desde el archivo). Se deduplican las
+# etiquetas repetidas (ORIGEN y UBICACIÓN alimentan ambas la "Ubicación").
 _CAMPO_A_ETIQUETA = {
-    "insumo": "Insumo", "etiqueta": "Etiqueta", "serie": "Serie",
-    "responsable": "Responsable", "ubicacion": "Ubicación",
-    "origen": "Sucursal", "area": "Departamento",
+    "empresa": "Empresa", "sucursal": "Sucursal", "insumo": "Insumo",
+    "etiqueta": "Etiqueta", "serie": "Serie", "responsable": "Responsable",
+    "area": "Departamento", "origen": "Ubicación", "ubicacion": "Ubicación",
 }
 
 
@@ -107,8 +108,8 @@ class DialogoCargaMasiva:
             if h.importable:
                 chk = ft.Checkbox(value=True, on_change=lambda _e: self._recalcular())
                 self._checks[h.nombre] = chk
-                campos = ", ".join(
-                    _CAMPO_A_ETIQUETA[c] for c in _CAMPO_A_ETIQUETA if c in h.columnas)
+                campos = ", ".join(dict.fromkeys(
+                    _CAMPO_A_ETIQUETA[c] for c in _CAMPO_A_ETIQUETA if c in h.columnas))
                 controles.append(ft.Row(
                     [chk,
                      ft.Column(
