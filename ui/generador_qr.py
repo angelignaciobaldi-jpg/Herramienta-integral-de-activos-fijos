@@ -24,6 +24,9 @@ from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
 
 _CLAVE_URL = "qr_base_url"
+# DropdownM2 muestra el `key` de la opción (no el `text`), así que la opción
+# "todas" necesita un key legible; se trata como "sin filtro".
+_TODAS = "Todas las sucursales"
 
 
 class SeccionGeneradorQR:
@@ -88,16 +91,18 @@ class SeccionGeneradorQR:
 
     def _sucursal_sel(self) -> str:
         """Sucursal elegida ('' = todas)."""
-        return self.dd_sucursal.value or ""
+        val = self.dd_sucursal.value or ""
+        return "" if val == _TODAS else val
 
     def _recargar_sucursales(self) -> None:
         """Rellena el combo de sucursal con las presentes en la empresa cacheada."""
         idemp = self._empresa_id()
         sucs = db.sucursales_activos_sipp(idemp) if idemp is not None else []
+        # key == lo que muestra DropdownM2; _TODAS se interpreta como "sin filtro".
         self.dd_sucursal.options = (
-            [ft.dropdownm2.Option(key="", text="Todas las sucursales")]
+            [ft.dropdownm2.Option(key=_TODAS, text=_TODAS)]
             + [ft.dropdownm2.Option(key=s, text=s) for s in sucs])
-        self.dd_sucursal.value = ""
+        self.dd_sucursal.value = _TODAS
         self._safe_update()
 
     def _actualizar_estado(self) -> None:
