@@ -12,8 +12,94 @@ import asyncio
 
 import flet as ft
 
-from core import credenciales
+from core import credenciales, preferencias
+from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
+
+# Preferencia: última empresa actualizada (para proponerla la próxima vez).
+_CLAVE_EMPRESA = "sipp_actualizar_empresa"
+
+
+class DialogoActualizarSipp:
+    """Modal para actualizar la información del SIPP eligiendo la empresa.
+
+    La primera vez (o si se pide) muestra un selector de empresa. Si ya se actualizó
+    antes, muestra la empresa actual con la opción de volver a actualizar con ella o
+    de elegir otra. `set_empresa(nombre)` refleja la elección en el módulo (p. ej.
+    su selector) y `al_terminar()` refresca tras la descarga.
+    """
+
+    def __init__(self, app, set_empresa=None, al_terminar=None):
+        self.app = app
+        self.page = app.page
+        self.set_empresa = set_empresa
+        self.al_terminar = al_terminar
+        self._dd = None
+        self._empresa_sel = None
+
+    def abrir(self, _e=None) -> None:
+        ultima = preferencias.cargar_valor(_CLAVE_EMPRESA)
+        if ultima and ultima in ID_POR_EMPRESA:
+            self._mostrar_confirmar(ultima)
+        else:
+            self._mostrar_seleccionar()
+
+    def _mostrar_confirmar(self, empresa: str) -> None:
+        self._empresa_sel = empresa
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("Actualizar información del SIPP"),
+            content=ft.Container(
+                ft.Column([
+                    ft.Text(f"Empresa actual: «{empresa}».", size=14,
+                            weight=ft.FontWeight.W_600),
+                    ft.Text("Puedes actualizar de nuevo con esta empresa o elegir otra.",
+                            size=12, color=GRIS)], tight=True, spacing=8), width=440),
+            actions=[
+                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
+                ft.TextButton("Seleccionar otra empresa",
+                              on_click=lambda _e, emp=empresa: self._mostrar_seleccionar(emp)),
+                ft.FilledButton(f"Actualizar «{empresa}»", icon=ft.Icons.SYNC,
+                                on_click=self._ejecutar_confirmada),
+            ], actions_alignment=ft.MainAxisAlignment.END)
+        self.page.show_dialog(dlg)
+        self.page.update()
+
+    def _mostrar_seleccionar(self, sugerida: str | None = None) -> None:
+        self._dd = ft.DropdownM2(
+            label="Empresa", dense=True, width=380, value=sugerida or None,
+            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("Selecciona la empresa a actualizar"),
+            content=ft.Container(
+                ft.Column([self._dd,
+                           ft.Text("Se descargarán sus insumos y activos, más el "
+                                   "catálogo de empleados (global).",
+                                   size=11, color=GRIS)], tight=True, spacing=10),
+                width=420),
+            actions=[
+                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
+                ft.FilledButton("Actualizar", icon=ft.Icons.SYNC,
+                                on_click=self._ejecutar_seleccion),
+            ], actions_alignment=ft.MainAxisAlignment.END)
+        self.page.show_dialog(dlg)
+        self.page.update()
+
+    async def _ejecutar_confirmada(self, _e=None) -> None:
+        await self._correr(self._empresa_sel)
+
+    async def _ejecutar_seleccion(self, _e=None) -> None:
+        await self._correr(self._dd.value if self._dd else None)
+
+    async def _correr(self, empresa: str | None) -> None:
+        if not empresa or empresa not in ID_POR_EMPRESA:
+            self.app.avisar("Elige una empresa.", NARANJA)
+            return
+        self.page.pop_dialog()  # cierra el modal de selección/confirmación
+        preferencias.guardar_valor(_CLAVE_EMPRESA, empresa)
+        if callable(self.set_empresa):
+            self.set_empresa(empresa)
+        await actualizar_info_sipp(self.app, ID_POR_EMPRESA.get(empresa), empresa,
+                                   al_terminar=self.al_terminar)
 
 
 async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) -> None:

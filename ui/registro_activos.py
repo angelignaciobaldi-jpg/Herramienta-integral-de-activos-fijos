@@ -1128,15 +1128,17 @@ class SeccionRegistroActivos:
             self.app.avisar(f"{exitosos} activo(s) actualizado(s) en el SIPP.", VERDE)
 
     # ------------------------------------ actualizar catálogo de insumos
-    async def _actualizar_sipp(self, _e=None) -> None:
-        """Actualiza en una sola sesión la información del SIPP de la empresa
-        seleccionada (insumos + activos) y los empleados (global)."""
-        from core.empresas import ID_POR_EMPRESA
-        from ui.actualizar_sipp import actualizar_info_sipp
-        empresa = self.dd_empresa.value
-        await actualizar_info_sipp(
-            self.app, ID_POR_EMPRESA.get(empresa), empresa,
-            al_terminar=self._refrescar)
+    def _actualizar_sipp(self, _e=None) -> None:
+        """Abre el modal para elegir empresa y actualizar su información del SIPP
+        (insumos + activos) y los empleados (global)."""
+        from ui.actualizar_sipp import DialogoActualizarSipp
+
+        def _fijar(nombre: str) -> None:
+            self.dd_empresa.value = nombre
+            self._safe_update()
+
+        DialogoActualizarSipp(self.app, set_empresa=_fijar,
+                              al_terminar=self._refrescar).abrir()
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando

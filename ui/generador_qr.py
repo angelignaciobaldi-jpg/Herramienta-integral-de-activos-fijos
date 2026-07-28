@@ -126,18 +126,21 @@ class SeccionGeneradorQR:
         preferencias.guardar_valor(_CLAVE_URL, (self.tf_base.value or "").strip())
 
     # ------------------------------------------------ actualizar SIPP (RPA)
-    async def _actualizar_sipp(self, _e=None) -> None:
-        """Actualiza en una sola sesión la información del SIPP de la empresa
-        elegida (activos + insumos) y los empleados (global). Al terminar recarga
-        las sucursales y el estado (los activos alimentan el combo de sucursal)."""
-        from ui.actualizar_sipp import actualizar_info_sipp
+    def _actualizar_sipp(self, _e=None) -> None:
+        """Abre el modal para elegir empresa y actualizar su información del SIPP
+        (activos + insumos) y los empleados (global). Al fijar/terminar sincroniza
+        el selector de empresa, las sucursales y el estado."""
+        from ui.actualizar_sipp import DialogoActualizarSipp
+
+        def _fijar(nombre: str) -> None:
+            self.dd_empresa.value = nombre
+            self._recargar_sucursales()
 
         def _tras() -> None:
             self._recargar_sucursales()
             self._actualizar_estado()
 
-        await actualizar_info_sipp(
-            self.app, self._empresa_id(), self.dd_empresa.value, al_terminar=_tras)
+        DialogoActualizarSipp(self.app, set_empresa=_fijar, al_terminar=_tras).abrir()
 
     # ------------------------------------------------ generar carpeta por depto
     async def _generar_carpeta(self, _e=None) -> None:
