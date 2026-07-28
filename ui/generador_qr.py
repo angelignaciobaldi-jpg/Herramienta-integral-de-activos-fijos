@@ -159,8 +159,15 @@ class SeccionGeneradorQR:
         if not carpeta:
             return
         import os
-        sub = self._sucursal_sel() or self.dd_empresa.value
-        raiz = os.path.join(carpeta, f"Etiquetas QR - {sub}")
+
+        from core.qr import _sanear_nombre
+        # Nombre de la carpeta raíz: "Etiquetas QR - Empresa[ - Sucursal]"
+        # (la sucursal solo si se filtró por una en concreto).
+        partes = ["Etiquetas QR", self.dd_empresa.value or ""]
+        if self._sucursal_sel():
+            partes.append(self._sucursal_sel())
+        nombre_raiz = _sanear_nombre(" - ".join(p for p in partes if p))
+        raiz = os.path.join(carpeta, nombre_raiz)
 
         ui_loop = asyncio.get_running_loop()
         txt = ft.Text(f"Generando {len(activos)} etiqueta(s)…", size=13)
