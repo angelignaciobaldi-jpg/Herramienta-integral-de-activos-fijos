@@ -214,17 +214,20 @@ def inicializar() -> None:
                 empleado       TEXT,
                 sucursal       TEXT,
                 departamento   TEXT,
+                id_tipo        INTEGER,
+                tipo           TEXT,
                 actualizado_en TEXT,
                 PRIMARY KEY (id_empresa, etiqueta)
             )
             """
         )
-        # Migración: las bases creadas antes del filtro de sucursal no tienen
-        # estas columnas (la tabla ya existía y CREATE IF NOT EXISTS no las agrega).
+        # Migración: las bases creadas antes de estas columnas no las tienen (la
+        # tabla ya existía y CREATE IF NOT EXISTS no las agrega).
         cols_sipp = {fila["name"] for fila in con.execute("PRAGMA table_info(activos_sipp)")}
-        for col in ("sucursal", "departamento"):
+        for col, tipo_sql in (("sucursal", "TEXT"), ("departamento", "TEXT"),
+                              ("id_tipo", "INTEGER"), ("tipo", "TEXT")):
             if col not in cols_sipp:
-                con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} TEXT")
+                con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} {tipo_sql}")
 
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
@@ -746,11 +749,12 @@ def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
         con.executemany(
             """INSERT OR REPLACE INTO activos_sipp
                (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
-                empleado, sucursal, departamento, actualizado_en)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                empleado, sucursal, departamento, id_tipo, tipo, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
               r.get("serie"), r.get("ubicacion"), r.get("empleado"),
-              r.get("sucursal"), r.get("departamento"), actualizado_en)
+              r.get("sucursal"), r.get("departamento"),
+              r.get("id_tipo"), r.get("tipo"), actualizado_en)
              for r in filas])
     return len(filas)
 
@@ -764,12 +768,13 @@ def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[di
     with _conectar() as con:
         filas = con.execute(
             "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado, "
-            "sucursal, departamento FROM activos_sipp "
+            "sucursal, departamento, id_tipo, tipo FROM activos_sipp "
             f"WHERE {' AND '.join(cond)} ORDER BY etiqueta", params).fetchall()
     return [{"empresa": f["empresa_nombre"], "etiqueta": f["etiqueta"],
              "insumo": f["insumo"], "serie": f["serie"],
              "ubicacion": f["ubicacion"], "empleado": f["empleado"],
-             "sucursal": f["sucursal"], "departamento": f["departamento"]}
+             "sucursal": f["sucursal"], "departamento": f["departamento"],
+             "id_tipo": f["id_tipo"], "tipo": f["tipo"]}
             for f in filas]
 
 

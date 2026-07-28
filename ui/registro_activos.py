@@ -680,6 +680,7 @@ class SeccionRegistroActivos:
         # Campo del SIPP -> etiqueta legible, en el orden en que se muestran.
         campos = [
             ("etiqueta", "Etiqueta"), ("insumo", "Insumo"), ("serie", "No. de serie"),
+            ("tipo", "Tipo de activo"),
             ("empresa", "Empresa"), ("sucursal", "Sucursal"),
             ("departamento", "Departamento"), ("ubicacion", "Ubicación"),
             ("empleado", "Empleado resguardo"),
@@ -874,6 +875,15 @@ class SeccionRegistroActivos:
                 # Al dar de alta se guardan los datos reales del SIPP para
                 # consultarlos; si no, se limpian (None) para no dejar rastros.
                 db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp, datos_sipp)
+                # El SIPP conoce el tipo del activo: se preselecciona en la captura
+                # (sin pisar un tipo ya asignado a mano).
+                if dado and r.id_tipo_activo is None and datos_sipp:
+                    try:
+                        idt = int(datos_sipp.get("id_tipo"))
+                    except (TypeError, ValueError):
+                        idt = None
+                    if idt in TIPOS_ACTIVO:
+                        db.actualizar_datos_levantamiento(r.id, id_tipo_activo=idt)
                 hechos += 1
         return hechos, sin_cache
 

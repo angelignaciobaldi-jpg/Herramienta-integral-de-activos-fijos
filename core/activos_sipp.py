@@ -76,6 +76,10 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     i_suc = _elegir_columna(cols, "NB_SUCURSAL")
     i_dep = _elegir_columna(cols, "NB_DEPARTAMENTO")
     i_nomemp = _elegir_columna(cols, "NB_EMPRESA")
+    # Tipo de activo del SIPP: su id (coincide con core.tipos_activo.TIPOS_ACTIVO)
+    # y su nombre, para preseleccionarlo en la captura de los dados de alta.
+    i_idtipo = _elegir_columna(cols, "ID_TIPOACTIVOFIJO")
+    i_tipo = _elegir_columna(cols, "NB_TIPOACTIVOFIJO")
 
     def val(fila, i):
         return fila[i] if i is not None and i < len(fila) else None
@@ -90,6 +94,7 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
             "insumo": val(f, i_ins), "serie": val(f, i_ser),
             "ubicacion": val(f, i_ubi), "empleado": val(f, i_emp),
             "sucursal": val(f, i_suc), "departamento": val(f, i_dep),
+            "id_tipo": val(f, i_idtipo), "tipo": val(f, i_tipo),
         })
     guardados = db.reemplazar_activos_sipp(
         id_empresa, nombre_final or empresa_nombre or "", registros,
