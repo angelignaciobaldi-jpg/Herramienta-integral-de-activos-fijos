@@ -114,6 +114,7 @@ async def generar_pdf_etiquetas(activos: list[dict], ruta_pdf: str,
 
 # --- QR individuales en PNG organizados por departamento ------------------
 _SIN_DEPTO = "SIN DEPARTAMENTO"
+_SIN_SUC = "SIN SUCURSAL"
 
 
 def _sanear_nombre(texto: str) -> str:
@@ -123,10 +124,9 @@ def _sanear_nombre(texto: str) -> str:
 
 
 def png_etiqueta(activo: dict, base_url: str = "", escala: int = 10) -> bytes:
-    """PNG de un QR con la ETIQUETA (y la serie, si hay) impresa debajo — para que
-    al pegarla/imprimirla se vea el número junto al QR."""
+    """PNG de un QR con la ETIQUETA impresa debajo — para que al pegarla/imprimirla
+    se vea el número junto al QR."""
     etiqueta = str(activo.get("etiqueta") or "").strip()
-    serie = str(activo.get("serie") or "").strip()
 
     # QR como PNG en memoria.
     buf = io.BytesIO()
@@ -136,23 +136,15 @@ def png_etiqueta(activo: dict, base_url: str = "", escala: int = 10) -> bytes:
     qr_img = Image.open(buf).convert("RGB")
     w = qr_img.width
 
-    # Lienzo: QR arriba + franja de texto abajo.
-    alto_txt = int(w * 0.22) + (int(w * 0.11) if serie else 0)
+    # Lienzo: QR arriba + franja de texto abajo (solo la etiqueta).
+    alto_txt = int(w * 0.22)
     lienzo = Image.new("RGB", (w, w + alto_txt), "white")
     lienzo.paste(qr_img, (0, 0))
     dib = ImageDraw.Draw(lienzo)
 
     f_etq = ImageFont.load_default(size=max(18, int(w * 0.12)))
-    f_ser = ImageFont.load_default(size=max(14, int(w * 0.075)))
-
-    def centrar(texto, fuente, y):
-        ancho = dib.textlength(texto, font=fuente)
-        dib.text(((w - ancho) / 2, y), texto, fill="black", font=fuente)
-
-    y = w + int(w * 0.03)
-    centrar(etiqueta, f_etq, y)
-    if serie:
-        centrar(f"Serie: {serie}", f_ser, y + int(w * 0.14))
+    ancho = dib.textlength(etiqueta, font=f_etq)
+    dib.text(((w - ancho) / 2, w + int(w * 0.03)), etiqueta, fill="black", font=f_etq)
 
     salida = io.BytesIO()
     lienzo.save(salida, format="PNG")
@@ -160,20 +152,30 @@ def png_etiqueta(activo: dict, base_url: str = "", escala: int = 10) -> bytes:
 
 
 def generar_carpeta_por_departamento(activos: list[dict], carpeta_raiz: str,
-                                     base_url: str = "", progreso=None) -> dict:
+                                     base_url: str = "", progreso=None,
+                                     por_sucursal: bool = False) -> dict:
     """Genera un PNG por activo (QR + etiqueta) dentro de `carpeta_raiz`, en
     subcarpetas por DEPARTAMENTO. Cada archivo se nombra con la etiqueta.
 
+    Si `por_sucursal` es True, se antepone un nivel por SUCURSAL:
+    `raíz / Sucursal / Departamento / etiqueta.png` (para cuando se generan todas
+    las sucursales juntas). Si es False: `raíz / Departamento / etiqueta.png`.
+
     `progreso(hechos, total)`: callback opcional. Devuelve
-    {generados, departamentos}."""
+    {generados, departamentos, sucursales}."""
     con_etiqueta = [a for a in activos if (a.get("etiqueta") or "").strip()]
     total = len(con_etiqueta)
     os.makedirs(carpeta_raiz, exist_ok=True)
-    departamentos, generados = set(), 0
+    departamentos, sucursales, generados = set(), set(), 0
     usados: set[str] = set()  # rutas ya escritas (evita pisar etiquetas repetidas)
     for a in con_etiqueta:
         depto = _sanear_nombre(a.get("departamento") or _SIN_DEPTO)
-        carpeta = os.path.join(carpeta_raiz, depto)
+        if por_sucursal:
+            suc = _sanear_nombre(a.get("sucursal") or _SIN_SUC)
+            sucursales.add(suc)
+            carpeta = os.path.join(carpeta_raiz, suc, depto)
+        else:
+            carpeta = os.path.join(carpeta_raiz, depto)
         os.makedirs(carpeta, exist_ok=True)
         departamentos.add(depto)
         base_arch = _sanear_nombre(a.get("etiqueta"))
@@ -188,4 +190,5 @@ def generar_carpeta_por_departamento(activos: list[dict], carpeta_raiz: str,
         generados += 1
         if progreso and (generados % 25 == 0 or generados == total):
             progreso(generados, total)
-    return {"generados": generados, "departamentos": len(departamentos)}
+    return {"generados": generados, "departamentos": len(departamentos),
+            "sucursales": len(sucursales)}

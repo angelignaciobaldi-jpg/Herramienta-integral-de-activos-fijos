@@ -190,18 +190,24 @@ class SeccionGeneradorQR:
             ui_loop.call_soon_threadsafe(aplicar)
 
         base = (self.tf_base.value or "").strip()
+        # Sin sucursal fija (Todas): se agrupa además por sucursal
+        # (raíz / Sucursal / Departamento). Con una sucursal elegida, solo por depto.
+        por_sucursal = not self._sucursal_sel()
         from core import qr
         try:
             res = await asyncio.to_thread(
-                qr.generar_carpeta_por_departamento, activos, raiz, base, avance)
+                qr.generar_carpeta_por_departamento, activos, raiz, base, avance,
+                por_sucursal)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self.page.pop_dialog()
             self.app.avisar(f"No se pudo generar: {exc}", ROJO)
             return
         self.page.pop_dialog()
+        detalle = (f"en {res['sucursales']} sucursal(es), {res['departamentos']} "
+                   f"departamento(s)" if por_sucursal
+                   else f"en {res['departamentos']} carpeta(s) por departamento")
         self.app.avisar(
-            f"{res['generados']} etiqueta(s) en {res['departamentos']} carpeta(s) "
-            f"por departamento.", VERDE,
+            f"{res['generados']} etiqueta(s) {detalle}.", VERDE,
             accion="Abrir carpeta", on_accion=lambda _e: self.app.abrir_en_sistema(raiz),
             duracion=8000)
 
