@@ -82,7 +82,7 @@ class SeccionRegistroActivos:
         self.dialogo_captura = DialogoCapturaActivo(app, al_guardar=self._refrescar)
         # Carga masiva desde Excel: toma el contexto de los selectores de arriba.
         self.dialogo_carga = DialogoCargaMasiva(
-            app, contexto=self._contexto_actual, al_terminar=self._refrescar)
+            app, contexto=self._contexto_actual, al_terminar=self._tras_importar)
         self._construir()
 
     def _contexto_actual(self) -> tuple:
@@ -190,6 +190,45 @@ class SeccionRegistroActivos:
             spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+        # --- Filtros por columna (estilo Excel) -------------------------------
+        # Categóricos (empresa/sucursal/departamento) como desplegable de valores
+        # distintos; texto (insumo/etiqueta/serie) como "contiene". Se combinan
+        # entre sí y con el buscador global; el filtrado lo hace SQLite.
+        self._filtros_col: dict = {}
+        self._TODOS = {"empresa": "Todas las empresas",
+                       "sucursal": "Todas las sucursales",
+                       "departamento": "Todos los departamentos"}
+        _WF = 185
+
+        def _mk_dd(col, etiqueta):
+            return ft.DropdownM2(
+                label=etiqueta, dense=True, width=_WF, text_size=12,
+                value=self._TODOS[col],
+                options=[ft.dropdownm2.Option(key=self._TODOS[col], text=self._TODOS[col])],
+                on_change=lambda e, c=col: self._set_filtro_col(c, e.control.value))
+
+        def _mk_tf(col, etiqueta):
+            return ft.TextField(
+                label=etiqueta, dense=True, width=_WF, height=44, text_size=12,
+                content_padding=8,
+                on_submit=lambda e, c=col: self._set_filtro_col(c, e.control.value))
+
+        self.dd_f_empresa = _mk_dd("empresa", "Empresa")
+        self.dd_f_sucursal = _mk_dd("sucursal", "Sucursal")
+        self.dd_f_departamento = _mk_dd("departamento", "Departamento")
+        self.tf_f_insumo = _mk_tf("nombre_insumo", "Nombre insumo")
+        self.tf_f_etiqueta = _mk_tf("etiqueta", "Etiqueta")
+        self.tf_f_serie = _mk_tf("no_serie", "No. de serie")
+        self._btn_limpiar_filtros = ft.TextButton(
+            "Limpiar filtros", icon=ft.Icons.FILTER_ALT_OFF,
+            on_click=self._limpiar_filtros_col)
+        self.barra_filtros = ft.Row(
+            [ft.Icon(ft.Icons.FILTER_LIST, size=18, color=GRIS),
+             self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
+             self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
+             self._btn_limpiar_filtros],
+            spacing=8, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
         # Barra contextual de RPA (según la pestaña activa).
         self._barra_rpa = ft.Container()
 
@@ -251,6 +290,7 @@ class SeccionRegistroActivos:
                 ft.Row([self.barra_masiva, self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self.barra_filtros,
                 ft.Stack([self._area_tabla, self.txt_vacio], expand=True),
                 self.barra_paginacion,
             ],
@@ -298,6 +338,7 @@ class SeccionRegistroActivos:
     # ------------------------------------------------------ datos / render
     def cargar_desde_db(self) -> None:
         """Carga inicial (la invoca el shell al arrancar) y refresco general."""
+        self._recargar_filtros()
         self._refrescar()
 
     def _estatus_tab(self) -> "str | None":
@@ -306,7 +347,7 @@ class SeccionRegistroActivos:
 
     def _ids_actuales(self) -> list[int]:
         """Ids de TODO lo que cumple pestaña + filtro (sin traer las filas)."""
-        return db.ids_levantamiento(self._estatus_tab(), self._filtro)
+        return db.ids_levantamiento(self._estatus_tab(), self._filtro, self._filtros_col)
 
     def _aplicar_filtro(self, _e=None) -> None:
         self._filtro = (self.tf_buscar.value or "").strip().lower()
@@ -318,15 +359,60 @@ class SeccionRegistroActivos:
         self.tf_buscar.value = ""
         self._aplicar_filtro()
 
+    # ------------------------------------------------ filtros por columna
+    def _set_filtro_col(self, columna: str, valor: str) -> None:
+        """Aplica/actualiza el filtro de una columna y repinta desde la página 1."""
+        valor = (valor or "").strip()
+        if columna in self._TODOS and valor == self._TODOS[columna]:
+            valor = ""  # opción "Todas/Todos" = sin filtro
+        if valor:
+            self._filtros_col[columna] = valor
+        else:
+            self._filtros_col.pop(columna, None)
+        self._pagina = 0
+        self._refrescar()
+
+    def _limpiar_filtros_col(self, _e=None) -> None:
+        """Quita todos los filtros por columna y reinicia los controles."""
+        self._filtros_col = {}
+        self.tf_f_insumo.value = self.tf_f_etiqueta.value = self.tf_f_serie.value = ""
+        self.dd_f_empresa.value = self._TODOS["empresa"]
+        self.dd_f_sucursal.value = self._TODOS["sucursal"]
+        self.dd_f_departamento.value = self._TODOS["departamento"]
+        self._pagina = 0
+        self._refrescar()
+
+    def _tras_importar(self) -> None:
+        """Tras importar: aparecen empresas/sucursales/departamentos nuevos, así que
+        se recargan los desplegables de filtro además de repintar."""
+        self._recargar_filtros()
+        self._refrescar()
+
+    def _recargar_filtros(self) -> None:
+        """Rellena los desplegables de filtro con los valores distintos actuales
+        (se llama al cargar y tras importar/buscar, cuando cambian los datos)."""
+        mapa = {"empresa": self.dd_f_empresa, "sucursal": self.dd_f_sucursal,
+                "departamento": self.dd_f_departamento}
+        for col, dd in mapa.items():
+            vals = db.valores_distintos_levantamiento(col)
+            dd.options = ([ft.dropdownm2.Option(key=self._TODOS[col], text=self._TODOS[col])]
+                          + [ft.dropdownm2.Option(key=v, text=v) for v in vals])
+            # Si el valor filtrado ya no existe (p. ej. tras borrar), se resetea.
+            if dd.value not in [self._TODOS[col], *vals]:
+                dd.value = self._TODOS[col]
+                self._filtros_col.pop(col, None)
+        self._safe_update()
+
     def _refrescar(self) -> None:
         """Repinta SOLO la página actual, pidiéndosela ya recortada a SQLite."""
         estatus, filtro = self._estatus_tab(), self._filtro
-        total = db.contar_levantamiento(estatus, filtro)
+        total = db.contar_levantamiento(estatus, filtro, self._filtros_col)
         # Ajusta la página si quedó fuera de rango (p. ej. tras filtrar o borrar).
         ultima = max(0, (total - 1) // self._por_pagina) if total else 0
         self._pagina = min(max(0, self._pagina), ultima)
         pagina = db.listar_levantamiento_pagina(
-            estatus, filtro, self._por_pagina, self._pagina * self._por_pagina)
+            estatus, filtro, self._por_pagina, self._pagina * self._por_pagina,
+            self._filtros_col)
         # Ids visibles: evita re-consultar la tabla en cada clic de checkbox.
         self._ids_pagina = [r.id for r in pagina]
         self.tabla.set_contenido([self._fila(r) for r in pagina])

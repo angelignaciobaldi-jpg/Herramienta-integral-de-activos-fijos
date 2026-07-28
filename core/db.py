@@ -489,8 +489,21 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
         con.execute(f"UPDATE levantamiento SET {', '.join(sets)} WHERE id = ?", valores)
 
 
-def _filtro_sql(estatus: str | None, filtro: str) -> tuple[str, list]:
-    """Arma el WHERE compartido por las consultas paginadas del levantamiento."""
+# Filtros por columna (estilo Excel). Categóricos = coincidencia EXACTA (para los
+# desplegables de valores distintos); de texto = CONTIENE. Lista blanca: solo estas
+# columnas son filtrables (evita inyección al construir el SQL con el nombre).
+_FILTRO_EXACTO = ("empresa", "sucursal", "departamento")
+_FILTRO_CONTIENE = ("nombre_insumo", "etiqueta", "no_serie", "ubicacion")
+COLUMNAS_FILTRABLES = _FILTRO_EXACTO + _FILTRO_CONTIENE
+
+
+def _filtro_sql(estatus: str | None, filtro: str,
+                filtros: dict | None = None) -> tuple[str, list]:
+    """Arma el WHERE compartido por las consultas paginadas del levantamiento.
+
+    `filtro` es la búsqueda global (varios campos). `filtros` son los filtros por
+    columna: {columna: valor} — exacto para las categóricas, contiene para texto.
+    """
     cond, params = [], []
     if estatus:
         cond.append("estatus_registro = ?")
@@ -501,18 +514,41 @@ def _filtro_sql(estatus: str | None, filtro: str) -> tuple[str, list]:
                     " OR LOWER(IFNULL(no_serie,'')) LIKE ?"
                     " OR LOWER(IFNULL(ubicacion,'')) LIKE ?)")
         params += [like] * 4
+    for col, val in (filtros or {}).items():
+        val = str(val or "").strip()
+        if not val or col not in COLUMNAS_FILTRABLES:
+            continue
+        if col in _FILTRO_EXACTO:
+            cond.append(f"IFNULL({col},'') = ?")
+            params.append(val)
+        else:
+            cond.append(f"LOWER(IFNULL({col},'')) LIKE ?")
+            params.append(f"%{val.lower()}%")
     return (" WHERE " + " AND ".join(cond)) if cond else "", params
+
+
+def valores_distintos_levantamiento(columna: str) -> list[str]:
+    """Valores distintos (no vacíos) de una columna filtrable, para poblar los
+    desplegables de filtro. Devuelve [] si la columna no es filtrable."""
+    if columna not in COLUMNAS_FILTRABLES:
+        return []
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT DISTINCT {columna} AS v FROM levantamiento "
+            f"WHERE IFNULL({columna},'') <> '' ORDER BY {columna}").fetchall()
+    return [f["v"] for f in filas]
 
 
 _ORDEN_LEV = " ORDER BY creado_en DESC, id DESC"
 
 
 def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
-                                limite: int = 25, offset: int = 0) -> list[Levantamiento]:
+                                limite: int = 25, offset: int = 0,
+                                filtros: dict | None = None) -> list[Levantamiento]:
     """Devuelve SOLO la página pedida. Con inventarios de miles de activos,
     materializar la tabla completa para mostrar 25 filas es el mayor costo de la
     pantalla; aquí el filtrado y el recorte los hace SQLite."""
-    where, params = _filtro_sql(estatus, filtro)
+    where, params = _filtro_sql(estatus, filtro, filtros)
     with _conectar() as con:
         filas = con.execute(
             f"SELECT * FROM levantamiento{where}{_ORDEN_LEV} LIMIT ? OFFSET ?",
@@ -520,18 +556,20 @@ def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
     return [Levantamiento(**dict(f)) for f in filas]
 
 
-def contar_levantamiento(estatus: str | None = None, filtro: str = "") -> int:
+def contar_levantamiento(estatus: str | None = None, filtro: str = "",
+                         filtros: dict | None = None) -> int:
     """Cuántos registros cumplen el filtro (para la paginación)."""
-    where, params = _filtro_sql(estatus, filtro)
+    where, params = _filtro_sql(estatus, filtro, filtros)
     with _conectar() as con:
         return con.execute(
             f"SELECT COUNT(*) FROM levantamiento{where}", params).fetchone()[0]
 
 
-def ids_levantamiento(estatus: str | None = None, filtro: str = "") -> list[int]:
+def ids_levantamiento(estatus: str | None = None, filtro: str = "",
+                      filtros: dict | None = None) -> list[int]:
     """Ids de todos los registros que cumplen el filtro (para 'Seleccionar todos'
     sin traer las filas completas)."""
-    where, params = _filtro_sql(estatus, filtro)
+    where, params = _filtro_sql(estatus, filtro, filtros)
     with _conectar() as con:
         return [f[0] for f in con.execute(
             f"SELECT id FROM levantamiento{where}", params).fetchall()]
