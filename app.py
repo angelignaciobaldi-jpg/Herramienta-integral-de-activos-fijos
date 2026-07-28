@@ -6,6 +6,7 @@ se pueda trabajar en colaboración sin pisarse:
 
     ui/dashboard.py              -> "Dashboard activos fijos"
     ui/registro_activos.py       -> "Registro de activos"
+    ui/generador_qr.py           -> "Generador de códigos QR"
     ui/configuracion.py          -> modal de Configuración (credenciales SIPP)
     ui/comun.py                  -> constantes y utilidades compartidas
 
@@ -120,17 +121,20 @@ class AppActivosFijos:
         # todo el proceso.
         from ui.configuracion import SeccionConfiguracion
         from ui.dashboard import SeccionDashboard
+        from ui.generador_qr import SeccionGeneradorQR
         from ui.registro_activos import SeccionRegistroActivos
 
         self.config = SeccionConfiguracion(self)
         self.dashboard = SeccionDashboard(self)
         self.registro = SeccionRegistroActivos(self)
+        self.generador_qr = SeccionGeneradorQR(self)
 
         # Área de contenido: todas las pantallas viven aquí; solo se muestra la
         # activa (se alterna 'visible'), en vez de un TabBarView de Material.
         self._secciones = [
             self.dashboard.contenido,
             self.registro.contenido,
+            self.generador_qr.contenido,
         ]
         for i, seccion in enumerate(self._secciones):
             seccion.visible = i == 0
@@ -178,7 +182,7 @@ class AppActivosFijos:
         self.page.controls.clear()
         self.page.add(encabezado, self._area, pie)
         # `page.on_resize` es un slot ÚNICO; se despacha a una lista de listeners.
-        for pantalla in (self.dashboard, self.registro, self.config):
+        for pantalla in (self.dashboard, self.registro, self.generador_qr, self.config):
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
@@ -194,6 +198,7 @@ class AppActivosFijos:
         definiciones = [
             ("Dashboard activos fijos", ft.Icons.DASHBOARD),
             ("Registro de activos", ft.Icons.INVENTORY_2),
+            ("Generador de códigos QR", ft.Icons.QR_CODE_2),
         ]
         controles = []
         for idx, (texto, icono) in enumerate(definiciones):

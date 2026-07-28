@@ -200,6 +200,23 @@ def inicializar() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS ix_empleados_nombre "
                     "ON empleados_sipp (nombre)")
 
+        # Caché de los ACTIVOS del SIPP por empresa (para generar sus QR/etiquetas).
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activos_sipp (
+                id_empresa     INTEGER NOT NULL,
+                empresa_nombre TEXT,
+                etiqueta       TEXT    NOT NULL,
+                insumo         TEXT,
+                serie          TEXT,
+                ubicacion      TEXT,
+                empleado       TEXT,
+                actualizado_en TEXT,
+                PRIMARY KEY (id_empresa, etiqueta)
+            )
+            """
+        )
+
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
             # Esquema viejo: la clave única era (no_serie, nombre_insumo), que no
@@ -651,6 +668,48 @@ def estado_catalogo_empleados() -> dict:
             "SELECT COUNT(*) AS n, MAX(actualizado_en) AS cuando "
             "FROM empleados_sipp").fetchone()
     return dict(fila)
+
+
+# --------------------------------------------------- activos del SIPP (por empresa)
+def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
+                            registros: list[dict], actualizado_en: str) -> int:
+    """Reemplaza los activos cacheados de una empresa. Cada dict: etiqueta
+    (obligatorio), insumo, serie, ubicacion, empleado. Devuelve cuántos se
+    guardaron (con etiqueta no vacía)."""
+    filas = [r for r in registros if (r.get("etiqueta") or "").strip()]
+    with _conectar() as con:
+        con.execute("DELETE FROM activos_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            """INSERT OR REPLACE INTO activos_sipp
+               (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
+                empleado, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
+              r.get("serie"), r.get("ubicacion"), r.get("empleado"), actualizado_en)
+             for r in filas])
+    return len(filas)
+
+
+def listar_activos_sipp(id_empresa: int) -> list[dict]:
+    """Activos cacheados de una empresa (para generar sus QR/etiquetas)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado "
+            "FROM activos_sipp WHERE id_empresa = ? ORDER BY etiqueta",
+            (id_empresa,)).fetchall()
+    return [{"empresa": f["empresa_nombre"], "etiqueta": f["etiqueta"],
+             "insumo": f["insumo"], "serie": f["serie"],
+             "ubicacion": f["ubicacion"], "empleado": f["empleado"]} for f in filas]
+
+
+def estado_activos_sipp() -> list[dict]:
+    """Por empresa cacheada: id, nombre, cuántos activos y cuándo se bajaron."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id_empresa, empresa_nombre, COUNT(*) AS n, MAX(actualizado_en) AS cuando "
+            "FROM activos_sipp GROUP BY id_empresa, empresa_nombre "
+            "ORDER BY empresa_nombre").fetchall()
+    return [dict(f) for f in filas]
 
 
 def eliminar_levantamientos(ids: list[int]) -> None:
