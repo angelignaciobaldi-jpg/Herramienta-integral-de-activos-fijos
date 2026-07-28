@@ -77,6 +77,7 @@ _SQL_CREAR_LEVANTAMIENTO = """
         datos_json     TEXT,
         factura        TEXT,
         id_activo_sipp TEXT,
+        datos_sipp     TEXT,
         modificado     INTEGER NOT NULL DEFAULT 0,
         clave_unica    TEXT    NOT NULL UNIQUE,
         creado_en      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
@@ -310,6 +311,7 @@ class Levantamiento:
     modificado: int
     clave_unica: str
     creado_en: str
+    datos_sipp: str | None = None
 
     def identificador(self) -> str:
         """Con qué se busca este activo en el SIPP: la etiqueta (número de
@@ -326,13 +328,25 @@ class Levantamiento:
         except (ValueError, TypeError):
             return {}
 
+    def info_sipp(self) -> dict:
+        """Datos REALES del activo en el SIPP (los que trae el catálogo), para
+        consultarlos cuando el activo está dado de alta. {} si no hay."""
+        if not self.datos_sipp:
+            return {}
+        try:
+            valor = json.loads(self.datos_sipp)
+            return valor if isinstance(valor, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
 
 # Columnas del levantamiento (fuente única para migraciones incrementales).
 _COLS_LEV = [
     "empresa", "sucursal", "departamento",
     "nombre_insumo", "etiqueta", "no_serie", "responsable", "ubicacion",
     "ruta_imagen", "estatus_registro",
-    "id_tipo_activo", "datos_json", "factura", "id_activo_sipp", "modificado",
+    "id_tipo_activo", "datos_json", "factura", "id_activo_sipp", "datos_sipp",
+    "modificado",
 ]
 
 
@@ -434,13 +448,17 @@ def listar_levantamiento_por_estatus(estatus: str) -> list[Levantamiento]:
 
 
 def actualizar_estatus_levantamiento(id_lev: int, estatus: str,
-                                     id_activo_sipp: str | None = None) -> None:
+                                     id_activo_sipp: str | None = None,
+                                     datos_sipp: dict | None = None) -> None:
     """Fija el estatus (pendiente/dado_de_alta/no_dado_de_alta) y, si aplica, el
-    id del activo en el SIPP."""
+    id y los datos del activo en el SIPP. `datos_sipp` se guarda como JSON (o se
+    limpia con {} / None) para poder consultarlo después."""
+    dj = json.dumps(datos_sipp, ensure_ascii=False) if datos_sipp else None
     with _conectar() as con:
         con.execute(
-            "UPDATE levantamiento SET estatus_registro = ?, id_activo_sipp = ? WHERE id = ?",
-            (estatus, id_activo_sipp, id_lev),
+            "UPDATE levantamiento SET estatus_registro = ?, id_activo_sipp = ?, "
+            "datos_sipp = ? WHERE id = ?",
+            (estatus, id_activo_sipp, dj, id_lev),
         )
 
 

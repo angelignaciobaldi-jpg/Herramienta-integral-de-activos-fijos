@@ -90,17 +90,18 @@ class ProveedorSipp(ProveedorActivos):
         from . import db
         return bool(db.listar_activos_sipp(self.id_empresa))
 
-    def _indice(self) -> dict[str, str]:
-        """{identificador normalizado -> id_activo (etiqueta o serie)} con TODAS
-        las etiquetas y series de los activos cacheados de la empresa."""
+    def _indice(self) -> dict[str, dict]:
+        """{identificador normalizado -> activo cacheado} con TODAS las etiquetas y
+        series de los activos de la empresa. El activo trae sus campos reales del
+        SIPP (etiqueta, insumo, serie, ubicación, empleado, sucursal, departamento)
+        para poder consultarlos cuando está dado de alta."""
         from . import db
-        idx: dict[str, str] = {}
+        idx: dict[str, dict] = {}
         for a in db.listar_activos_sipp(self.id_empresa):
-            ident = (a.get("etiqueta") or a.get("serie") or "").strip()
             for campo in (a.get("etiqueta"), a.get("serie")):
                 clave = _norm(campo)
                 if clave:
-                    idx.setdefault(clave, ident)
+                    idx.setdefault(clave, a)
         return idx
 
     def buscar_por_serie(self, series: list[str]) -> dict[str, ResultadoBusqueda]:
@@ -112,11 +113,14 @@ class ProveedorSipp(ProveedorActivos):
             )
         resultado: dict[str, ResultadoBusqueda] = {}
         for serie in series:
-            match = idx.get(_norm(serie))
-            resultado[serie] = (
-                ResultadoBusqueda(dado_de_alta=True, id_activo_sipp=str(match),
-                                  datos={"origen": "sipp"})
-                if match else ResultadoBusqueda(dado_de_alta=False))
+            activo = idx.get(_norm(serie))
+            if activo:
+                ident = (activo.get("etiqueta") or activo.get("serie") or "").strip()
+                resultado[serie] = ResultadoBusqueda(
+                    dado_de_alta=True, id_activo_sipp=str(ident),
+                    datos=dict(activo, origen="sipp"))
+            else:
+                resultado[serie] = ResultadoBusqueda(dado_de_alta=False)
         return resultado
 
 

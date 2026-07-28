@@ -398,24 +398,30 @@ class SeccionRegistroActivos:
         etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
         estatus = ft.Text(etiqueta, size=12, color=color, weight=ft.FontWeight.W_500)
         capturado = r.id_tipo_activo is not None
-        acciones = ft.Row(
-            [
-                ft.IconButton(
-                    icon=ft.Icons.ASSIGNMENT, icon_size=20,
-                    icon_color=VERDE if capturado else None,
-                    tooltip=("Datos capturados — editar" if capturado
-                             else "Capturar datos para el alta"),
-                    on_click=lambda _e, reg=r: self.dialogo_captura.abrir(reg)),
-                ft.IconButton(
-                    icon=ft.Icons.IMAGE, tooltip="Ver imagen original", icon_size=20,
-                    on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
-                ft.IconButton(
-                    icon=ft.Icons.DELETE_OUTLINE, tooltip="Eliminar", icon_size=20,
-                    icon_color=ft.Colors.ERROR,
-                    on_click=lambda _e, i=r.id: self._eliminar_uno(i)),
-            ],
-            spacing=0, alignment=ft.MainAxisAlignment.CENTER, tight=True,
-        )
+        controles_accion = []
+        # Solo si está dado de alta: consultar la información registrada en el SIPP.
+        if r.estatus_registro == db.EST_DADO_ALTA and r.info_sipp():
+            controles_accion.append(ft.IconButton(
+                icon=ft.Icons.INFO_OUTLINE, icon_size=20, icon_color=VERDE,
+                tooltip="Ver información registrada en el SIPP",
+                on_click=lambda _e, reg=r: self._ver_info_sipp(reg)))
+        controles_accion += [
+            ft.IconButton(
+                icon=ft.Icons.ASSIGNMENT, icon_size=20,
+                icon_color=VERDE if capturado else None,
+                tooltip=("Datos capturados — editar" if capturado
+                         else "Capturar datos para el alta"),
+                on_click=lambda _e, reg=r: self.dialogo_captura.abrir(reg)),
+            ft.IconButton(
+                icon=ft.Icons.IMAGE, tooltip="Ver imagen original", icon_size=20,
+                on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
+            ft.IconButton(
+                icon=ft.Icons.DELETE_OUTLINE, tooltip="Eliminar", icon_size=20,
+                icon_color=ft.Colors.ERROR,
+                on_click=lambda _e, i=r.id: self._eliminar_uno(i)),
+        ]
+        acciones = ft.Row(controles_accion, spacing=0,
+                          alignment=ft.MainAxisAlignment.CENTER, tight=True)
         return FilaDatos([
             chk,
             emp,
@@ -569,6 +575,39 @@ class SeccionRegistroActivos:
             self.app.abrir_en_sistema(ruta)
         else:
             self.app.avisar("No se encontró la imagen original.", ROJO)
+
+    def _ver_info_sipp(self, reg: "db.Levantamiento") -> None:
+        """Muestra los datos REALES del activo en el SIPP (los que trae el
+        catálogo) para consultar la información ya registrada."""
+        info = reg.info_sipp()
+        if not info:
+            self.app.avisar("Este registro no tiene datos del SIPP. Corre "
+                            "«Buscar en SIPP» de nuevo.", NARANJA)
+            return
+        # Campo del SIPP -> etiqueta legible, en el orden en que se muestran.
+        campos = [
+            ("etiqueta", "Etiqueta"), ("insumo", "Insumo"), ("serie", "No. de serie"),
+            ("empresa", "Empresa"), ("sucursal", "Sucursal"),
+            ("departamento", "Departamento"), ("ubicacion", "Ubicación"),
+            ("empleado", "Empleado resguardo"),
+        ]
+        filas = []
+        for clave, etq in campos:
+            valor = str(info.get(clave) or "—").strip() or "—"
+            filas.append(ft.Row(
+                [ft.Text(f"{etq}:", size=13, weight=ft.FontWeight.W_600,
+                         width=150, color=GRIS),
+                 ft.Text(valor, size=13, selectable=True, expand=True)],
+                vertical_alignment=ft.CrossAxisAlignment.START))
+        dlg = ft.AlertDialog(
+            title=ft.Row([ft.Icon(ft.Icons.INVENTORY_2, color=VERDE),
+                          ft.Text("Información registrada en el SIPP")], spacing=10),
+            content=ft.Container(ft.Column(filas, spacing=10, tight=True,
+                                           scroll=ft.ScrollMode.AUTO), width=460),
+            actions=[ft.TextButton("Cerrar", on_click=lambda _e: self.page.pop_dialog())],
+        )
+        self.page.show_dialog(dlg)
+        self.page.update()
 
     def _eliminar_uno(self, id_lev: int) -> None:
         db.eliminar_levantamiento(id_lev)
@@ -732,14 +771,16 @@ class SeccionRegistroActivos:
                 sin_cache.append(empresa)
                 continue
             for r in regs:
-                dado, id_sipp = False, None
+                dado, id_sipp, datos_sipp = False, None, None
                 for campo in ((r.etiqueta or "").strip(), (r.no_serie or "").strip()):
                     res = resultados.get(campo) if campo else None
                     if res and res.dado_de_alta:
-                        dado, id_sipp = True, res.id_activo_sipp
+                        dado, id_sipp, datos_sipp = True, res.id_activo_sipp, res.datos
                         break
                 estatus = db.EST_DADO_ALTA if dado else db.EST_NO_DADO_ALTA
-                db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp)
+                # Al dar de alta se guardan los datos reales del SIPP para
+                # consultarlos; si no, se limpian (None) para no dejar rastros.
+                db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp, datos_sipp)
                 hechos += 1
         return hechos, sin_cache
 
