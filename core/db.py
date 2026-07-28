@@ -245,6 +245,10 @@ def inicializar() -> None:
                     con.execute(
                         f"ALTER TABLE levantamiento ADD COLUMN {col} "
                         f"{tipos_lev.get(col, 'TEXT')}")
+        # Índice por estatus: acelera el conteo por pestaña y el filtrado (la tabla
+        # puede tener miles de registros y se consulta en cada cambio de pestaña).
+        con.execute("CREATE INDEX IF NOT EXISTS ix_lev_estatus "
+                    "ON levantamiento(estatus_registro)")
 
 
 class InventarioDuplicado(Exception):

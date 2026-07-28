@@ -489,36 +489,13 @@ class SeccionRegistroActivos:
         self._refrescar()
 
     def _fila(self, r: "db.Levantamiento") -> FilaDatos:
+        # Empresa/sucursal/departamento se muestran como TEXTO (rápido de pintar) y
+        # se editan con el lápiz de acciones (un diálogo). Antes eran controles
+        # editables por fila —un DropdownM2 de ~58 empresas por fila—, lo que hacía
+        # lentísimo cada cambio de pestaña/página.
         chk = ft.Checkbox(
             value=r.id in self._seleccionados,
             on_change=lambda e, i=r.id: self._toggle_sel(i, e.control.value))
-        # Celdas editables de ubicación (se persisten sin reconstruir la tabla,
-        # para no perder el foco ni el scroll mientras se capturan).
-        # Los tres controles editables se encierran en un contenedor de tamaño FIJO
-        # (mismo ancho y alto) para que queden idénticos y centrados en su columna,
-        # alineados con el texto automático (que va centrado). Sin esto, el
-        # DropdownM2 se expande al ancho de la columna y se ve distinto a los
-        # TextField. El texto de los TextField se centra (text_align).
-        _W, _H, _PAD = 145, 38, 8
-        _alta = r.estatus_registro == db.EST_DADO_ALTA  # editar => marcar modificado
-        emp_ctrl = ft.DropdownM2(
-            value=r.empresa or None, dense=True, text_size=12, content_padding=_PAD,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS],
-            on_change=lambda e, i=r.id, a=_alta: self._set_ubic(
-                i, empresa=e.control.value or "", ya_de_alta=a))
-        suc_ctrl = ft.TextField(
-            value=r.sucursal or "", dense=True, text_size=12, content_padding=_PAD,
-            text_align=ft.TextAlign.CENTER,
-            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
-                i, sucursal=(e.control.value or "").strip(), ya_de_alta=a))
-        dep_ctrl = ft.TextField(
-            value=r.departamento or "", dense=True, text_size=12, content_padding=_PAD,
-            text_align=ft.TextAlign.CENTER,
-            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
-                i, departamento=(e.control.value or "").strip(), ya_de_alta=a))
-        emp = ft.Container(emp_ctrl, width=_W, height=_H)
-        suc = ft.Container(suc_ctrl, width=_W, height=_H)
-        dep = ft.Container(dep_ctrl, width=_W, height=_H)
         etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
         estatus = ft.Text(etiqueta, size=12, color=color, weight=ft.FontWeight.W_500)
         capturado = r.id_tipo_activo is not None
@@ -537,6 +514,10 @@ class SeccionRegistroActivos:
                          else "Capturar datos para el alta"),
                 on_click=lambda _e, reg=r: self.dialogo_captura.abrir(reg)),
             ft.IconButton(
+                icon=ft.Icons.EDIT_LOCATION_ALT, icon_size=20,
+                tooltip="Editar empresa / sucursal / departamento",
+                on_click=lambda _e, reg=r: self._editar_ubicacion(reg)),
+            ft.IconButton(
                 icon=ft.Icons.IMAGE, tooltip="Ver imagen original", icon_size=20,
                 on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
             ft.IconButton(
@@ -548,9 +529,9 @@ class SeccionRegistroActivos:
                           alignment=ft.MainAxisAlignment.CENTER, tight=True)
         return FilaDatos([
             chk,
-            emp,
-            suc,
-            dep,
+            r.empresa or "—",
+            r.sucursal or "—",
+            r.departamento or "—",
             r.nombre_insumo,
             r.etiqueta or "—",
             r.no_serie or "—",
@@ -558,18 +539,40 @@ class SeccionRegistroActivos:
             acciones,
         ])
 
-    def _set_ubic(self, id_lev: int, empresa: "str | None" = None,
-                  sucursal: "str | None" = None, departamento: "str | None" = None,
-                  ya_de_alta: bool = False) -> None:
-        """Persiste la edición de empresa/sucursal/departamento de una fila. No
-        reconstruye la tabla (conserva foco y scroll durante la captura).
+    def _editar_ubicacion(self, reg: "db.Levantamiento") -> None:
+        """Diálogo para editar empresa/sucursal/departamento de una fila. El combo
+        de empresa se arma UNA sola vez aquí (no por fila), que es lo que agiliza la
+        tabla. Si el activo ya está dado de alta, se marca como MODIFICADO."""
+        ya_de_alta = reg.estatus_registro == db.EST_DADO_ALTA
+        dd = ft.DropdownM2(
+            label="Empresa", value=reg.empresa or None, dense=True, width=360,
+            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
+        tf_suc = ft.TextField(label="Sucursal", value=reg.sucursal or "",
+                              dense=True, width=360)
+        tf_dep = ft.TextField(label="Departamento", value=reg.departamento or "",
+                              dense=True, width=360)
 
-        Si el activo ya está dado de alta en el SIPP, lo marca como MODIFICADO
-        para que el RPA de modificación lo reenvíe al portal."""
-        db.actualizar_ubicacion_levantamiento(
-            id_lev, empresa=empresa, sucursal=sucursal, departamento=departamento)
-        if ya_de_alta:
-            db.actualizar_datos_levantamiento(id_lev, modificado=True)
+        def guardar(_e=None) -> None:
+            db.actualizar_ubicacion_levantamiento(
+                reg.id, empresa=dd.value or "",
+                sucursal=(tf_suc.value or "").strip(),
+                departamento=(tf_dep.value or "").strip())
+            if ya_de_alta:
+                db.actualizar_datos_levantamiento(reg.id, modificado=True)
+            self.page.pop_dialog()
+            self._recargar_filtros()  # los valores distintos pudieron cambiar
+            self._refrescar()
+
+        dlg = ft.AlertDialog(
+            modal=True, title=ft.Text("Editar empresa / sucursal / departamento"),
+            content=ft.Container(
+                ft.Column([dd, tf_suc, tf_dep], tight=True, spacing=12), width=400),
+            actions=[
+                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
+                ft.FilledButton("Guardar", icon=ft.Icons.SAVE, on_click=guardar),
+            ], actions_alignment=ft.MainAxisAlignment.END)
+        self.page.show_dialog(dlg)
+        self.page.update()
 
     def _actualizar_conteos(self) -> None:
         """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""
