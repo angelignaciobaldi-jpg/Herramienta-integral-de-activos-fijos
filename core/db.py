@@ -675,11 +675,14 @@ def buscar_insumos(texto: str = "", empresa_id: int | None = None,
         else:
             cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
     where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    # El mismo insumo (Cve) puede estar cacheado para varias empresas; el catálogo
+    # es prácticamente global, así que se DEDUPLICA por id_insumo para no mostrarlo
+    # repetido en el selector.
     with _conectar() as con:
         filas = con.execute(
             f"SELECT id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia, "
             f"subfamilia, activo_fijo, seriado FROM insumos_sipp{where} "
-            f"ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
+            f"GROUP BY id_insumo ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
     return [Insumo(**dict(f)) for f in filas]
 
 
