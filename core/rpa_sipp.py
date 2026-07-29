@@ -322,8 +322,10 @@ class SesionSipp:
         try:
             # esperar_opcion=True en ambas: las empresas cargan por AJAX (el select
             # arranca vacío) y las sucursales se recargan al elegir la empresa.
-            await self._elegir_opcion_chosen("Empresa", empresa, esperar_opcion=True)
-            await self._elegir_opcion_chosen("Sucursal", sucursal, esperar_opcion=True)
+            await self._elegir_chosen("Empresa", empresa, esperar_opcion=True)
+            # Al elegir empresa se recargan las sucursales (AJAX); dar un respiro.
+            await page.wait_for_timeout(700)
+            await self._elegir_chosen("Sucursal", sucursal, esperar_opcion=True)
         except ErrorSipp:
             await self._capturar_diagnostico("seleccion_empresa_sucursal")
             raise
@@ -378,6 +380,60 @@ class SesionSipp:
                 "No se cargaron sucursales para la empresa '%s'." % empresa)
         await self.seleccionar_empresa_sucursal(empresa, sucursal)
         return empresa, sucursal
+
+    async def _elegir_chosen(
+        self, etiqueta: str, texto: str, esperar_opcion: bool = False,
+    ) -> None:
+        """Elige `texto` en el select de `etiqueta`. Primero opera el widget
+        "chosen" por la UI (abrir, escribir y CLIC en la opción), que es lo que
+        realmente dispara la selección en el portal; si no hay chosen visible, cae
+        al respaldo por <select> nativo (JS)."""
+        try:
+            await self._elegir_opcion_chosen_ui(etiqueta, texto, esperar_opcion)
+            return
+        except ErrorSipp:
+            # Respaldo: operar el <select> nativo por su ng-model.
+            await self._elegir_opcion_chosen(etiqueta, texto, esperar_opcion)
+
+    async def _elegir_opcion_chosen_ui(
+        self, etiqueta: str, texto: str, esperar_opcion: bool = False,
+    ) -> None:
+        """Elige `texto` operando el widget "chosen" como lo haría una persona:
+        abre el desplegable del select (por su ng-model), escribe en el buscador y
+        HACE CLIC en la opción que coincide. Así se disparan los eventos de chosen
+        y de AngularJS (ng-change), a diferencia de fijar solo el <select> nativo."""
+        page = self._exigir_pagina()
+        ng_model = self._NG_MODEL[etiqueta]
+        # Contenedor chosen asociado al select (hermano inmediato posterior).
+        cont = page.locator(
+            f'xpath=//select[@ng-model="{ng_model}"]/following-sibling::div'
+            f'[contains(@class,"chosen-container")][1]').first
+        try:
+            await cont.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            raise ErrorSipp(
+                "No apareció el selector (chosen) de %s." % etiqueta) from exc
+        await cont.scroll_into_view_if_needed()
+        await cont.click()  # abre el desplegable
+        # Escribe en el buscador del chosen para filtrar (si lo tiene).
+        buscador = cont.locator("input").first
+        try:
+            await buscador.fill(texto, timeout=3_000)
+        except Exception:  # noqa: BLE001 — algún chosen no trae buscador
+            pass
+        # Espera y hace CLIC en la opción que contiene el texto.
+        opcion = cont.locator(
+            ".chosen-results li.active-result",
+            has_text=re.compile(re.escape(texto), re.I)).first
+        try:
+            await opcion.wait_for(
+                state="visible",
+                timeout=self.TIMEOUT_ELEMENTO if esperar_opcion else 2_500)
+        except PlaywrightTimeoutError as exc:
+            raise ErrorSipp(
+                "No apareció la opción '%s' en el selector de %s." % (texto, etiqueta)
+            ) from exc
+        await opcion.click()
 
     async def _elegir_opcion_chosen(
         self, etiqueta: str, texto: str, esperar_opcion: bool = False,
