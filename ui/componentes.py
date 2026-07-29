@@ -561,8 +561,10 @@ class Modal:
             spacing=GAP_LG + GAP_SM, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self._scroll = ft.Column(
+            # Reserva para la barra de scroll (12px) MÁS una holgura, para que los
+            # campos de la columna derecha no queden pegados a la barra.
             [ft.Container(self.cuerpo,
-                          padding=ft.Padding.only(right=GUTTER_SCROLL))],
+                          padding=ft.Padding.only(right=GUTTER_SCROLL + GAP_MD))],
             scroll=ft.ScrollMode.AUTO, height=alto_cuerpo, spacing=0,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         cuerpo_env = ft.Container(
