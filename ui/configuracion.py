@@ -12,7 +12,9 @@ from __future__ import annotations
 import flet as ft
 
 from core import ajustes_api, credenciales
-from ui.comun import GRIS, VERDE, tarjeta
+from ui.comun import GRIS, VERDE
+from ui.componentes import (boton_herramienta, boton_primario, campo_texto,
+                            tarjeta_seccion)
 
 CENTRO = ft.Alignment(0, 0)
 _ANCHO = 480
@@ -44,18 +46,16 @@ class SeccionConfiguracion:
             spacing=8, tight=True)
 
     def _construir(self) -> None:
-        self.tf_usuario = ft.TextField(
-            label="Usuario", dense=True, content_padding=10, expand=True)
-        self.tf_contrasena = ft.TextField(
-            label="Contraseña", password=True, can_reveal_password=True,
-            dense=True, content_padding=10, expand=True)
-        self.tf_api_url = ft.TextField(
-            label="URL base de la API", dense=True, content_padding=10,
-            hint_text="https://api.quetzaltic.dev", expand=True)
-        self.tf_api_token = ft.TextField(
-            label="Token de la API", password=True, can_reveal_password=True,
-            dense=True, content_padding=10,
-            hint_text="Déjalo vacío para conservar el actual", expand=True)
+        # `campo_texto` devuelve (bloque, campo): el bloque lleva la etiqueta
+        # ARRIBA y va al layout; el campo es el que expone `.value`.
+        bl_usuario, self.tf_usuario = campo_texto("Usuario", expand=True)
+        bl_contrasena, self.tf_contrasena = campo_texto(
+            "Contraseña", password=True, expand=True)
+        bl_api_url, self.tf_api_url = campo_texto(
+            "URL base de la API", hint="https://api.quetzaltic.dev", expand=True)
+        bl_api_token, self.tf_api_token = campo_texto(
+            "Token de la API", password=True, expand=True,
+            hint="Déjalo vacío para conservar el actual")
         self.txt_api_token_estado = ft.Text(size=12)
         self._actualizar_estado_token()
 
@@ -63,20 +63,23 @@ class SeccionConfiguracion:
             "Credenciales SIPP",
             "Usuario y contraseña del portal SIPP que usa el RPA. La contraseña se "
             "guarda cifrada en este equipo (DPAPI); nunca en claro ni en el repo.",
-            self.tf_usuario, self.tf_contrasena)
+            bl_usuario, bl_contrasena)
         api = self._apartado(
             "Configuración de API",
             "URL y token de los microservicios. El token se guarda cifrado en este "
             "equipo (DPAPI); nunca en claro ni en la instalación.",
-            self.tf_api_url, self.tf_api_token,
+            bl_api_url, bl_api_token,
             ft.Row(
                 [self.txt_api_token_estado,
-                 ft.TextButton("Quitar token", on_click=self._quitar_token)],
+                 boton_herramienta("Quitar token", on_click=self._quitar_token,
+                                   destructivo=True)],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER))
 
-        grupo = tarjeta("Sistema", ft.Column(
-            [cred, ft.Divider(), api], spacing=14, tight=True))
+        grupo = tarjeta_seccion(ft.Column(
+            [ft.Text("Sistema", size=15, weight=ft.FontWeight.BOLD),
+             cred, ft.Divider(), api],
+            spacing=14, tight=True))
 
         contenido = ft.Column(
             [ft.Container(grupo, width=_ANCHO)],
@@ -92,7 +95,7 @@ class SeccionConfiguracion:
                 vertical_alignment=ft.CrossAxisAlignment.CENTER, width=_ANCHO),
             content=ft.Container(contenido, width=_ANCHO),
             actions=[
-                ft.FilledButton("Aceptar", icon=ft.Icons.CHECK, on_click=self._guardar),
+                boton_primario("Aceptar", ft.Icons.CHECK, self._guardar),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
