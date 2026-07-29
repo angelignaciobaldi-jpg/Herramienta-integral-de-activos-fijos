@@ -18,6 +18,7 @@ import flet as ft
 
 from core import importador_excel
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
+from ui.componentes import boton_herramienta, boton_primario
 
 _ANCHO = 640
 
@@ -42,8 +43,8 @@ class DialogoCargaMasiva:
         self._resumen = ft.Text("", size=12, color=GRIS)
         self._lista = ft.Column(spacing=6, scroll=ft.ScrollMode.AUTO, tight=True)
         self._progreso = ft.ProgressBar(visible=False)
-        self._btn_importar = ft.FilledButton(
-            "Importar", icon=ft.Icons.DOWNLOAD, on_click=self._importar, disabled=True)
+        self._btn_importar = boton_primario(
+            "Importar", ft.Icons.DOWNLOAD, self._importar, disabled=True)
         self.dialogo = ft.AlertDialog(
             modal=True,
             title=ft.Text("Carga masiva desde Excel", size=20, weight=ft.FontWeight.BOLD),
@@ -54,7 +55,8 @@ class DialogoCargaMasiva:
                     spacing=10, tight=True),
                 width=_ANCHO),
             actions=[
-                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
+                boton_herramienta("Cancelar",
+                                  on_click=lambda _e: self.page.pop_dialog()),
                 self._btn_importar,
             ],
             actions_alignment=ft.MainAxisAlignment.END,

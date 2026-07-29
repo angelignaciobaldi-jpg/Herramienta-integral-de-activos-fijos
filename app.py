@@ -27,11 +27,8 @@ import flet as ft
 # ni, sobre todo, que corra el auto-updater (que podría traer la corrección).
 from core import rutas
 
-# Colores de la barra de título nativa (DWM) según el tema.
-_BARRA_FONDO_CLARO = "#FEF7FF"
-_BARRA_TEXTO_CLARO = "#1D1B20"
-_BARRA_FONDO_OSCURO = "#141218"
-_BARRA_TEXTO_OSCURO = "#E6E0E9"
+# La paleta, la tipografía y los colores de la barra de título nativa (DWM) viven
+# en ui/tema.py (sistema de diseño; ver DISENO.md), no aquí.
 
 TITULO_APP = "Herramienta Integral de Activos Fijos"
 NOMBRE_CORTO = "Herramientas Activos Fijos"
@@ -259,9 +256,10 @@ class AppActivosFijos:
     def _pintar_barra_titulo(self, oscuro: bool) -> None:
         try:
             from core import win_titlebar
+            from ui import tema
 
-            fondo = _BARRA_FONDO_OSCURO if oscuro else _BARRA_FONDO_CLARO
-            texto = _BARRA_TEXTO_OSCURO if oscuro else _BARRA_TEXTO_CLARO
+            fondo = tema.BARRA_FONDO_OSCURO if oscuro else tema.BARRA_FONDO_CLARO
+            texto = tema.BARRA_TEXTO_OSCURO if oscuro else tema.BARRA_TEXTO_CLARO
             win_titlebar.pintar_barra(
                 self.page.title, fondo, texto=texto, borde=fondo, oscuro=oscuro)
         except Exception:  # noqa: BLE001 — el color de la barra no es crítico
@@ -488,13 +486,27 @@ async def main(page: ft.Page) -> None:
         current_locale=ft.Locale("es", "MX"),
     )
     page.window.icon = "Imagenes/icon.ico"
+    # Ancho mínimo = media pantalla en 1920 (el caso angosto real al acoplar la
+    # ventana). Por debajo, un tablero de alta densidad deja de ser legible y no
+    # tiene caso reacomodarlo; ver DISENO.md.
+    page.window.min_width = 960
+    page.window.min_height = 600
     page.padding = ft.Padding.only(left=18, right=18, top=18, bottom=10)
     page.theme_mode = (
         ft.ThemeMode.DARK if _tema_oscuro_guardado() else ft.ThemeMode.LIGHT)
     _barra = ft.ScrollbarTheme(
         thumb_visibility=True, track_visibility=True, thickness=12, interactive=True)
-    page.theme = ft.Theme(scrollbar_theme=_barra)
-    page.dark_theme = ft.Theme(scrollbar_theme=_barra)
+    # Paleta y tipografía del sistema de diseño (ui/tema.py). Best-effort: si el
+    # módulo fallara, la app arranca con el Material por defecto en vez de no
+    # arrancar — el tema no es crítico para operar.
+    try:
+        from ui import tema
+
+        page.theme = tema.construir_tema(False, _barra)
+        page.dark_theme = tema.construir_tema(True, _barra)
+    except Exception:  # noqa: BLE001 — el tema no debe impedir el arranque
+        page.theme = ft.Theme(scrollbar_theme=_barra)
+        page.dark_theme = ft.Theme(scrollbar_theme=_barra)
     _pantalla_cargando(page, NOMBRE_CORTO, "Iniciando…")
     await asyncio.sleep(0.05)
     _configurar_taskbar(page)
