@@ -40,12 +40,17 @@ IMG_EXT = ["png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 
 # El selector de empresa/sucursal del portal es frágil, así que el RPA de ALTA
 # entra SIEMPRE con una empresa/sucursal estable y la empresa/sucursal real del
-# activo se fija dentro del formulario de alta (compra y resguardo).
+# activo se fija dentro del formulario de alta (en el RESGUARDO, que es donde queda
+# asignado el activo).
 _EMPRESA_RPA = "Aske"
 _SUCURSAL_RPA = "Corporativo"
 # Campos del formulario de alta que llevan la empresa / la sucursal del activo.
-_CLAVES_EMPRESA = ("id_EmpresaAgregar", "id_EmpresaResguardo")
-_CLAVES_SUCURSAL = ("id_SucursalAgregar", "id_SucursalResguardo")
+# Solo RESGUARDO: los de compra (id_*Agregar) viven en la sección "datos de compra",
+# que está oculta por defecto, y tratar de llenarlos colgaba el RPA.
+_CLAVES_EMPRESA = ("id_EmpresaResguardo",)
+_CLAVES_SUCURSAL = ("id_SucursalResguardo",)
+# Campos de la sección de compra que se OMITEN (sección oculta por defecto).
+_CLAVES_COMPRA_OMITIR = ("id_EmpresaAgregar", "id_SucursalAgregar")
 
 # Etiqueta y color por estatus.
 _ESTATUS_UI = {
@@ -693,7 +698,7 @@ class SeccionRegistroActivos:
             ("grupo_centro_costo", "Grupo centro de costo"),
             ("centro_costo", "Centro de costo"),
             ("ubicacion", "Ubicación"), ("empleado", "Empleado resguardo"),
-            ("fecha_adquisicion", "Fecha de adquisición"),
+            ("fecha_adquisicion", "Fecha de adquisición / levantamiento"),
             ("fecha_garantia", "Fecha de garantía"),
             ("fecha_asignacion", "Fecha de asignación"),
         ]
@@ -920,10 +925,15 @@ class SeccionRegistroActivos:
             # tipo, insumo y empleado se eligen aparte (por combo/modales del SIPP).
             if campo.clave in ("id_TipoActivo", "nb_NombreInsumo", "nb_Empleado"):
                 continue
-            # La empresa/sucursal (compra y resguardo) se FIJAN con las del activo:
-            # como el RPA entra con una empresa/sucursal estable, aquí se registra la
-            # que corresponde. La empresa se emite antes que la sucursal (esta
-            # depende de aquella), orden que respeta campos_de_tipo.
+            # La empresa/sucursal de COMPRA viven en una sección oculta por defecto;
+            # llenarlas colgaba el RPA, así que se omiten (la empresa/sucursal real
+            # se registra en el resguardo).
+            if campo.clave in _CLAVES_COMPRA_OMITIR:
+                continue
+            # La empresa/sucursal de RESGUARDO se FIJAN con las del activo: como el
+            # RPA entra con una empresa/sucursal estable, aquí se registra la que
+            # corresponde. La empresa se emite antes que la sucursal (esta depende
+            # de aquella), orden que respeta campos_de_tipo.
             if campo.clave in _CLAVES_EMPRESA and emp_real:
                 valor = emp_real
             elif campo.clave in _CLAVES_SUCURSAL and suc_real:

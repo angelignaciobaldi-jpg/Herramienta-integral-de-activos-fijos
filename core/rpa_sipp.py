@@ -544,11 +544,13 @@ class SesionSipp:
         try:
             await campo.fill(valor, timeout=3_000)
         except Exception:  # noqa: BLE001 — respaldo: fijar por JS y avisar a Angular
+            # timeout corto: si el campo no está visible (sección oculta), falla
+            # rápido en vez de colgarse los 30 s por defecto del locator.
             await campo.evaluate(
                 "(el, v) => { el.value = v;"
                 " el.dispatchEvent(new Event('input', {bubbles:true}));"
                 " el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                valor)
+                valor, timeout=3_000)
 
     async def set_fecha(self, ng_model: str, valor: str) -> None:
         """Escribe una fecha (DD/MM/AAAA) en un input con máscara. Se usa `fill`,
