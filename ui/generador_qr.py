@@ -22,10 +22,11 @@ import flet as ft
 from core import db, preferencias
 from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
+from ui.componentes import (Modal, boton_primario, boton_secundario,
+                            campo_opciones, campo_texto, tarjeta_seccion)
 
 _CLAVE_URL = "qr_base_url"
-# DropdownM2 muestra el `key` de la opción (no el `text`), así que la opción
-# "todas" necesita un key legible; se trata como "sin filtro".
+# Opción "todas las sucursales": se trata como "sin filtro".
 _TODAS = "Todas las sucursales"
 
 
@@ -38,54 +39,55 @@ class SeccionGeneradorQR:
         self._construir()
 
     def _construir(self) -> None:
-        self.dd_empresa = ft.DropdownM2(
-            label="Empresa", dense=True, width=320,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS],
+        self.blq_empresa, self.dd_empresa = campo_opciones(
+            "Empresa", list(NOMBRES_EMPRESAS), width=320,
             on_change=lambda _e: (self._recargar_sucursales(), self._actualizar_estado()))
-        self.dd_sucursal = ft.DropdownM2(
-            label="Sucursal", dense=True, width=280,
+        self.blq_sucursal, self.dd_sucursal = campo_opciones(
+            "Sucursal", [], width=280,
             on_change=lambda _e: self._actualizar_estado())
-        self.tf_base = ft.TextField(
-            label="URL base del QR", dense=True, width=420,
-            hint_text="https://activos.petroil.app/a/",
-            value=preferencias.cargar_valor(_CLAVE_URL) or "",
-            on_change=self._guardar_base)
+        self.blq_base, self.tf_base = campo_texto(
+            "URL base del QR", width=420,
+            hint="https://activos.petroil.app/a/",
+            valor=preferencias.cargar_valor(_CLAVE_URL) or "",
+            on_submit=self._guardar_base, on_blur=self._guardar_base)
         self.progreso = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)
         self.txt_estado = ft.Text("", size=13, color=GRIS)
 
-        self.contenido = ft.Column(
+        panel = ft.Column(
             [
                 ft.Text("Genera etiquetas QR para los activos de una empresa. Cada QR "
                         "abre la ficha del activo en el PWA (URL base + etiqueta).",
                         size=13, color=GRIS),
                 ft.Divider(),
-                self.tf_base,
+                self.blq_base,
                 ft.Text("El QR llevará: URL base + la etiqueta del activo.",
                         size=11, color=GRIS),
-                ft.Row([self.dd_empresa, self.dd_sucursal, self.progreso], spacing=14,
+                ft.Row([self.blq_empresa, self.blq_sucursal, self.progreso], spacing=14,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
                 ft.Row(
                     [
-                        ft.FilledButton("Actualizar información del SIPP",
-                                        icon=ft.Icons.SYNC,
-                                        tooltip="Descarga del SIPP, para la empresa "
-                                                "elegida, sus activos e insumos, más el "
-                                                "catálogo de empleados (global)",
-                                        on_click=self._actualizar_sipp),
-                        ft.OutlinedButton("Generar carpeta por departamento",
-                                          icon=ft.Icons.FOLDER_ZIP,
-                                          tooltip="Un PNG por activo (QR + etiqueta) en "
-                                                  "subcarpetas por departamento",
-                                          on_click=self._generar_carpeta),
-                        ft.OutlinedButton("Generar etiquetas (PDF)",
-                                          icon=ft.Icons.QR_CODE_2,
-                                          on_click=self._generar_pdf),
+                        boton_primario(
+                            "Actualizar información del SIPP", ft.Icons.SYNC,
+                            self._actualizar_sipp,
+                            tooltip="Descarga del SIPP, para la empresa elegida, sus "
+                                    "activos e insumos, más el catálogo de empleados "
+                                    "(global)"),
+                        boton_secundario(
+                            "Generar carpeta por departamento", ft.Icons.FOLDER_ZIP,
+                            self._generar_carpeta,
+                            tooltip="Un PNG por activo (QR + etiqueta) en subcarpetas "
+                                    "por departamento"),
+                        boton_secundario("Generar etiquetas (PDF)", ft.Icons.QR_CODE_2,
+                                         self._generar_pdf),
                     ],
                     spacing=12, wrap=True),
                 self.txt_estado,
             ],
-            expand=True, spacing=14,
+            spacing=14, tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
+        self.contenido = ft.Column([tarjeta_seccion(panel)], expand=True,
+                                   scroll=ft.ScrollMode.AUTO)
         self._actualizar_estado()
 
     # ------------------------------------------------------ estado
@@ -101,10 +103,10 @@ class SeccionGeneradorQR:
         """Rellena el combo de sucursal con las presentes en la empresa cacheada."""
         idemp = self._empresa_id()
         sucs = db.sucursales_activos_sipp(idemp) if idemp is not None else []
-        # key == lo que muestra DropdownM2; _TODAS se interpreta como "sin filtro".
+        # _TODAS se interpreta como "sin filtro" (ver _sucursal_sel).
         self.dd_sucursal.options = (
-            [ft.dropdownm2.Option(key=_TODAS, text=_TODAS)]
-            + [ft.dropdownm2.Option(key=s, text=s) for s in sucs])
+            [ft.DropdownOption(key=_TODAS, text=_TODAS)]
+            + [ft.DropdownOption(key=s, text=s) for s in sucs])
         self.dd_sucursal.value = _TODAS
         self._safe_update()
 
@@ -172,21 +174,15 @@ class SeccionGeneradorQR:
         ui_loop = asyncio.get_running_loop()
         txt = ft.Text(f"Generando {len(activos)} etiqueta(s)…", size=13)
         barra = ft.ProgressBar(value=0)
-        dlg = ft.AlertDialog(
-            modal=True, title=ft.Text("Generando carpeta de etiquetas"),
-            content=ft.Container(ft.Column([txt, barra], tight=True, spacing=12),
-                                 width=420))
-        self.page.show_dialog(dlg)
-        self.page.update()
+        modal = Modal(self.page, "Generando carpeta de etiquetas", ancho=440)
+        modal.cuerpo.controls = [txt, barra]
+        modal.abrir()
 
         def avance(hechos: int, total: int) -> None:
             def aplicar() -> None:
                 txt.value = f"Generando etiquetas… {hechos}/{total}"
                 barra.value = hechos / total if total else None
-                try:
-                    dlg.update()
-                except (RuntimeError, AssertionError):
-                    pass
+                modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
         base = (self.tf_base.value or "").strip()
@@ -199,10 +195,10 @@ class SeccionGeneradorQR:
                 qr.generar_carpeta_por_departamento, activos, raiz, base, avance,
                 por_sucursal)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            self.page.pop_dialog()
+            modal.cerrar()
             self.app.avisar(f"No se pudo generar: {exc}", ROJO)
             return
-        self.page.pop_dialog()
+        modal.cerrar()
         detalle = (f"en {res['sucursales']} sucursal(es), {res['departamentos']} "
                    f"departamento(s)" if por_sucursal
                    else f"en {res['departamentos']} carpeta(s) por departamento")

@@ -22,15 +22,27 @@ import flet as ft
 
 from core import db
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
-from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE, CampoFecha
+from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE
+from ui.componentes import (CampoEtiquetado, CampoFecha, Modal,
+                            boton_herramienta, boton_primario, campo_opciones,
+                            campo_texto, icono_accion, seccion_formulario)
 from ui.selector_empleado import DialogoSelectorEmpleado
 from ui.selector_insumo import DialogoSelectorInsumo
 
-_ANCHO = 620
-# Altura acotada del área de contenido (ubicación + tipo + campos). Todo el bloque
-# hace scroll junto dentro de este alto, para que el diálogo no se salga de la
-# pantalla aunque el tipo traiga muchos campos (p. ej. "Detalles Insumo").
-_ALTO_CONTENIDO = 460
+_ANCHO = 760
+_ALTO_CAMPOS = 460
+
+# Ícono por grupo de campos (los grupos los define core/tipos_activo.py). Si
+# apareciera uno nuevo, cae en el ícono por defecto en vez de romper.
+_ICONO_GRUPO = {
+    "Identificación": ft.Icons.BADGE,
+    "Compra": ft.Icons.SHOPPING_CART,
+    "Resguardo": ft.Icons.ASSIGNMENT_IND,
+    "Detalles Insumo": ft.Icons.INFO_OUTLINE,
+}
+_ICONO_GRUPO_DEFECTO = ft.Icons.LIST_ALT
+# "Detalles Insumo" son características cortas (marca, modelo…): caben de a 3.
+_COLUMNAS_GRUPO = {"Detalles Insumo": 3}
 
 
 class _CampoSeleccion:
@@ -44,15 +56,15 @@ class _CampoSeleccion:
                  hint: str = ""):
         self._dialogo = dialogo
         self.id_sel = str(id_sel or "")
-        self._tf = ft.TextField(
-            label=label, value=nombre or "", read_only=True, dense=True,
-            hint_text=hint,
-            suffix=ft.IconButton(icon=ft.Icons.SEARCH, tooltip="Buscar",
-                                 on_click=self._abrir))
+        # `flotante`: dentro del modal el rótulo va encajado en el borde del
+        # campo, como el mockup, no encima.
+        self._bloque, self._tf = campo_texto(
+            label, valor=nombre or "", hint=hint, read_only=True, flotante=True,
+            suffix=icono_accion(ft.Icons.SEARCH, "Buscar", self._abrir))
 
     @property
     def control(self) -> ft.Control:
-        return self._tf
+        return self._bloque
 
     @property
     def value(self) -> str:
@@ -134,63 +146,54 @@ class DialogoCapturaActivo:
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
-        # OJO: DropdownM2 muestra el `key` de la opción, no el `text`. Por eso el
-        # key es el NOMBRE del tipo (lo que ve el usuario y lo que el RPA busca en
-        # el combo del SIPP); el id se resuelve con ID_POR_NOMBRE al guardar.
-        self.dd_tipo = ft.DropdownM2(
-            label="Tipo de activo *", dense=True, width=_ANCHO - 40,
-            options=[ft.dropdownm2.Option(key=n, text=n)
-                     for n in TIPOS_ACTIVO.values()],
-            on_change=self._cambiar_tipo)
-        # Empresa/sucursal/departamento del levantamiento (antes se editaban con un
-        # lápiz aparte en cada fila; se integran aquí para no renderizar otro icono).
-        _wm = (_ANCHO - 52) / 2
-        self.dd_empresa = ft.DropdownM2(
-            label="Empresa", dense=True, width=_ANCHO - 40,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
-        self.tf_sucursal = ft.TextField(label="Sucursal", dense=True, width=_wm)
-        self.tf_departamento = ft.TextField(label="Departamento", dense=True, width=_wm)
-        self._subtitulo = ft.Text("", size=12, color=GRIS)
-        # Sin scroll propio: fluye dentro del scroll único del contenido.
-        self._area_campos = ft.Column(spacing=12, tight=True)
-        self._titulo = ft.Text("Capturar datos del activo", size=20,
-                               weight=ft.FontWeight.BOLD)
+        # La opción se identifica por el NOMBRE del tipo: es lo que ve el usuario
+        # y lo que el RPA busca en el combo del SIPP; el id se resuelve con
+        # ID_POR_NOMBRE al guardar.
+        _, self.dd_tipo = campo_opciones(
+            "Tipo de activo *", list(TIPOS_ACTIVO.values()),
+            flotante=True, on_change=self._cambiar_tipo)
+        # Empresa/sucursal/departamento del LEVANTAMIENTO (las columnas del
+        # registro, no los campos del alta): se editan aquí en vez de con un lápiz
+        # por fila. La empresa se elige del catálogo del Grupo Petroil.
+        _, self.dd_empresa = campo_opciones(
+            "Empresa", list(NOMBRES_EMPRESAS), flotante=True)
+        _, self.tf_sucursal = campo_texto("Sucursal", flotante=True)
+        _, self.tf_departamento = campo_texto("Departamento", flotante=True)
 
-        self.dialogo = ft.AlertDialog(
-            modal=True,
-            title=ft.Column([self._titulo, self._subtitulo], spacing=2, tight=True),
-            content=ft.Container(
-                # Todo el contenido hace scroll junto dentro de un alto acotado, así
-                # los "Detalles Insumo" ya no se salen del diálogo.
-                ft.Column(
-                    [ft.Text("Ubicación del levantamiento", size=13,
-                             weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
-                     self.dd_empresa,
-                     ft.Row([self.tf_sucursal, self.tf_departamento], spacing=12),
-                     ft.Divider(),
-                     self.dd_tipo, ft.Divider(),
-                     self._area_campos],
-                    spacing=10, tight=True, scroll=ft.ScrollMode.AUTO),
-                width=_ANCHO, height=_ALTO_CONTENIDO),
-            actions=[
-                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
-                ft.FilledButton("Guardar", icon=ft.Icons.SAVE, on_click=self._guardar),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
+        self.modal = Modal(
+            self.page, "Capturar datos del activo",
+            ancho=_ANCHO, alto_cuerpo=_ALTO_CAMPOS,
+            acciones=[
+                boton_herramienta("Cancelar", on_click=lambda _e: self.modal.cerrar()),
+                boton_primario("Guardar", ft.Icons.SAVE, self._guardar),
+            ])
+        # Ubicación del levantamiento + tipo encabezan el cuerpo; debajo va la
+        # zona dinámica, que se repinta al cambiar el tipo.
+        self._area_campos = ft.Column(spacing=28, tight=True)
+        self.modal.cuerpo.controls = [
+            seccion_formulario(
+                "Ubicación del levantamiento", ft.Icons.PLACE,
+                [self.dd_empresa, self.tf_sucursal, self.tf_departamento]),
+            # `columnas=1`: es un campo solo y manda en todo el formulario, así
+            # que ocupa el ancho completo. Con el 2 por defecto se quedaba en la
+            # primera mitad y la otra se rellenaba con un hueco vacío.
+            seccion_formulario("Tipo de activo", ft.Icons.CATEGORY,
+                               [self.dd_tipo], columnas=1),
+            self._area_campos,
+        ]
 
     # ------------------------------------------------------- apertura
     def abrir(self, registro: "db.Levantamiento") -> None:
         """Abre el formulario para `registro`, precargando lo ya capturado."""
         self._registro = registro
-        self._subtitulo.value = (
+        self.modal.subtitulo = (
             f"{registro.nombre_insumo} · Serie: {registro.no_serie or '—'}")
         self.dd_tipo.value = nombre_tipo(registro.id_tipo_activo) or None
         self.dd_empresa.value = registro.empresa or None
         self.tf_sucursal.value = registro.sucursal or ""
         self.tf_departamento.value = registro.departamento or ""
         self._render_campos()
-        self.page.show_dialog(self.dialogo)
+        self.modal.abrir()
 
     def _cambiar_tipo(self, _e=None) -> None:
         self._render_campos()
@@ -226,19 +229,16 @@ class DialogoCapturaActivo:
 
         secciones = []
         for grupo, campos in grupos.items():
-            filas = []
+            controles = []
             for campo in campos:
                 ctrl = self._control_para(campo, self._valor_inicial(campo, datos))
                 self._controles[campo.clave] = (campo, ctrl)
-                # Los envoltorios (fecha, insumo, empleado) aportan su .control.
-                filas.append(ctrl.control
-                             if isinstance(ctrl, (CampoFecha, _CampoSeleccion)) else ctrl)
-            secciones.append(
-                ft.Column(
-                    [ft.Text(grupo, size=13, weight=ft.FontWeight.BOLD,
-                             color=ft.Colors.PRIMARY),
-                     *filas],
-                    spacing=8, tight=True))
+                # Todos los campos son envoltorios con `.control` y `.value`;
+                # al layout va siempre `.control`.
+                controles.append(ctrl.control)
+            secciones.append(seccion_formulario(
+                grupo, _ICONO_GRUPO.get(grupo, _ICONO_GRUPO_DEFECTO), controles,
+                columnas=_COLUMNAS_GRUPO.get(grupo, 2)))
         self._area_campos.controls = secciones
 
     def _valor_inicial(self, campo, datos: dict) -> str:
@@ -284,57 +284,52 @@ class DialogoCapturaActivo:
         if campo.control == "select":
             opciones = None
             if campo.opciones:
-                # El key es la ETIQUETA (DropdownM2 muestra el key) y además es el
-                # texto que el RPA buscará en el combo equivalente del SIPP.
-                opciones = [ft.dropdownm2.Option(key=str(v), text=str(v))
-                            for v in campo.opciones.values()]
+                # La opción se identifica por su ETIQUETA, que además es el texto
+                # que el RPA buscará en el combo equivalente del SIPP.
+                opciones = [str(v) for v in campo.opciones.values()]
             elif "empresa" in campo.clave.lower():
                 # Catálogo local del Grupo Petroil para los campos de empresa.
-                opciones = [ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS]
+                opciones = list(NOMBRES_EMPRESAS)
             if opciones is not None:
-                return ft.DropdownM2(
-                    label=etiqueta, value=valor or None, options=opciones,
-                    dense=True, data=campo.clave)
+                return CampoEtiquetado(*campo_opciones(
+                    etiqueta, opciones, valor=valor or None, flotante=True))
             # Catálogo que vive en el SIPP (sucursal, centro de costo, insumo…):
             # se captura como texto y el RPA lo buscará por su nombre.
-            return ft.TextField(label=etiqueta, value=valor, dense=True,
-                                hint_text="Catálogo del SIPP (se busca por nombre)",
-                                data=campo.clave)
+            return CampoEtiquetado(*campo_texto(
+                etiqueta, valor=valor, flotante=True,
+                hint="Catálogo del SIPP (se busca por nombre)"))
         if campo.control == "date":
             # Estándar del proyecto: las fechas se eligen por calendario.
-            return CampoFecha(self.page, etiqueta, valor)
+            return CampoFecha(self.page, etiqueta, valor, flotante=True)
         if campo.control == "number":
-            return ft.TextField(label=etiqueta, value=valor, dense=True,
-                                hint_text="0.00", data=campo.clave)
-        return ft.TextField(label=etiqueta, value=valor, dense=True, data=campo.clave)
+            return CampoEtiquetado(*campo_texto(
+                etiqueta, valor=valor, hint="0.00", flotante=True))
+        return CampoEtiquetado(*campo_texto(etiqueta, valor=valor, flotante=True))
 
     # ---------------------------------------------------------- guardar
     def _guardar(self, _e=None) -> None:
         if self._registro is None:
             return
-        # Si el activo YA está dado de alta en el SIPP, cualquier edición lo deja
-        # marcado como "modificado": así el RPA de modificación sabe cuáles reenviar.
+        # Si el activo YA está dado de alta, cualquier edición lo marca como
+        # "modificado" (para el RPA de modificación).
         ya_de_alta = self._registro.estatus_registro == db.EST_DADO_ALTA
         # Ubicación del levantamiento (empresa/sucursal/departamento): se guarda
-        # siempre, no depende del tipo de activo.
-        empresa = self.dd_empresa.value or ""
-        sucursal = (self.tf_sucursal.value or "").strip()
-        departamento = (self.tf_departamento.value or "").strip()
+        # SIEMPRE, no depende del tipo de activo.
         db.actualizar_ubicacion_levantamiento(
-            self._registro.id, empresa=empresa, sucursal=sucursal,
-            departamento=departamento)
+            self._registro.id, empresa=self.dd_empresa.value or "",
+            sucursal=(self.tf_sucursal.value or "").strip(),
+            departamento=(self.tf_departamento.value or "").strip())
 
         tipo = self._tipo_actual()
         if tipo is None:
             # Sin tipo: solo se actualizó la ubicación (no hay detalle que capturar).
             if ya_de_alta:
                 db.actualizar_datos_levantamiento(self._registro.id, modificado=True)
-            self.page.pop_dialog()
+            self.modal.cerrar()
             self.app.avisar("Ubicación actualizada.", VERDE)
             if callable(self.al_guardar):
                 self.al_guardar()
             return
-
         valores, faltantes = {}, []
         for clave, (campo, ctrl) in self._controles.items():
             valor = (getattr(ctrl, "value", "") or "").strip()
@@ -359,14 +354,11 @@ class DialogoCapturaActivo:
             self._registro.id, id_tipo_activo=tipo, datos=valores,
             modificado=True if ya_de_alta else None,
             no_serie=serie if serie else None)
-        self.page.pop_dialog()
+        self.modal.cerrar()
         self.app.avisar("Datos del activo guardados.", VERDE)
         if callable(self.al_guardar):
             self.al_guardar()
 
     # -------------------------------------------------------- utilidades
     def _safe_update(self) -> None:
-        try:
-            self.dialogo.update()
-        except (RuntimeError, AssertionError, AttributeError):
-            pass  # aún no montado; se reflejará al renderizar
+        self.modal.refrescar()

@@ -15,6 +15,7 @@ import flet as ft
 from core import credenciales, preferencias
 from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
+from ui.componentes import Modal, boton_herramienta, boton_primario, campo_opciones
 
 # Preferencia: última empresa actualizada (para proponerla la próxima vez).
 _CLAVE_EMPRESA = "sipp_actualizar_empresa"
@@ -36,53 +37,48 @@ class DialogoActualizarSipp:
         self.al_terminar = al_terminar
         self._dd = None
         self._empresa_sel = None
+        self._modal: Modal | None = None
 
     def abrir(self, _e=None) -> None:
+        # Un solo modal que cambia de vista (confirmar / seleccionar) según haga
+        # falta. Ancho holgado para que quepan las 3 acciones de la vista confirmar.
+        self._modal = Modal(self.page, "Actualizar información del SIPP", ancho=560)
         ultima = preferencias.cargar_valor(_CLAVE_EMPRESA)
         if ultima and ultima in ID_POR_EMPRESA:
-            self._mostrar_confirmar(ultima)
+            self._vista_confirmar(ultima)
         else:
-            self._mostrar_seleccionar()
+            self._vista_seleccionar()
+        self._modal.abrir()
 
-    def _mostrar_confirmar(self, empresa: str) -> None:
+    def _vista_confirmar(self, empresa: str) -> None:
         self._empresa_sel = empresa
-        dlg = ft.AlertDialog(
-            modal=True, title=ft.Text("Actualizar información del SIPP"),
-            content=ft.Container(
-                ft.Column([
-                    ft.Text(f"Empresa actual: «{empresa}».", size=14,
-                            weight=ft.FontWeight.W_600),
-                    ft.Text("Puedes actualizar de nuevo con esta empresa o elegir otra.",
-                            size=12, color=GRIS)], tight=True, spacing=8), width=440),
-            actions=[
-                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
-                ft.TextButton("Seleccionar otra empresa",
-                              on_click=lambda _e, emp=empresa: self._mostrar_seleccionar(emp)),
-                ft.FilledButton(f"Actualizar «{empresa}»", icon=ft.Icons.SYNC,
-                                on_click=self._ejecutar_confirmada),
-            ], actions_alignment=ft.MainAxisAlignment.END)
-        self.page.show_dialog(dlg)
-        self.page.update()
+        self._modal.cuerpo.controls = [
+            ft.Text(f"Empresa actual: «{empresa}».", size=14,
+                    weight=ft.FontWeight.W_600),
+            ft.Text("Puedes actualizar de nuevo con esta empresa o elegir otra.",
+                    size=12, color=GRIS),
+        ]
+        self._modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: self._modal.cerrar()),
+            boton_herramienta("Seleccionar otra empresa",
+                              on_click=lambda _e, e=empresa: self._vista_seleccionar(e)),
+            boton_primario("Actualizar", ft.Icons.SYNC, self._ejecutar_confirmada),
+        ])
+        self._modal.refrescar()
 
-    def _mostrar_seleccionar(self, sugerida: str | None = None) -> None:
-        self._dd = ft.DropdownM2(
-            label="Empresa", dense=True, width=380, value=sugerida or None,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
-        dlg = ft.AlertDialog(
-            modal=True, title=ft.Text("Selecciona la empresa a actualizar"),
-            content=ft.Container(
-                ft.Column([self._dd,
-                           ft.Text("Se descargarán sus insumos y activos, más el "
-                                   "catálogo de empleados (global).",
-                                   size=11, color=GRIS)], tight=True, spacing=10),
-                width=420),
-            actions=[
-                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
-                ft.FilledButton("Actualizar", icon=ft.Icons.SYNC,
-                                on_click=self._ejecutar_seleccion),
-            ], actions_alignment=ft.MainAxisAlignment.END)
-        self.page.show_dialog(dlg)
-        self.page.update()
+    def _vista_seleccionar(self, sugerida: str | None = None) -> None:
+        _, self._dd = campo_opciones(
+            "Empresa", list(NOMBRES_EMPRESAS), valor=sugerida or None, flotante=True)
+        self._modal.cuerpo.controls = [
+            self._dd,
+            ft.Text("Se descargarán sus insumos y activos, más el catálogo de "
+                    "empleados (global).", size=11, color=GRIS),
+        ]
+        self._modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: self._modal.cerrar()),
+            boton_primario("Actualizar", ft.Icons.SYNC, self._ejecutar_seleccion),
+        ])
+        self._modal.refrescar()
 
     async def _ejecutar_confirmada(self, _e=None) -> None:
         await self._correr(self._empresa_sel)
@@ -94,7 +90,7 @@ class DialogoActualizarSipp:
         if not empresa or empresa not in ID_POR_EMPRESA:
             self.app.avisar("Elige una empresa.", NARANJA)
             return
-        self.page.pop_dialog()  # cierra el modal de selección/confirmación
+        self._modal.cerrar()  # cierra el modal de selección/confirmación
         preferencias.guardar_valor(_CLAVE_EMPRESA, empresa)
         if callable(self.set_empresa):
             self.set_empresa(empresa)
@@ -120,32 +116,22 @@ async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) 
     ui_loop = asyncio.get_running_loop()
     txt = ft.Text("Conectando al SIPP…", size=13)
     barra = ft.ProgressBar()
-    dlg = ft.AlertDialog(
-        modal=True, title=ft.Text("Actualizando información del SIPP"),
-        content=ft.Container(
-            ft.Column([txt, barra,
-                       ft.Text(f"Empresa: {empresa}", size=11, color=GRIS)],
-                      tight=True, spacing=12), width=440))
-    page.show_dialog(dlg)
-    page.update()
-
-    def _upd() -> None:
-        try:
-            dlg.update()
-        except (RuntimeError, AssertionError):
-            pass
+    modal = Modal(page, "Actualizando información del SIPP",
+                  subtitulo=f"Empresa: {empresa}", ancho=460)
+    modal.cuerpo.controls = [txt, barra]
+    modal.abrir()
 
     def avance(hechos: int, total: int) -> None:
         def aplicar() -> None:
             barra.value = (hechos / total) if total else None
-            _upd()
+            modal.refrescar()
         ui_loop.call_soon_threadsafe(aplicar)
 
     def mensaje(texto: str) -> None:
         def aplicar() -> None:
             txt.value = texto
             barra.value = None
-            _upd()
+            modal.refrescar()
         ui_loop.call_soon_threadsafe(aplicar)
 
     resultado, error = {}, None
@@ -168,7 +154,7 @@ async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) 
         await asyncio.wrap_future(bucle.enviar(flujo()))
     finally:
         bucle.cerrar()
-        page.pop_dialog()
+        modal.cerrar()
         if callable(al_terminar):
             al_terminar()
 

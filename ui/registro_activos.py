@@ -33,6 +33,10 @@ from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombr
 from ui.captura_activo import DialogoCapturaActivo
 from ui.carga_masiva import DialogoCargaMasiva
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
+from ui.componentes import (GUTTER_SCROLL, Modal, Pestanas, boton_herramienta,
+                            boton_primario, boton_secundario, buscador,
+                            campo_opciones, campo_tabla_opciones,
+                            campo_tabla_texto, campo_texto, tarjeta_seccion)
 from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
 
 # Extensiones de imagen aceptadas para el levantamiento (sin PDF: son fotos).
@@ -140,99 +144,90 @@ class SeccionRegistroActivos:
     def _construir(self) -> None:
         # Selectores de contexto: se aplican a las imágenes al SUBIRLAS (un
         # levantamiento suele ser de una empresa/sucursal). Editables por fila.
-        self.dd_empresa = ft.DropdownM2(
-            label="Empresa", dense=True, width=260,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
-        self.tf_sucursal = ft.TextField(label="Sucursal", dense=True, width=180)
-        self.tf_departamento = ft.TextField(label="Departamento", dense=True, width=180)
+        # Van en una tarjeta de sección, con la etiqueta ARRIBA de cada campo.
+        # Sin `width`: cada bloque se lleva un tercio del panel vía `expand`, así
+        # el reparto sigue al ancho de la ventana en vez de quedar fijo.
+        bloque_emp, self.dd_empresa = campo_opciones(
+            "Empresa", NOMBRES_EMPRESAS, hint="Seleccionar empresa")
+        bloque_suc, self.tf_sucursal = campo_texto("Sucursal")
+        bloque_dep, self.tf_departamento = campo_texto("Departamento")
+        for bloque in (bloque_emp, bloque_suc, bloque_dep):
+            bloque.expand = True
         contexto = ft.Column(
             [
                 ft.Text("Datos del levantamiento (se aplican a las imágenes que subas; "
-                        "puedes ajustarlos por fila):", size=12, color=GRIS),
-                ft.Row([self.dd_empresa, self.tf_sucursal, self.tf_departamento],
-                       spacing=12, wrap=True),
+                        "puedes ajustarlos por fila):",
+                        theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
+                # Sin `wrap`: con `expand` los tres reparten SIEMPRE el ancho en
+                # tercios; envolver los devolvería a su tamaño natural.
+                ft.Row([bloque_emp, bloque_suc, bloque_dep], spacing=16,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ],
-            spacing=6, tight=True,
+            spacing=12, tight=True,
         )
+        contexto = tarjeta_seccion(contexto)
 
         # Barra de carga + búsqueda.
         self.progreso = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)
         self.estado = ft.Text("", size=12, color=GRIS)
         barra_acciones = ft.Row(
             [
-                ft.FilledButton("Subir archivos", icon=ft.Icons.UPLOAD_FILE,
-                                on_click=self._subir_archivos),
-                ft.OutlinedButton("Subir carpeta", icon=ft.Icons.FOLDER_OPEN,
-                                  on_click=self._subir_carpeta),
-                ft.OutlinedButton("Subir ZIP", icon=ft.Icons.FOLDER_ZIP,
-                                  tooltip="Carpeta comprimida del levantamiento: "
-                                          "se extrae y se procesa igual",
-                                  on_click=self._subir_zip),
-                ft.OutlinedButton("Carga masiva (Excel)", icon=ft.Icons.TABLE_VIEW,
-                                  tooltip="Importa un inventario completo desde Excel",
-                                  on_click=self.dialogo_carga.abrir),
-                ft.OutlinedButton("Buscar en SIPP", icon=ft.Icons.SEARCH,
-                                  on_click=self._buscar),
-                ft.FilledTonalButton("Actualizar información del SIPP",
-                                     icon=ft.Icons.SYNC,
-                                     tooltip="Descarga del SIPP, para la empresa de "
-                                             "arriba, sus insumos y activos, más el "
-                                             "catálogo de empleados (global)",
-                                     on_click=self._actualizar_sipp),
+                boton_primario("Subir archivos", ft.Icons.UPLOAD_FILE,
+                               self._subir_archivos),
+                boton_secundario("Subir carpeta", ft.Icons.FOLDER_OPEN,
+                                 self._subir_carpeta),
+                boton_secundario("Subir ZIP", ft.Icons.FOLDER_ZIP, self._subir_zip,
+                                 tooltip="Carpeta comprimida del levantamiento: "
+                                         "se extrae y se procesa igual"),
+                boton_secundario("Carga masiva (Excel)", ft.Icons.TABLE_VIEW,
+                                 self.dialogo_carga.abrir,
+                                 tooltip="Importa un inventario completo desde Excel"),
+                boton_secundario("Buscar en SIPP", ft.Icons.SEARCH, self._buscar),
+                boton_secundario("Actualizar información del SIPP", ft.Icons.SYNC,
+                                 self._actualizar_sipp,
+                                 tooltip="Descarga del SIPP, para la empresa de "
+                                         "arriba, sus insumos y activos, más el "
+                                         "catálogo de empleados (global)"),
                 self.progreso,
                 self.estado,
             ],
-            spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            wrap=True,
+            spacing=8, run_spacing=8, wrap=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-        # Pestañas (Todos / Dados de alta / No dados de alta).
-        self._tab_defs = [
-            (_TAB_TODOS, "Todos", ft.Icons.LIST_ALT),
-            (db.EST_DADO_ALTA, "Dados de alta", ft.Icons.CHECK_CIRCLE),
-            (db.EST_NO_DADO_ALTA, "No dados de alta", ft.Icons.PENDING_ACTIONS),
-        ]
-        self._tab_items: dict[str, dict] = {}
-        controles_tab = []
-        for clave, texto, icono in self._tab_defs:
-            ico = ft.Icon(icono, size=18)
-            txt = ft.Text(texto, size=13, no_wrap=True)
-            cont = ft.Container(
-                content=ft.Row([ico, txt], spacing=8, tight=True,
-                               vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                padding=ft.Padding.symmetric(horizontal=16, vertical=10),
-                border_radius=8,
-                on_click=lambda _e, c=clave: self._cambiar_tab(c),
-            )
-            self._tab_items[clave] = {"cont": cont, "icono": ico, "texto": txt, "base": texto}
-            controles_tab.append(cont)
-        fila_tabs = ft.Row(controles_tab, spacing=6)
+        # Pestañas (Todos / Dados de alta / No dados de alta) como control
+        # segmentado: una pista gris con la activa en relieve.
+        self._tabs = Pestanas(
+            [
+                (_TAB_TODOS, "Todos", ft.Icons.LIST_ALT),
+                (db.EST_DADO_ALTA, "Dados de alta", ft.Icons.CHECK_CIRCLE),
+                (db.EST_NO_DADO_ALTA, "No dados de alta", ft.Icons.PENDING_ACTIONS),
+            ],
+            al_cambiar=self._cambiar_tab, activa=self._tab)
 
         # Buscador: con miles de activos importados es la forma práctica de
         # aislar un grupo (p. ej. todas las LAPTOP) y clasificarlo de golpe.
         # Filtra al pulsar Enter (no en cada tecla: repintar la tabla cuesta).
-        self.tf_buscar = ft.TextField(
-            hint_text="Buscar insumo, etiqueta, serie o ubicación… (Enter)",
-            dense=True, width=340, height=40, content_padding=8,
-            prefix_icon=ft.Icons.SEARCH, on_submit=self._aplicar_filtro)
+        self.tf_buscar = buscador(
+            "Buscar insumo, etiqueta, serie o ubicación… (Enter)",
+            on_submit=self._aplicar_filtro)
         self._filtro = ""
         self._btn_limpiar = ft.IconButton(
             icon=ft.Icons.CLOSE, icon_size=18, tooltip="Limpiar búsqueda",
             visible=False, on_click=self._limpiar_filtro)
 
-        # Acciones masivas.
+        # Herramientas sobre la selección (a la derecha de las pestañas).
         self.barra_masiva = ft.Row(
             [
-                self.tf_buscar, self._btn_limpiar,
-                ft.TextButton("Seleccionar todos", icon=ft.Icons.SELECT_ALL,
-                              on_click=self._seleccionar_todos),
-                ft.TextButton("Asignar tipo", icon=ft.Icons.CATEGORY,
-                              tooltip="Asigna el tipo de activo a los seleccionados",
-                              on_click=self._abrir_asignar_tipo),
-                ft.TextButton("Eliminar seleccionados", icon=ft.Icons.DELETE_SWEEP,
-                              on_click=self._eliminar_seleccionados),
+                boton_herramienta("Seleccionar todos", ft.Icons.SELECT_ALL,
+                                  self._seleccionar_todos),
+                boton_herramienta("Asignar tipo", ft.Icons.CATEGORY,
+                                  self._abrir_asignar_tipo,
+                                  tooltip="Asigna el tipo de activo a los seleccionados"),
+                boton_herramienta("Eliminar seleccionados", ft.Icons.DELETE_OUTLINE,
+                                  self._eliminar_seleccionados, destructivo=True),
             ],
-            spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
         # --- Filtros por columna (estilo Excel) -------------------------------
@@ -243,25 +238,25 @@ class SeccionRegistroActivos:
         # Rótulo corto para la opción "sin filtro" (así no se corta en el combo).
         self._TODOS = {"empresa": "Todas", "sucursal": "Todas",
                        "departamento": "Todos"}
-        # Mismas medidas para TODOS los controles del filtro (altura, ancho, fuente
-        # y padding) para que queden alineados y parejos.
-        _WF, _HF, _TS = 172, 46, 12
-        _PAD = ft.Padding.symmetric(horizontal=10, vertical=8)
+        # Mismo ancho para TODOS los controles del filtro; la altura la fija el
+        # estándar de Material (los componentes no la tocan, para que Dropdown y
+        # TextField sigan alineando sus bordes). El rótulo va FLOTANTE (encajado
+        # en el borde), como en un modal, para no ganar altura sobre la fila.
+        _WF = 172
 
         def _mk_dd(col, etiqueta):
-            return ft.DropdownM2(
-                label=etiqueta, dense=True, width=_WF, height=_HF, text_size=_TS,
-                content_padding=_PAD, border_radius=8, value=self._TODOS[col],
-                options=[ft.dropdownm2.Option(key=self._TODOS[col], text=self._TODOS[col])],
-                on_change=lambda e, c=col: self._set_filtro_col(c, e.control.value))
+            _, campo = campo_opciones(
+                etiqueta, [self._TODOS[col]], valor=self._TODOS[col], width=_WF,
+                on_change=lambda e, c=col: self._set_filtro_col(c, e.control.value),
+                flotante=True)
+            return campo
 
         def _mk_tf(col, etiqueta):
-            return ft.TextField(
-                label=etiqueta, dense=True, width=_WF, height=_HF, text_size=_TS,
-                content_padding=_PAD, border_radius=8,
-                text_align=ft.TextAlign.CENTER,
+            _, campo = campo_texto(
+                etiqueta, width=_WF, flotante=True,
                 on_submit=lambda e, c=col: self._set_filtro_col(c, e.control.value),
                 on_blur=lambda e, c=col: self._set_filtro_col(c, e.control.value))
+            return campo
 
         self.dd_f_empresa = _mk_dd("empresa", "Empresa")
         self.dd_f_sucursal = _mk_dd("sucursal", "Sucursal")
@@ -269,9 +264,8 @@ class SeccionRegistroActivos:
         self.tf_f_insumo = _mk_tf("nombre_insumo", "Nombre insumo")
         self.tf_f_etiqueta = _mk_tf("etiqueta", "Etiqueta")
         self.tf_f_serie = _mk_tf("no_serie", "No. de serie")
-        self._btn_limpiar_filtros = ft.TextButton(
-            "Limpiar filtros", icon=ft.Icons.FILTER_ALT_OFF, height=_HF,
-            on_click=self._limpiar_filtros_col)
+        self._btn_limpiar_filtros = boton_herramienta(
+            "Limpiar filtros", ft.Icons.FILTER_ALT_OFF, self._limpiar_filtros_col)
         self.barra_filtros = ft.Row(
             [ft.Icon(ft.Icons.FILTER_LIST, size=18, color=GRIS),
              self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
@@ -292,10 +286,11 @@ class SeccionRegistroActivos:
         self._btn_next = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, icon_size=20,
                                        tooltip="Página siguiente",
                                        on_click=lambda _e: self._mover_pagina(1))
-        self._dd_por_pagina = ft.DropdownM2(
-            value=str(self._por_pagina), dense=True, width=90, text_size=12,
-            options=[ft.dropdownm2.Option(key=str(n), text=str(n)) for n in _POR_PAGINA],
-            on_change=self._cambiar_por_pagina)
+        # Sin etiqueta: `campo_opciones` devuelve el campo directo (el rótulo lo
+        # pone el texto "por página:" que va al lado).
+        _, self._dd_por_pagina = campo_opciones(
+            None, [str(n) for n in _POR_PAGINA], valor=str(self._por_pagina),
+            width=90, on_change=self._cambiar_por_pagina)
         self.barra_paginacion = ft.Row(
             [self._lbl_pagina, self._btn_prev, self._btn_next,
              ft.Text("por página:", size=12, color=GRIS), self._dd_por_pagina],
@@ -315,8 +310,9 @@ class SeccionRegistroActivos:
             ColumnaTabla("Acciones", 11, ancho_min_px=145),
         ]
         self.tabla = TablaResponsiva(self.page, columnas)
-        self._area_tabla = ft.Column([self.tabla.control], scroll=ft.ScrollMode.AUTO,
-                                     expand=True)
+        # SIN scroll ni expand: la tabla se pinta a su alto natural (el de todas
+        # las filas de la página) y quien desplaza es la pantalla completa.
+        self._area_tabla = ft.Column([self.tabla.control], spacing=0, tight=True)
 
         # Estado vacío.
         self.txt_vacio = ft.Container(
@@ -330,60 +326,74 @@ class SeccionRegistroActivos:
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8,
             ),
-            alignment=ft.Alignment(0, 0), expand=True, visible=False,
+            # Alto fijo en vez de `expand`: ahora vive dentro de una columna con
+            # scroll, donde una altura sin acotar no es válida.
+            alignment=ft.Alignment(0, 0), height=320, visible=False,
         )
 
-        self.contenido = ft.Column(
+        cuerpo = ft.Column(
             [
                 contexto,
                 barra_acciones,
-                ft.Divider(),
-                fila_tabs,
-                ft.Row([self.barra_masiva, self._barra_rpa],
+                ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
+                # Pestañas a la izquierda, herramientas de selección a la derecha.
+                ft.Row([self._tabs.control, self.barra_masiva],
+                       alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True,
+                       run_spacing=8),
+                # Buscador a la izquierda, acción de RPA de la pestaña a la derecha.
+                ft.Row([ft.Row([self.tf_buscar, self._btn_limpiar], spacing=4,
+                               tight=True),
+                        self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                # Filtros por columna (estilo Excel): mi feature, se combina con
+                # el buscador global y con las pestañas.
                 self.barra_filtros,
-                ft.Stack([self._area_tabla, self.txt_vacio], expand=True),
+                # Antes iban superpuestos en un Stack con `expand`; como se
+                # alternan por `visible`, apilarlos basta y evita la altura sin
+                # acotar que un Stack expandido metería en la columna con scroll.
+                self._area_tabla,
+                self.txt_vacio,
                 self.barra_paginacion,
             ],
-            expand=True, spacing=12,
+            spacing=16, tight=True,
+            # STRETCH: sin esto una tarjeta sin `width` se encoge a su contenido
+            # en vez de ocupar el ancho disponible de la pantalla.
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-        self._estilo_tabs()
+        # La barra de scroll se dibuja SOBRE el borde derecho del área con
+        # scroll. Como la tabla mide su ancho contra ese mismo borde, sin
+        # reservarle sitio se encimaba a la columna de Acciones. El padding
+        # derecho del contenido la deja por fuera y la medición ya la descuenta.
+        self.contenido = ft.Column(
+            [ft.Container(cuerpo, padding=ft.Padding.only(right=GUTTER_SCROLL))],
+            expand=True, spacing=0, scroll=ft.ScrollMode.AUTO,
+        )
         self._actualizar_barra_rpa()
 
     # ------------------------------------------------------ pestañas
-    def _estilo_tabs(self) -> None:
-        for clave, item in self._tab_items.items():
-            activo = clave == self._tab
-            color = ft.Colors.PRIMARY if activo else ft.Colors.ON_SURFACE_VARIANT
-            item["icono"].color = color
-            item["texto"].color = color
-            item["texto"].weight = ft.FontWeight.BOLD if activo else ft.FontWeight.W_500
-            item["cont"].bgcolor = (
-                ft.Colors.SECONDARY_CONTAINER if activo else None)
-
     def _cambiar_tab(self, clave: str) -> None:
-        if clave == self._tab:
-            return
+        """Callback de `Pestanas` (ya repintó el segmentado antes de llamarnos)."""
         self._tab = clave
         self._pagina = 0  # cada pestaña arranca en su primera página
-        self._estilo_tabs()
         self._actualizar_barra_rpa()
+        # `_refrescar()` termina actualizando la pantalla; un segundo
+        # `_safe_update()` aquí volvía a mandar los ~790 controles.
         self._refrescar()
-        self._safe_update()
 
     def _actualizar_barra_rpa(self) -> None:
         """Muestra el botón de RPA correspondiente a la pestaña activa."""
         if self._tab == db.EST_NO_DADO_ALTA:
-            self._barra_rpa.content = ft.FilledButton(
-                "Iniciar registro en SIPP", icon=ft.Icons.SMART_TOY,
-                tooltip="Da de alta en el SIPP los activos que ya tienen datos capturados",
-                on_click=self._iniciar_registro_sipp)
+            self._barra_rpa.content = boton_primario(
+                "Iniciar registro en SIPP", ft.Icons.SMART_TOY,
+                self._iniciar_registro_sipp,
+                tooltip="Da de alta en el SIPP los activos que ya tienen datos capturados")
         elif self._tab == db.EST_DADO_ALTA:
-            self._barra_rpa.content = ft.FilledButton(
-                "Realizar modificación en SIPP", icon=ft.Icons.EDIT_NOTE,
-                tooltip="Reenvía al SIPP los activos que editaste después de darlos de alta",
-                on_click=self._modificar_en_sipp)
+            self._barra_rpa.content = boton_primario(
+                "Realizar modificación en SIPP", ft.Icons.EDIT_NOTE,
+                self._modificar_en_sipp,
+                tooltip="Reenvía al SIPP los activos que editaste después de darlos de alta")
         else:
             self._barra_rpa.content = None
 
@@ -447,8 +457,8 @@ class SeccionRegistroActivos:
                 "departamento": self.dd_f_departamento}
         for col, dd in mapa.items():
             vals = db.valores_distintos_levantamiento(col)
-            dd.options = ([ft.dropdownm2.Option(key=self._TODOS[col], text=self._TODOS[col])]
-                          + [ft.dropdownm2.Option(key=v, text=v) for v in vals])
+            dd.options = ([ft.DropdownOption(key=self._TODOS[col], text=self._TODOS[col])]
+                          + [ft.DropdownOption(key=v, text=v) for v in vals])
             # Si el valor filtrado ya no existe (p. ej. tras borrar), se resetea.
             if dd.value not in [self._TODOS[col], *vals]:
                 dd.value = self._TODOS[col]
@@ -467,7 +477,10 @@ class SeccionRegistroActivos:
             self._filtros_col)
         # Ids visibles: evita re-consultar la tabla en cada clic de checkbox.
         self._ids_pagina = [r.id for r in pagina]
-        self.tabla.set_contenido([self._fila(r) for r in pagina])
+        # `refrescar=False`: el `_safe_update()` del final de este método ya
+        # manda la pantalla entera; dejar que la tabla se actualice por su
+        # cuenta duplicaría el envío de su cuerpo.
+        self.tabla.set_contenido([self._fila(r) for r in pagina], refrescar=False)
         self.txt_vacio.visible = total == 0
         self._area_tabla.visible = total > 0
         self._actualizar_conteos()
@@ -503,13 +516,28 @@ class SeccionRegistroActivos:
         self._refrescar()
 
     def _fila(self, r: "db.Levantamiento") -> FilaDatos:
-        # Empresa/sucursal/departamento se muestran como TEXTO (rápido de pintar) y
-        # se editan con el lápiz de acciones (un diálogo). Antes eran controles
-        # editables por fila —un DropdownM2 de ~58 empresas por fila—, lo que hacía
-        # lentísimo cada cambio de pestaña/página.
         chk = ft.Checkbox(
             value=r.id in self._seleccionados,
             on_change=lambda e, i=r.id: self._toggle_sel(i, e.control.value))
+        # Celdas editables de ubicación (se persisten sin reconstruir la tabla,
+        # para no perder el foco ni el scroll mientras se capturan). El estilo y
+        # el alto común de los tres viven en ui/componentes.py; aquí solo se fija
+        # el ancho de la celda.
+        _W = 145
+        _alta = r.estatus_registro == db.EST_DADO_ALTA  # editar => marcar modificado
+        emp = campo_tabla_opciones(
+            NOMBRES_EMPRESAS, valor=r.empresa or None, ancho=_W,
+            page=self.page, titulo="Elegir empresa",
+            on_change=lambda e, i=r.id, a=_alta: self._set_ubic(
+                i, empresa=e.control.value or "", ya_de_alta=a))
+        suc = campo_tabla_texto(
+            valor=r.sucursal or "", ancho=_W,
+            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
+                i, sucursal=(e.control.value or "").strip(), ya_de_alta=a))
+        dep = campo_tabla_texto(
+            valor=r.departamento or "", ancho=_W,
+            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
+                i, departamento=(e.control.value or "").strip(), ya_de_alta=a))
         etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
         estatus = ft.Text(etiqueta, size=12, color=color, weight=ft.FontWeight.W_500)
         capturado = r.id_tipo_activo is not None
@@ -540,9 +568,9 @@ class SeccionRegistroActivos:
                           alignment=ft.MainAxisAlignment.CENTER, tight=True)
         return FilaDatos([
             chk,
-            r.empresa or "—",
-            r.sucursal or "—",
-            r.departamento or "—",
+            emp,
+            suc,
+            dep,
             r.nombre_insumo,
             r.etiqueta or "—",
             r.no_serie or "—",
@@ -550,14 +578,27 @@ class SeccionRegistroActivos:
             acciones,
         ])
 
+    def _set_ubic(self, id_lev: int, empresa: "str | None" = None,
+                  sucursal: "str | None" = None, departamento: "str | None" = None,
+                  ya_de_alta: bool = False) -> None:
+        """Persiste la edición de empresa/sucursal/departamento de una fila. No
+        reconstruye la tabla (conserva foco y scroll durante la captura).
+
+        Si el activo ya está dado de alta en el SIPP, lo marca como MODIFICADO
+        para que el RPA de modificación lo reenvíe al portal."""
+        db.actualizar_ubicacion_levantamiento(
+            id_lev, empresa=empresa, sucursal=sucursal, departamento=departamento)
+        if ya_de_alta:
+            db.actualizar_datos_levantamiento(id_lev, modificado=True)
+
     def _actualizar_conteos(self) -> None:
         """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""
         c = db.contar_levantamiento_por_estatus()
         conteos = {_TAB_TODOS: c.get("total", 0),
                    db.EST_DADO_ALTA: c.get(db.EST_DADO_ALTA, 0),
                    db.EST_NO_DADO_ALTA: c.get(db.EST_NO_DADO_ALTA, 0)}
-        for clave, item in self._tab_items.items():
-            item["texto"].value = f"{item['base']} ({conteos.get(clave, 0)})"
+        for clave, n in conteos.items():
+            self._tabs.set_conteo(clave, n)
 
     # ------------------------------------------------------ selección
     def _toggle_sel(self, id_lev: int, valor: bool) -> None:
@@ -615,8 +656,9 @@ class SeccionRegistroActivos:
                 content=ft.Text(f"¿Eliminar {len(ids)} registro(s) del levantamiento? "
                                 "Esta acción no se puede deshacer."),
                 actions=[
-                    ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.FilledButton("Eliminar", icon=ft.Icons.DELETE, on_click=eliminar),
+                    boton_herramienta("Cancelar",
+                                      on_click=lambda _e: self.page.pop_dialog()),
+                    boton_primario("Eliminar", ft.Icons.DELETE, eliminar),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
@@ -636,9 +678,9 @@ class SeccionRegistroActivos:
                 "usar «Seleccionar todos»).", NARANJA)
             return
 
-        dd = ft.DropdownM2(
-            label="Tipo de activo", dense=True, width=340,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in TIPOS_ACTIVO.values()])
+        bloque_tipo, dd = campo_opciones(
+            "Tipo de activo", list(TIPOS_ACTIVO.values()), width=340,
+            hint="Elige un tipo")
 
         def aplicar(_e=None) -> None:
             nombre = dd.value
@@ -658,15 +700,16 @@ class SeccionRegistroActivos:
                     ft.Column(
                         [ft.Text(f"Se aplicará a {len(ids)} activo(s) seleccionado(s).",
                                  size=13),
-                         dd,
+                         bloque_tipo,
                          ft.Text("Los campos particulares de cada tipo se capturan "
                                  "después, en el formulario de cada activo.",
                                  size=11, color=GRIS)],
                         spacing=12, tight=True),
                     width=380),
                 actions=[
-                    ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
-                    ft.FilledButton("Asignar", icon=ft.Icons.CHECK, on_click=aplicar),
+                    boton_herramienta("Cancelar",
+                                      on_click=lambda _e: self.page.pop_dialog()),
+                    boton_primario("Asignar", ft.Icons.CHECK, aplicar),
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
@@ -710,15 +753,10 @@ class SeccionRegistroActivos:
                          width=150, color=GRIS),
                  ft.Text(valor, size=13, selectable=True, expand=True)],
                 vertical_alignment=ft.CrossAxisAlignment.START))
-        dlg = ft.AlertDialog(
-            title=ft.Row([ft.Icon(ft.Icons.INVENTORY_2, color=VERDE),
-                          ft.Text("Información registrada en el SIPP")], spacing=10),
-            content=ft.Container(ft.Column(filas, spacing=10, tight=True,
-                                           scroll=ft.ScrollMode.AUTO), width=460),
-            actions=[ft.TextButton("Cerrar", on_click=lambda _e: self.page.pop_dialog())],
-        )
-        self.page.show_dialog(dlg)
-        self.page.update()
+        modal = Modal(self.page, "Información registrada en el SIPP", ancho=520)
+        modal.set_acciones([boton_secundario("Cerrar", on_click=lambda _e: modal.cerrar())])
+        modal.cuerpo.controls = filas
+        modal.abrir()
 
     def _eliminar_uno(self, id_lev: int) -> None:
         db.eliminar_levantamiento(id_lev)
@@ -974,29 +1012,21 @@ class SeccionRegistroActivos:
 
         txt = ft.Text(f"Preparando… (0/{total})", size=13)
         barra = ft.ProgressBar(value=0)
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Registrando activos en el SIPP"),
-            content=ft.Container(
-                ft.Column([txt, barra,
-                           ft.Text("Se abrirá un navegador; no lo cierres.",
-                                   size=11, color=GRIS)],
-                          tight=True, spacing=12),
-                width=420),
-            actions=[ft.TextButton("Detener", on_click=lambda _e: ctrl.detener())],
-        )
-        self.page.show_dialog(dlg)
-        self.page.update()
+        modal = Modal(self.page, "Registrando activos en el SIPP", ancho=460,
+                      acciones=[boton_herramienta("Detener",
+                                                  on_click=lambda _e: ctrl.detener(),
+                                                  destructivo=True)])
+        modal.cuerpo.controls = [
+            txt, barra,
+            ft.Text("Se abrirá un navegador; no lo cierres.", size=11, color=GRIS)]
+        modal.abrir()
 
         def avance(i: int, nombre: str) -> None:
             """Actualiza el progreso desde el hilo del RPA (marshalado a la UI)."""
             def aplicar() -> None:
                 txt.value = f"({i}/{total}) {nombre}"
                 barra.value = i / total
-                try:
-                    dlg.update()
-                except (RuntimeError, AssertionError):
-                    pass
+                modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
         exitosos, fallidos = 0, []
@@ -1034,7 +1064,7 @@ class SeccionRegistroActivos:
             fallidos.append(str(exc))
         finally:
             bucle.cerrar()
-            self.page.pop_dialog()
+            modal.cerrar()
             self._refrescar()
 
         if detenido:
@@ -1088,27 +1118,20 @@ class SeccionRegistroActivos:
         ui_loop = asyncio.get_running_loop()
         txt = ft.Text(f"Preparando… (0/{total})", size=13)
         barra = ft.ProgressBar(value=0)
-        dlg = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Aplicando modificaciones en el SIPP"),
-            content=ft.Container(
-                ft.Column([txt, barra,
-                           ft.Text("Se abrirá un navegador; no lo cierres.",
-                                   size=11, color=GRIS)], tight=True, spacing=12),
-                width=420),
-            actions=[ft.TextButton("Detener", on_click=lambda _e: ctrl.detener())],
-        )
-        self.page.show_dialog(dlg)
-        self.page.update()
+        modal = Modal(self.page, "Aplicando modificaciones en el SIPP", ancho=460,
+                      acciones=[boton_herramienta("Detener",
+                                                  on_click=lambda _e: ctrl.detener(),
+                                                  destructivo=True)])
+        modal.cuerpo.controls = [
+            txt, barra,
+            ft.Text("Se abrirá un navegador; no lo cierres.", size=11, color=GRIS)]
+        modal.abrir()
 
         def avance(i: int, nombre: str) -> None:
             def aplicar() -> None:
                 txt.value = f"({i}/{total}) {nombre}"
                 barra.value = i / total
-                try:
-                    dlg.update()
-                except (RuntimeError, AssertionError):
-                    pass
+                modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
         exitosos, fallidos, omitidos = 0, [], []
@@ -1147,7 +1170,7 @@ class SeccionRegistroActivos:
             fallidos.append(str(exc))
         finally:
             bucle.cerrar()
-            self.page.pop_dialog()
+            modal.cerrar()
             self._refrescar()
 
         if detenido:

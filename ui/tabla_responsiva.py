@@ -48,6 +48,10 @@ DER = ft.Alignment(1, 0)
 _PX_POR_CHAR = 6.0
 # Canalón para que la barra de scroll horizontal no tape la última fila.
 _GUTTER_SCROLL = 14
+# Da cabida a los campos editables de la fila, que se compactan a ~35px
+# (`ALTO_CAMPO_TABLA` en ui/componentes.py). 44 = 35 + 9 de holgura y sigue el
+# ritmo vertical de 4px del sistema de diseño. Si allá se cambia la densidad de
+# los campos, este número tiene que acompañar.
 _ALTO_FILA = 44
 _ALTO_ENCABEZADO = 46
 _COL_SPACING = 8
@@ -136,8 +140,12 @@ class TablaResponsiva:
             else [self._cuerpo]
         self._marco = ft.Container(
             ft.Column(hijos_marco, spacing=0, tight=True),
-            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=10,
-            clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT), border_radius=8,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            # Elevación nivel 1 del sistema de diseño (misma que las tarjetas).
+            shadow=ft.BoxShadow(blur_radius=4, offset=ft.Offset(0, 2),
+                                color=ft.Colors.with_opacity(0.05, ft.Colors.BLACK)))
         self._scroll = ft.Row(
             [ft.Container(self._marco, padding=ft.Padding.only(bottom=_GUTTER_SCROLL))],
             scroll=ft.ScrollMode.AUTO)
@@ -159,11 +167,16 @@ class TablaResponsiva:
         self._pintar_cuerpo()
 
     # ----------------------------------------------------------- API pública
-    def set_contenido(self, filas: list) -> None:
+    def set_contenido(self, filas: list, refrescar: bool = True) -> None:
         """Fija las filas (mezcla de `Cabecera` y `FilaDatos`, en orden) y repinta el
-        cuerpo (crea controles nuevos con los px actuales)."""
+        cuerpo (crea controles nuevos con los px actuales).
+
+        `refrescar=False` cuando quien llama va a actualizar un ancestro justo
+        después: evita mandar el cuerpo de la tabla DOS veces al cliente, que
+        con 25 filas son ~700 controles de más por repintado.
+        """
         self._filas = list(filas)
-        self._pintar_cuerpo()
+        self._pintar_cuerpo(refrescar=refrescar)
 
     def set_columnas(self, columnas: list[ColumnaTabla]) -> None:
         """Reemplaza las columnas (p. ej. para cambiar porcentajes) y repinta todo."""
@@ -235,8 +248,13 @@ class TablaResponsiva:
         tip = texto if len(texto) * _PX_POR_CHAR > ancho else None
         t = ft.Text(texto, size=12, text_align=align_txt, width=ancho,
                     weight=ft.FontWeight.BOLD if bold else None,
-                    max_lines=1, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS)
-        return ft.Container(t, width=ancho, alignment=alineacion, tooltip=tip), t
+                    max_lines=1, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS,
+                    tooltip=tip)
+        # El Text ya lleva ancho, alineación horizontal y tooltip; el centrado
+        # vertical lo da la fila. Envolverlo en un Container solo añadiría un
+        # control por celda de texto: ~100 más en una página de 25 filas, que
+        # es lo que se serializa al cliente en cada repintado.
+        return t, t
 
     def _construir_encabezado(self) -> ft.Container:
         self._enc_refs = []
@@ -247,15 +265,20 @@ class TablaResponsiva:
                 cont = ft.Container(c.encabezado_control, width=ancho, alignment=CENTRO)
                 self._enc_refs.append((cont, None))
             else:
-                cont, t = self._mk_celda(c.etiqueta, ancho, CENTRO, bold=True)
+                # Encabezados en MAYÚSCULAS y en `on-surface-variant`, como el
+                # diseño: distingue el rótulo del dato sin recurrir a negritas.
+                cont, t = self._mk_celda(
+                    c.etiqueta.upper(), ancho, CENTRO, bold=True)
+                if t is not None:
+                    t.color = ft.Colors.ON_SURFACE_VARIANT
                 self._enc_refs.append((cont, t))
             celdas.append(cont)
         self._enc_row = ft.Container(
             ft.Row(celdas, spacing=self.spacing, tight=True,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             width=self._ancho_total, height=self.alto_encabezado,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
-            border=self._borde_inferior())
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+            border=self._borde_inferior(opaco=True))
         return self._enc_row
 
     def _construir_fila_datos(self, fila: FilaDatos) -> ft.Container:
@@ -298,7 +321,7 @@ class TablaResponsiva:
         self._filas_refs.append({"tipo": "cab", "cont": row, "segs": refs})
         return row
 
-    def _pintar_cuerpo(self) -> None:
+    def _pintar_cuerpo(self, refrescar: bool = True) -> None:
         """(Re)construye el CUERPO con controles nuevos y los px actuales, y repinta.
         El encabezado NO se recrea aquí (se mantiene para no re-parentear su check)."""
         self._filas_refs = []
@@ -309,7 +332,8 @@ class TablaResponsiva:
             else:
                 cuerpo.append(self._construir_fila_datos(fila))
         self._cuerpo.controls = cuerpo
-        self._safe_update()
+        if refrescar:
+            self._safe_update()
 
     def _aplicar_px(self) -> None:
         """Muta EN SITIO los anchos de encabezado y filas ya montadas según los px
