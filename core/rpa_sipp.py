@@ -615,12 +615,21 @@ class SesionSipp:
         await page.wait_for_timeout(2_500)  # la grid recarga por AJAX
         return await self._contar_filas_grid()
 
-    async def buscar_serie_en_listado(self, no_serie: str) -> int:
-        """Filtra el listado del catálogo por No. de serie y devuelve cuántas filas
-        resultaron (0 = el activo NO está dado de alta)."""
+    async def buscar_en_listado(self, etiqueta: str = "", serie: str = "") -> int:
+        """Filtra el listado del catálogo por ETIQUETA (ancla principal) o, si no
+        hay, por No. de serie; devuelve cuántas filas resultaron (0 = el activo NO
+        está dado de alta). La etiqueta es más confiable: casi siempre existe,
+        mientras que muchos activos no traen serie."""
         page = self._exigir_pagina()
         await self.ir_a_catalogo_activos()
-        await self.set_input("js_filtroListado.de_SerieActivo", no_serie)
+        etiqueta = (etiqueta or "").strip()
+        serie = (serie or "").strip()
+        if etiqueta:
+            await self.set_input("js_filtroListado.de_Etiqueta", etiqueta)
+        elif serie:
+            await self.set_input("js_filtroListado.de_SerieActivo", serie)
+        else:
+            return 0
         boton = await self._primer_visible(
             [
                 page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
@@ -632,11 +641,19 @@ class SesionSipp:
         return await self._contar_filas_grid()
 
     async def _contar_filas_grid(self) -> int:
-        """Cuenta las filas renderizadas del ngGrid visible."""
+        """Cuántos activos trajo el listado. El grid NO renderiza `.ngRow` (los
+        datos viven en el array `arr_gridActivosFijos` del scope de Angular, que se
+        llena por AJAX); contar el DOM daba siempre 0. Se lee el array del scope,
+        con `.ngRow` como respaldo."""
         page = self._exigir_pagina()
         try:
-            return await page.evaluate(
-                "() => document.querySelectorAll('.ngRow').length")
+            return await page.evaluate(r"""() => {
+              const el = document.querySelector("[ng-model='js_filtroListado.de_SerieActivo']");
+              const sc = el && window.angular ? angular.element(el).scope() : null;
+              if (sc && Array.isArray(sc.arr_gridActivosFijos))
+                  return sc.arr_gridActivosFijos.length;
+              return document.querySelectorAll('.ngRow').length;
+            }""")
         except Exception:  # noqa: BLE001
             return 0
 
@@ -771,20 +788,21 @@ class SesionSipp:
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
 
-    async def modificar_activo(self, no_serie: str, campos: list,
+    async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
                                detalles: "dict | None" = None) -> list:
-        """Busca un activo por No. de serie, abre su edición, aplica los campos y
-        guarda. Devuelve la lista de campos que NO se pudieron aplicar (el
-        formulario de edición no expone exactamente los mismos que el alta, así que
-        un campo ausente no aborta el resto).
+        """Busca un activo por ETIQUETA (o serie si no hay), abre su edición, aplica
+        los campos y guarda. Devuelve la lista de campos que NO se pudieron aplicar
+        (el formulario de edición no expone exactamente los mismos que el alta, así
+        que un campo ausente no aborta el resto).
 
         `campos`: [(ng_model, valor, control)] ya en su forma de EDICIÓN
         (filtrosEditar.* / FH_*_EDITAR)."""
         page = self._exigir_pagina()
-        filas = await self.buscar_serie_en_listado(no_serie)
+        filas = await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         if filas == 0:
+            ident = (etiqueta or "").strip() or (serie or "").strip()
             raise ErrorSipp(
-                f"No se encontró en el listado un activo con la serie '{no_serie}'.")
+                f"No se encontró en el listado un activo con etiqueta/serie '{ident}'.")
 
         # Abrir la edición de la fila encontrada. El portal usa un botón/ícono de
         # acción por fila; se prueban varios localizadores y, si ninguno aparece,

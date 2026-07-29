@@ -909,23 +909,20 @@ class SeccionRegistroActivos:
         sin_cache: list[str] = []
         for empresa, regs in por_empresa.items():
             proveedor = ProveedorSipp(ID_POR_EMPRESA[empresa])
-            # Se consultan ambos campos de cada registro (etiqueta y serie); el
-            # match por cualquiera cuenta como dado de alta.
-            claves = sorted({v for r in regs
-                             for v in ((r.etiqueta or "").strip(),
-                                       (r.no_serie or "").strip()) if v})
+            # El ANCLA es la ETIQUETA (identificador): casi siempre existe. Solo se
+            # usa la serie cuando el registro no tiene etiqueta. Así se evita un
+            # falso "dado de alta" por una serie genérica repetida.
+            claves = sorted({r.identificador() for r in regs if r.identificador()})
             try:
                 resultados = proveedor.buscar_por_serie(claves)
             except SinCacheActivos:
                 sin_cache.append(empresa)
                 continue
             for r in regs:
-                dado, id_sipp, datos_sipp = False, None, None
-                for campo in ((r.etiqueta or "").strip(), (r.no_serie or "").strip()):
-                    res = resultados.get(campo) if campo else None
-                    if res and res.dado_de_alta:
-                        dado, id_sipp, datos_sipp = True, res.id_activo_sipp, res.datos
-                        break
+                res = resultados.get(r.identificador()) if r.identificador() else None
+                dado = bool(res and res.dado_de_alta)
+                id_sipp = res.id_activo_sipp if dado else None
+                datos_sipp = res.datos if dado else None
                 estatus = db.EST_DADO_ALTA if dado else db.EST_NO_DADO_ALTA
                 # Al dar de alta se guardan los datos reales del SIPP para
                 # consultarlos; si no, se limpian (None) para no dejar rastros.
@@ -1153,7 +1150,7 @@ class SeccionRegistroActivos:
                     _tipo, campos, detalles = self._payload_modificacion(r)
                     try:
                         no_aplicados = await sipp.modificar_activo(
-                            r.no_serie, campos, detalles)
+                            r.etiqueta, r.no_serie, campos, detalles)
                         db.actualizar_datos_levantamiento(r.id, modificado=False)
                         exitosos += 1
                         if no_aplicados:
