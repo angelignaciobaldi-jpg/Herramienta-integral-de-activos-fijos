@@ -646,7 +646,21 @@ class Modal:
         self.page.run_task(self._aparecer)
 
     def cerrar(self) -> None:
-        self.page.run_task(self._cerrar)
+        # Cierre SÍNCRONO e inmediato: retira EL diálogo de este modal en el acto.
+        # Antes se difería 140ms (fade de salida) vía run_task, pero `pop_dialog()`
+        # retira SIEMPRE el diálogo de ARRIBA (Flet 0.86 no permite indicar cuál):
+        # si justo después se mostraba un SnackBar (app.avisar) —lo típico al
+        # terminar un RPA/consulta/QR—, el pop diferido retiraba el SnackBar y
+        # dejaba el modal con su barrier gris pegado, bloqueando la herramienta.
+        # Cerrar ya evita ese apilamiento; se pierde solo la animación de salida.
+        self._soltar_teclado()
+        self.tarjeta.opacity = 0
+        try:
+            self.page.pop_dialog()
+        except Exception:  # noqa: BLE001 — cierre tolerante (ya cerrado, etc.)
+            pass
+        if callable(self._al_cerrar):
+            self._al_cerrar()
 
     async def _aparecer(self) -> None:
         # Un respiro para que el cliente pinte el primer fotograma en opacidad
@@ -654,15 +668,6 @@ class Modal:
         await asyncio.sleep(0.02)
         self.tarjeta.opacity = 1
         _refrescar(self.tarjeta)
-
-    async def _cerrar(self, _e=None) -> None:
-        self._soltar_teclado()
-        self.tarjeta.opacity = 0
-        _refrescar(self.tarjeta)
-        await asyncio.sleep(_FADE_MS / 1000)
-        self.page.pop_dialog()
-        if callable(self._al_cerrar):
-            self._al_cerrar()
 
     def _soltar_teclado(self) -> None:
         self.page.on_keyboard_event = self._tecla_previa
