@@ -42,6 +42,10 @@ from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
 # Extensiones de imagen aceptadas para el levantamiento (sin PDF: son fotos).
 IMG_EXT = ["png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 
+# Similitud mínima (0-1) para tratar una etiqueta como "posible coincidencia" con
+# una del SIPP (errores de dedo / un dígito faltante). Ver ProveedorSipp.
+_UMBRAL_PARCIAL = 0.85
+
 # El selector de empresa/sucursal del portal es frágil, así que el RPA de ALTA
 # entra SIEMPRE con una empresa/sucursal estable y la empresa/sucursal real del
 # activo se fija dentro del formulario de alta (en el RESGUARDO, que es donde queda
@@ -538,12 +542,27 @@ class SeccionRegistroActivos:
             valor=r.departamento or "", ancho=_W,
             on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
                 i, departamento=(e.control.value or "").strip(), ya_de_alta=a))
-        etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
-        estatus = ft.Text(etiqueta, size=12, color=color, weight=ft.FontWeight.W_500)
+        # Datos del SIPP (solo dados de alta). Una POSIBLE coincidencia (parcial)
+        # se distingue en ámbar y con su propia acción para resolverla.
+        info = r.info_sipp() if r.estatus_registro == db.EST_DADO_ALTA else {}
+        es_parcial = bool(info.get("parcial"))
+        if es_parcial:
+            estatus = ft.Text("Posible coincidencia", size=12, color=NARANJA,
+                              weight=ft.FontWeight.W_500)
+        else:
+            etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
+            estatus = ft.Text(etiqueta, size=12, color=color,
+                              weight=ft.FontWeight.W_500)
         capturado = r.id_tipo_activo is not None
         controles_accion = []
-        # Solo si está dado de alta: consultar la información registrada en el SIPP.
-        if r.estatus_registro == db.EST_DADO_ALTA and r.info_sipp():
+        if es_parcial:
+            # Resolver: comparar con el activo del SIPP y decidir si es el mismo.
+            controles_accion.append(ft.IconButton(
+                icon=ft.Icons.RULE, icon_size=20, icon_color=NARANJA,
+                tooltip="Resolver posible coincidencia (¿es el mismo activo?)",
+                on_click=lambda _e, reg=r: self._resolver_parcial(reg)))
+        elif info:
+            # Dado de alta confirmado: consultar la información del SIPP.
             controles_accion.append(ft.IconButton(
                 icon=ft.Icons.INFO_OUTLINE, icon_size=20, icon_color=VERDE,
                 tooltip="Ver información registrada en el SIPP",
@@ -576,7 +595,7 @@ class SeccionRegistroActivos:
             r.no_serie or "—",
             estatus,
             acciones,
-        ])
+        ], bgcolor=ft.Colors.with_opacity(0.12, NARANJA) if es_parcial else None)
 
     def _set_ubic(self, id_lev: int, empresa: "str | None" = None,
                   sucursal: "str | None" = None, departamento: "str | None" = None,
@@ -758,6 +777,86 @@ class SeccionRegistroActivos:
         modal.cuerpo.controls = filas
         modal.abrir()
 
+    def _resolver_parcial(self, reg: "db.Levantamiento") -> None:
+        """Diálogo de una POSIBLE coincidencia: compara la etiqueta del
+        levantamiento con la del SIPP parecida (y su detalle) para que el usuario
+        decida si es el mismo activo (adopta la etiqueta del SIPP) o uno nuevo."""
+        info = reg.info_sipp()
+        if not info.get("parcial"):
+            self.app.avisar("Este registro ya no es una posible coincidencia.", NARANJA)
+            return
+        etq_sipp = str(info.get("etiqueta_sipp") or info.get("etiqueta") or "").strip()
+        sim = info.get("similitud")
+        sim_txt = f"{round(float(sim) * 100)}%" if sim is not None else "—"
+
+        def fila(etq, valor):
+            return ft.Row(
+                [ft.Text(f"{etq}:", size=13, weight=ft.FontWeight.W_600, width=170,
+                         color=GRIS),
+                 ft.Text(str(valor or "—"), size=13, selectable=True, expand=True)],
+                vertical_alignment=ft.CrossAxisAlignment.START)
+
+        cuerpo = [
+            ft.Text("La etiqueta del levantamiento se parece a una del SIPP, pero no "
+                    "es idéntica (posible error de dedo o un dígito faltante). "
+                    "Revisa el detalle y decide:", size=12, color=GRIS),
+            ft.Divider(),
+            fila("Etiqueta del levantamiento", reg.etiqueta or "—"),
+            fila("Etiqueta en el SIPP", f"{etq_sipp}   (similitud {sim_txt})"),
+            ft.Divider(),
+            fila("Insumo (SIPP)", info.get("insumo")),
+            fila("No. de serie (SIPP)", info.get("serie")),
+            fila("Empresa / Sucursal", f"{info.get('empresa') or '—'} / "
+                                       f"{info.get('sucursal') or '—'}"),
+            fila("Departamento", info.get("departamento")),
+            fila("Ubicación", info.get("ubicacion")),
+            fila("Empleado resguardo", info.get("empleado")),
+        ]
+        modal = Modal(self.page, "Resolver posible coincidencia",
+                      subtitulo=reg.nombre_insumo, ancho=560)
+        modal.cuerpo.controls = cuerpo
+
+        def es_el_mismo(_e=None):
+            modal.cerrar()
+            self._confirmar_coincidencia(reg, etq_sipp, info)
+
+        def es_nuevo(_e=None):
+            modal.cerrar()
+            # Insumo nuevo: pasa a No dados de alta (el SIPP le generará su etiqueta
+            # al darlo de alta); se limpian los datos del SIPP de la coincidencia.
+            db.actualizar_estatus_levantamiento(reg.id, db.EST_NO_DADO_ALTA, None, None)
+            self._refrescar()
+            self.app.avisar("Marcado como insumo nuevo (No dados de alta).", VERDE)
+
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: modal.cerrar()),
+            boton_secundario("Es un insumo nuevo", ft.Icons.FIBER_NEW, es_nuevo),
+            boton_primario(f"Es el mismo (usar {etq_sipp})", ft.Icons.CHECK, es_el_mismo),
+        ])
+        modal.abrir()
+
+    def _confirmar_coincidencia(self, reg, etq_sipp: str, info: dict) -> None:
+        """Adopta la etiqueta del SIPP: el registro queda como Dado de alta
+        confirmado (sin marca de parcial) y se precarga su detalle."""
+        db.fijar_etiqueta_levantamiento(reg.id, etq_sipp)
+        datos_sipp = {k: v for k, v in info.items()
+                      if k not in ("parcial", "similitud", "etiqueta_sipp")}
+        db.actualizar_estatus_levantamiento(
+            reg.id, db.EST_DADO_ALTA, etq_sipp, datos_sipp)
+        # Prefill del tipo/detalle si aún no hay captura (ya es una coincidencia
+        # confirmada).
+        try:
+            idt = int(datos_sipp.get("id_tipo"))
+        except (TypeError, ValueError):
+            idt = None
+        id_tipo_nuevo = idt if idt in TIPOS_ACTIVO and reg.id_tipo_activo is None else None
+        prefill = _prefill_desde_sipp(datos_sipp) if not reg.datos() else None
+        if id_tipo_nuevo is not None or prefill:
+            db.actualizar_datos_levantamiento(reg.id, id_tipo_activo=id_tipo_nuevo,
+                                              datos=prefill)
+        self._refrescar()
+        self.app.avisar(f"Etiqueta del SIPP adoptada: {etq_sipp}. Dado de alta.", VERDE)
+
     def _eliminar_uno(self, id_lev: int) -> None:
         db.eliminar_levantamiento(id_lev)
         self._seleccionados.discard(id_lev)
@@ -918,25 +1017,39 @@ class SeccionRegistroActivos:
             except SinCacheActivos:
                 sin_cache.append(empresa)
                 continue
+            # Coincidencias PARCIALES (≥85%) para los que no dieron match exacto:
+            # captan errores de dedo / un dígito faltante en la etiqueta.
+            no_exactos = [r.identificador() for r in regs
+                          if r.identificador()
+                          and not (resultados.get(r.identificador())
+                                   and resultados[r.identificador()].dado_de_alta)]
+            parciales = (proveedor.coincidencias_parciales(no_exactos, _UMBRAL_PARCIAL)
+                         if no_exactos else {})
             for r in regs:
-                res = resultados.get(r.identificador()) if r.identificador() else None
-                dado = bool(res and res.dado_de_alta)
-                id_sipp = res.id_activo_sipp if dado else None
-                datos_sipp = res.datos if dado else None
+                ident = r.identificador()
+                res = resultados.get(ident) if ident else None
+                if res and res.dado_de_alta:
+                    dado, datos_sipp, es_parcial = True, res.datos, False
+                    id_sipp = res.id_activo_sipp
+                elif ident and parciales.get(ident):
+                    pres = parciales[ident]
+                    dado, datos_sipp, es_parcial = True, pres.datos, True
+                    id_sipp = pres.id_activo_sipp
+                else:
+                    dado, datos_sipp, es_parcial, id_sipp = False, None, False, None
                 estatus = db.EST_DADO_ALTA if dado else db.EST_NO_DADO_ALTA
-                # Al dar de alta se guardan los datos reales del SIPP para
-                # consultarlos; si no, se limpian (None) para no dejar rastros.
+                # Al dar de alta se guardan los datos del SIPP (con la marca parcial
+                # si aplica); si no, se limpian.
                 db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp, datos_sipp)
-                # El SIPP conoce el tipo y el detalle del activo: se preseleccionan
-                # en la captura, SIN pisar lo que el usuario ya haya capturado.
-                if dado and datos_sipp:
+                # Prefill del tipo/detalle SOLO en coincidencia EXACTA: la parcial
+                # la confirma el usuario antes de adoptar los datos del SIPP.
+                if dado and datos_sipp and not es_parcial:
                     try:
                         idt = int(datos_sipp.get("id_tipo"))
                     except (TypeError, ValueError):
                         idt = None
                     id_tipo_nuevo = (idt if idt in TIPOS_ACTIVO
                                      and r.id_tipo_activo is None else None)
-                    # Prefill del detalle del insumo solo si aún no hay captura.
                     prefill = _prefill_desde_sipp(datos_sipp) if not r.datos() else None
                     if id_tipo_nuevo is not None or prefill:
                         db.actualizar_datos_levantamiento(

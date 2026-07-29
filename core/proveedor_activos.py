@@ -90,6 +90,55 @@ class ProveedorSipp(ProveedorActivos):
         from . import db
         return bool(db.listar_activos_sipp(self.id_empresa))
 
+    def _indice_etiquetas(self) -> dict[str, dict]:
+        """{etiqueta normalizada -> activo} SOLO por etiqueta (para el match parcial;
+        la serie se excluye para no confundir la comparación difusa)."""
+        from . import db
+        idx: dict[str, dict] = {}
+        for a in db.listar_activos_sipp(self.id_empresa):
+            clave = _norm(a.get("etiqueta"))
+            if clave:
+                idx.setdefault(clave, a)
+        return idx
+
+    def coincidencias_parciales(self, identificadores: list[str],
+                                umbral: float = 0.85) -> dict[str, ResultadoBusqueda]:
+        """Para cada identificador SIN match exacto, busca la etiqueta del SIPP más
+        parecida (similitud de texto ≥ `umbral`): capta errores de dedo o un dígito
+        faltante (p. ej. un 0). Devuelve {ident -> ResultadoBusqueda} con datos que
+        incluyen parcial=True, etiqueta_sipp y similitud."""
+        import difflib
+
+        idx = self._indice_etiquetas()
+        claves = list(idx.keys())
+        resultado: dict[str, ResultadoBusqueda] = {}
+        sm = difflib.SequenceMatcher()
+        for ident in identificadores:
+            n = _norm(ident)
+            if not n or n in idx:   # vacío o ya es exacto
+                continue
+            sm.set_seq2(n)
+            mejor, mejor_sim = None, umbral
+            for k in claves:
+                # Prefiltro barato: un typo/0 faltante cambia poco la longitud, y
+                # quick_ratio descarta rápido antes del ratio() costoso.
+                if abs(len(k) - len(n)) > 2:
+                    continue
+                sm.set_seq1(k)
+                if sm.quick_ratio() < mejor_sim:
+                    continue
+                r = sm.ratio()
+                if r >= mejor_sim:
+                    mejor, mejor_sim = k, r
+            if mejor is not None:
+                activo = idx[mejor]
+                etq = (activo.get("etiqueta") or "").strip()
+                resultado[ident] = ResultadoBusqueda(
+                    dado_de_alta=True, id_activo_sipp=etq,
+                    datos=dict(activo, origen="sipp", parcial=True,
+                               etiqueta_sipp=etq, similitud=round(mejor_sim, 2)))
+        return resultado
+
     def _indice(self) -> dict[str, dict]:
         """{identificador normalizado -> activo cacheado} con TODAS las etiquetas y
         series de los activos de la empresa. El activo trae sus campos reales del

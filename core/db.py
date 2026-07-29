@@ -497,6 +497,14 @@ def actualizar_estatus_levantamiento(id_lev: int, estatus: str,
         )
 
 
+def fijar_etiqueta_levantamiento(id_lev: int, etiqueta: str) -> None:
+    """Fija la ETIQUETA de un registro (p. ej. al adoptar la del SIPP tras una
+    coincidencia parcial). No toca clave_unica (evita colisiones del UNIQUE)."""
+    with _conectar() as con:
+        con.execute("UPDATE levantamiento SET etiqueta = ? WHERE id = ?",
+                    (etiqueta or None, id_lev))
+
+
 def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = None,
                                    datos: dict | None = None, factura: str | None = None,
                                    modificado: bool | None = None,
