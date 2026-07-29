@@ -109,7 +109,7 @@ class SeccionRegistroActivos:
         self._pagina = 0
         self._por_pagina = _POR_PAGINA[0]
         # Formulario dinámico de captura por tipo de activo (prepara el alta en SIPP).
-        self.dialogo_captura = DialogoCapturaActivo(app, al_guardar=self._refrescar)
+        self.dialogo_captura = DialogoCapturaActivo(app, al_guardar=self._tras_importar)
         # Carga masiva desde Excel: toma el contexto de los selectores de arriba.
         self.dialogo_carga = DialogoCargaMasiva(
             app, contexto=self._contexto_actual, al_terminar=self._tras_importar)
@@ -510,13 +510,10 @@ class SeccionRegistroActivos:
             ft.IconButton(
                 icon=ft.Icons.ASSIGNMENT, icon_size=20,
                 icon_color=VERDE if capturado else None,
-                tooltip=("Datos capturados — editar" if capturado
-                         else "Capturar datos para el alta"),
+                tooltip=("Editar datos del activo (tipo, ubicación, resguardo…)"
+                         if capturado
+                         else "Capturar datos del activo (tipo, ubicación, resguardo…)"),
                 on_click=lambda _e, reg=r: self.dialogo_captura.abrir(reg)),
-            ft.IconButton(
-                icon=ft.Icons.EDIT_LOCATION_ALT, icon_size=20,
-                tooltip="Editar empresa / sucursal / departamento",
-                on_click=lambda _e, reg=r: self._editar_ubicacion(reg)),
             ft.IconButton(
                 icon=ft.Icons.IMAGE, tooltip="Ver imagen original", icon_size=20,
                 on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
@@ -538,41 +535,6 @@ class SeccionRegistroActivos:
             estatus,
             acciones,
         ])
-
-    def _editar_ubicacion(self, reg: "db.Levantamiento") -> None:
-        """Diálogo para editar empresa/sucursal/departamento de una fila. El combo
-        de empresa se arma UNA sola vez aquí (no por fila), que es lo que agiliza la
-        tabla. Si el activo ya está dado de alta, se marca como MODIFICADO."""
-        ya_de_alta = reg.estatus_registro == db.EST_DADO_ALTA
-        dd = ft.DropdownM2(
-            label="Empresa", value=reg.empresa or None, dense=True, width=360,
-            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
-        tf_suc = ft.TextField(label="Sucursal", value=reg.sucursal or "",
-                              dense=True, width=360)
-        tf_dep = ft.TextField(label="Departamento", value=reg.departamento or "",
-                              dense=True, width=360)
-
-        def guardar(_e=None) -> None:
-            db.actualizar_ubicacion_levantamiento(
-                reg.id, empresa=dd.value or "",
-                sucursal=(tf_suc.value or "").strip(),
-                departamento=(tf_dep.value or "").strip())
-            if ya_de_alta:
-                db.actualizar_datos_levantamiento(reg.id, modificado=True)
-            self.page.pop_dialog()
-            self._recargar_filtros()  # los valores distintos pudieron cambiar
-            self._refrescar()
-
-        dlg = ft.AlertDialog(
-            modal=True, title=ft.Text("Editar empresa / sucursal / departamento"),
-            content=ft.Container(
-                ft.Column([dd, tf_suc, tf_dep], tight=True, spacing=12), width=400),
-            actions=[
-                ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
-                ft.FilledButton("Guardar", icon=ft.Icons.SAVE, on_click=guardar),
-            ], actions_alignment=ft.MainAxisAlignment.END)
-        self.page.show_dialog(dlg)
-        self.page.update()
 
     def _actualizar_conteos(self) -> None:
         """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""

@@ -139,6 +139,14 @@ class DialogoCapturaActivo:
             options=[ft.dropdownm2.Option(key=n, text=n)
                      for n in TIPOS_ACTIVO.values()],
             on_change=self._cambiar_tipo)
+        # Empresa/sucursal/departamento del levantamiento (antes se editaban con un
+        # lápiz aparte en cada fila; se integran aquí para no renderizar otro icono).
+        _wm = (_ANCHO - 52) / 2
+        self.dd_empresa = ft.DropdownM2(
+            label="Empresa", dense=True, width=_ANCHO - 40,
+            options=[ft.dropdownm2.Option(key=n, text=n) for n in NOMBRES_EMPRESAS])
+        self.tf_sucursal = ft.TextField(label="Sucursal", dense=True, width=_wm)
+        self.tf_departamento = ft.TextField(label="Departamento", dense=True, width=_wm)
         self._subtitulo = ft.Text("", size=12, color=GRIS)
         self._area_campos = ft.Column(
             spacing=12, scroll=ft.ScrollMode.AUTO, tight=True)
@@ -150,7 +158,12 @@ class DialogoCapturaActivo:
             title=ft.Column([self._titulo, self._subtitulo], spacing=2, tight=True),
             content=ft.Container(
                 ft.Column(
-                    [self.dd_tipo, ft.Divider(),
+                    [ft.Text("Ubicación del levantamiento", size=13,
+                             weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                     self.dd_empresa,
+                     ft.Row([self.tf_sucursal, self.tf_departamento], spacing=12),
+                     ft.Divider(),
+                     self.dd_tipo, ft.Divider(),
                      ft.Container(self._area_campos, height=_ALTO_CAMPOS)],
                     spacing=10, tight=True),
                 width=_ANCHO),
@@ -168,6 +181,9 @@ class DialogoCapturaActivo:
         self._subtitulo.value = (
             f"{registro.nombre_insumo} · Serie: {registro.no_serie or '—'}")
         self.dd_tipo.value = nombre_tipo(registro.id_tipo_activo) or None
+        self.dd_empresa.value = registro.empresa or None
+        self.tf_sucursal.value = registro.sucursal or ""
+        self.tf_departamento.value = registro.departamento or ""
         self._render_campos()
         self.page.show_dialog(self.dialogo)
 
@@ -291,10 +307,29 @@ class DialogoCapturaActivo:
     def _guardar(self, _e=None) -> None:
         if self._registro is None:
             return
+        # Si el activo YA está dado de alta en el SIPP, cualquier edición lo deja
+        # marcado como "modificado": así el RPA de modificación sabe cuáles reenviar.
+        ya_de_alta = self._registro.estatus_registro == db.EST_DADO_ALTA
+        # Ubicación del levantamiento (empresa/sucursal/departamento): se guarda
+        # siempre, no depende del tipo de activo.
+        empresa = self.dd_empresa.value or ""
+        sucursal = (self.tf_sucursal.value or "").strip()
+        departamento = (self.tf_departamento.value or "").strip()
+        db.actualizar_ubicacion_levantamiento(
+            self._registro.id, empresa=empresa, sucursal=sucursal,
+            departamento=departamento)
+
         tipo = self._tipo_actual()
         if tipo is None:
-            self.app.avisar("Elige el tipo de activo.", ROJO)
+            # Sin tipo: solo se actualizó la ubicación (no hay detalle que capturar).
+            if ya_de_alta:
+                db.actualizar_datos_levantamiento(self._registro.id, modificado=True)
+            self.page.pop_dialog()
+            self.app.avisar("Ubicación actualizada.", VERDE)
+            if callable(self.al_guardar):
+                self.al_guardar()
             return
+
         valores, faltantes = {}, []
         for clave, (campo, ctrl) in self._controles.items():
             valor = (getattr(ctrl, "value", "") or "").strip()
@@ -311,10 +346,6 @@ class DialogoCapturaActivo:
                 "Faltan campos obligatorios: " + ", ".join(faltantes[:5])
                 + ("…" if len(faltantes) > 5 else ""), ROJO)
             return
-        # Si el activo YA está dado de alta en el SIPP, editar sus datos lo deja
-        # marcado como "modificado": así el RPA de modificación sabe cuáles
-        # reenviar al portal.
-        ya_de_alta = self._registro.estatus_registro == db.EST_DADO_ALTA
         # El No. de serie capturado (nu_Serie) se refleja en la COLUMNA del
         # registro: es la que se muestra en la tabla y con la que se busca el
         # insumo (en el listado y en la bandeja de compras).
