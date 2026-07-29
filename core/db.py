@@ -256,6 +256,12 @@ def inicializar() -> None:
                 id_centro     INTEGER NOT NULL,
                 nb_centro     TEXT,
                 PRIMARY KEY (id_empresa, id_grupo, id_centro))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS sucursales_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_sucursal   INTEGER NOT NULL,
+                nb_sucursal   TEXT,
+                PRIMARY KEY (id_empresa, id_sucursal))""")
 
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
@@ -862,6 +868,29 @@ def _norm_suc(texto) -> str:
     for a, b in (("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("Ñ", "N")):
         t = t.replace(a, b)
     return " ".join(t.split())
+
+
+def reemplazar_sucursales_sipp(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza las sucursales cacheadas de una empresa. Cada dict:
+    id_sucursal, nb_sucursal."""
+    with _conectar() as con:
+        con.execute("DELETE FROM sucursales_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO sucursales_sipp "
+            "(id_empresa, id_sucursal, nb_sucursal) VALUES (?, ?, ?)",
+            [(id_empresa, r["id_sucursal"], r.get("nb_sucursal"))
+             for r in registros if r.get("id_sucursal") is not None])
+    return len(registros)
+
+
+def listar_sucursales_sipp(id_empresa: int) -> list[str]:
+    """Nombres de sucursal de una empresa (para el desplegable del levantamiento)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT nb_sucursal FROM sucursales_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_sucursal,'') <> '' "
+            "ORDER BY nb_sucursal", (id_empresa,)).fetchall()
+    return [f["nb_sucursal"] for f in filas]
 
 
 def reemplazar_departamentos(id_empresa: int, registros: list[dict]) -> int:

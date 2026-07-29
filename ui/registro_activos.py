@@ -28,6 +28,7 @@ import os
 import flet as ft
 
 from core import archivos, credenciales, db
+from core.empresas import ID_POR_EMPRESA
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.captura_activo import DialogoCapturaActivo
@@ -529,19 +530,40 @@ class SeccionRegistroActivos:
         # el ancho de la celda.
         _W = 145
         _alta = r.estatus_registro == db.EST_DADO_ALTA  # editar => marcar modificado
+        # Sucursal y departamento se eligen del catálogo del SIPP de la empresa de
+        # la fila (desplegable). Si esa empresa no tiene catálogo descargado, se cae
+        # al campo de texto. El AREA del Excel NO llena el departamento (no coincide
+        # con el del SIPP): se elige aquí.
+        idemp = ID_POR_EMPRESA.get(r.empresa or "")
+        sucs = db.listar_sucursales_sipp(idemp) if idemp is not None else []
+        deptos = db.listar_departamentos(idemp) if idemp is not None else []
         emp = campo_tabla_opciones(
             NOMBRES_EMPRESAS, valor=r.empresa or None, ancho=_W,
             page=self.page, titulo="Elegir empresa",
-            on_change=lambda e, i=r.id, a=_alta: self._set_ubic(
-                i, empresa=e.control.value or "", ya_de_alta=a))
-        suc = campo_tabla_texto(
-            valor=r.sucursal or "", ancho=_W,
-            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
-                i, sucursal=(e.control.value or "").strip(), ya_de_alta=a))
-        dep = campo_tabla_texto(
-            valor=r.departamento or "", ancho=_W,
-            on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
-                i, departamento=(e.control.value or "").strip(), ya_de_alta=a))
+            on_change=lambda e, i=r.id, a=_alta: self._set_empresa_fila(
+                i, e.control.value or "", a))
+        if sucs:
+            suc = campo_tabla_opciones(
+                sucs, valor=r.sucursal or None, ancho=_W, page=self.page,
+                titulo="Elegir sucursal",
+                on_change=lambda e, i=r.id, a=_alta: self._set_ubic(
+                    i, sucursal=e.control.value or "", ya_de_alta=a))
+        else:
+            suc = campo_tabla_texto(
+                valor=r.sucursal or "", ancho=_W,
+                on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
+                    i, sucursal=(e.control.value or "").strip(), ya_de_alta=a))
+        if deptos:
+            dep = campo_tabla_opciones(
+                deptos, valor=r.departamento or None, ancho=_W, page=self.page,
+                titulo="Elegir departamento",
+                on_change=lambda e, i=r.id, a=_alta: self._set_ubic(
+                    i, departamento=e.control.value or "", ya_de_alta=a))
+        else:
+            dep = campo_tabla_texto(
+                valor=r.departamento or "", ancho=_W,
+                on_blur=lambda e, i=r.id, a=_alta: self._set_ubic(
+                    i, departamento=(e.control.value or "").strip(), ya_de_alta=a))
         # Datos del SIPP (solo dados de alta). Una POSIBLE coincidencia (parcial)
         # se distingue en ámbar y con su propia acción para resolverla.
         info = r.info_sipp() if r.estatus_registro == db.EST_DADO_ALTA else {}
@@ -609,6 +631,12 @@ class SeccionRegistroActivos:
             id_lev, empresa=empresa, sucursal=sucursal, departamento=departamento)
         if ya_de_alta:
             db.actualizar_datos_levantamiento(id_lev, modificado=True)
+
+    def _set_empresa_fila(self, id_lev: int, empresa: str, ya_de_alta: bool) -> None:
+        """Fija la empresa de la fila y repinta: sucursal y departamento dependen de
+        la empresa, así que sus desplegables deben rearmarse con el catálogo nuevo."""
+        self._set_ubic(id_lev, empresa=empresa, ya_de_alta=ya_de_alta)
+        self._refrescar()
 
     def _actualizar_conteos(self) -> None:
         """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""

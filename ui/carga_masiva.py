@@ -26,10 +26,12 @@ _ANCHO = 640
 # Campo interno detectado -> cómo se llena en el registro (para mostrarlo en el
 # diálogo y que se vea qué se autollena desde el archivo). Se deduplican las
 # etiquetas repetidas (ORIGEN y UBICACIÓN alimentan ambas la "Ubicación").
+# OJO: AREA (departamento del Excel) NO se mapea: no corresponde al departamento
+# del SIPP, que se elige del catálogo descargado.
 _CAMPO_A_ETIQUETA = {
     "empresa": "Empresa", "sucursal": "Sucursal", "insumo": "Insumo",
     "etiqueta": "Etiqueta", "serie": "Serie", "responsable": "Responsable",
-    "area": "Departamento", "origen": "Ubicación", "ubicacion": "Ubicación",
+    "origen": "Ubicación", "ubicacion": "Ubicación",
 }
 
 

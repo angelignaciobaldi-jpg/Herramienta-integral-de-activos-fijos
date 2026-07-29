@@ -68,6 +68,8 @@ async def descargar_catalogos(sesion, id_empresa: int, progreso=None,
                               "listarSucursalesPorEmpleado", {"id_Empresa": id_empresa})
     sucursales = [(_val(f, idx, "ID_SUCURSAL"), _val(f, idx, "NB_SUCURSAL"))
                   for f in filas if _val(f, idx, "ID_SUCURSAL") is not None]
+    db.reemplazar_sucursales_sipp(
+        id_empresa, [{"id_sucursal": sid, "nb_sucursal": nb} for sid, nb in sucursales])
 
     grupos, centros = [], []
     total = len(sucursales)
@@ -96,5 +98,5 @@ async def descargar_catalogos(sesion, id_empresa: int, progreso=None,
 
     db.reemplazar_grupos_cc(id_empresa, grupos)
     db.reemplazar_centros_cc(id_empresa, centros)
-    return {"departamentos": len(deptos), "grupos": len(grupos),
-            "centros": len(centros)}
+    return {"departamentos": len(deptos), "sucursales": len(sucursales),
+            "grupos": len(grupos), "centros": len(centros)}

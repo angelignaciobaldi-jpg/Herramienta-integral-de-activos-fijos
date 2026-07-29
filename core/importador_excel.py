@@ -195,11 +195,12 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
         etiquetas = _partes(valores.get("etiqueta"))
         series = _partes(valores.get("serie"))
         responsable = str(valores.get("responsable") or "").strip()
-        # Empresa/sucursal/departamento se autollenan por fila desde sus columnas;
-        # si la hoja no trae la columna (o la celda está vacía) se usa el valor de
-        # la UI como respaldo.
+        # Empresa/sucursal se autollenan por fila desde sus columnas; si la hoja no
+        # trae la columna (o la celda está vacía) se usa el valor de la UI.
         emp_fila = str(valores.get("empresa") or "").strip() or empresa
-        dep_fila = str(valores.get("area") or "").strip() or departamento
+        # El DEPARTAMENTO del Excel (AREA) NO corresponde al del SIPP, así que NO se
+        # usa: queda vacío para elegirlo del desplegable (catálogo del SIPP).
+        dep_fila = departamento
         origen = str(valores.get("origen") or "").strip()
         ubic = str(valores.get("ubicacion") or "").strip()
         suc_col = str(valores.get("sucursal") or "").strip()
