@@ -28,10 +28,13 @@ class DialogoSelectorEmpleado:
         self._construir()
 
     def _construir(self) -> None:
+        # OJO: nada de expand=True aquí. Al ir DIRECTO en una Columna, `expand`
+        # estira el campo en vertical (eje principal) y crea un hueco enorme; el
+        # ancho lo da el STRETCH de la Columna.
         self.tf = ft.TextField(
             hint_text="Buscar por nombre o id de empleado… (Enter)",
             dense=True, prefix_icon=ft.Icons.SEARCH, autofocus=True,
-            on_submit=self._buscar, expand=True)
+            on_submit=self._buscar)
         self.lista = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO, tight=True)
         self.estado = ft.Text("", size=12, color=GRIS)
         # La lista mide según los resultados (hasta _ALTO_MAX) y luego hace scroll.
@@ -42,7 +45,8 @@ class DialogoSelectorEmpleado:
                           weight=ft.FontWeight.BOLD),
             content=ft.Container(
                 ft.Column([self.tf, self.estado, self._cont_lista],
-                          spacing=10, tight=True),
+                          spacing=10, tight=True,
+                          horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                 width=_ANCHO),
             actions=[ft.TextButton("Cerrar", on_click=lambda _e: self.page.pop_dialog())],
         )
