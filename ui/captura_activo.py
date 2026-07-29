@@ -27,7 +27,10 @@ from ui.selector_empleado import DialogoSelectorEmpleado
 from ui.selector_insumo import DialogoSelectorInsumo
 
 _ANCHO = 620
-_ALTO_CAMPOS = 420
+# Altura acotada del área de contenido (ubicación + tipo + campos). Todo el bloque
+# hace scroll junto dentro de este alto, para que el diálogo no se salga de la
+# pantalla aunque el tipo traiga muchos campos (p. ej. "Detalles Insumo").
+_ALTO_CONTENIDO = 460
 
 
 class _CampoSeleccion:
@@ -148,8 +151,8 @@ class DialogoCapturaActivo:
         self.tf_sucursal = ft.TextField(label="Sucursal", dense=True, width=_wm)
         self.tf_departamento = ft.TextField(label="Departamento", dense=True, width=_wm)
         self._subtitulo = ft.Text("", size=12, color=GRIS)
-        self._area_campos = ft.Column(
-            spacing=12, scroll=ft.ScrollMode.AUTO, tight=True)
+        # Sin scroll propio: fluye dentro del scroll único del contenido.
+        self._area_campos = ft.Column(spacing=12, tight=True)
         self._titulo = ft.Text("Capturar datos del activo", size=20,
                                weight=ft.FontWeight.BOLD)
 
@@ -157,6 +160,8 @@ class DialogoCapturaActivo:
             modal=True,
             title=ft.Column([self._titulo, self._subtitulo], spacing=2, tight=True),
             content=ft.Container(
+                # Todo el contenido hace scroll junto dentro de un alto acotado, así
+                # los "Detalles Insumo" ya no se salen del diálogo.
                 ft.Column(
                     [ft.Text("Ubicación del levantamiento", size=13,
                              weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
@@ -164,9 +169,9 @@ class DialogoCapturaActivo:
                      ft.Row([self.tf_sucursal, self.tf_departamento], spacing=12),
                      ft.Divider(),
                      self.dd_tipo, ft.Divider(),
-                     ft.Container(self._area_campos, height=_ALTO_CAMPOS)],
-                    spacing=10, tight=True),
-                width=_ANCHO),
+                     self._area_campos],
+                    spacing=10, tight=True, scroll=ft.ScrollMode.AUTO),
+                width=_ANCHO, height=_ALTO_CONTENIDO),
             actions=[
                 ft.TextButton("Cancelar", on_click=lambda _e: self.page.pop_dialog()),
                 ft.FilledButton("Guardar", icon=ft.Icons.SAVE, on_click=self._guardar),
