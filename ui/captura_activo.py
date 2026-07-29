@@ -25,8 +25,9 @@ from core.empresas import ID_POR_EMPRESA
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.componentes import (CampoEtiquetado, CampoFecha, Modal,
-                            boton_herramienta, boton_primario, campo_opciones,
-                            campo_texto, icono_accion, seccion_formulario)
+                            boton_herramienta, boton_primario, buscador,
+                            campo_opciones, campo_texto, fila_resultado,
+                            icono_accion, lista_resultados, seccion_formulario)
 from ui.selector_empleado import DialogoSelectorEmpleado
 from ui.selector_insumo import DialogoSelectorInsumo
 
@@ -120,6 +121,52 @@ class _CampoEmpleado(_CampoSeleccion):
         self._dialogo.selector_empleado.abrir(sugerido=sug)
 
 
+class _CampoCatalogo:
+    """Campo que se elige de un catálogo LOCAL (lista de nombres) mediante un
+    diálogo con buscador. Es para catálogos largos (centros de costo pueden ser
+    miles) que como <select> congelan la app: el diálogo filtra en vivo y solo
+    pinta un tope de resultados.
+
+    `opciones_fn()` devuelve la lista de nombres AL ABRIR (dinámica, para la
+    dependencia grupo->centro). `al_cambiar(nombre)` se llama al elegir."""
+
+    def __init__(self, dialogo, label: str, valor: str, opciones_fn,
+                 al_cambiar=None):
+        self._dialogo = dialogo
+        self._opciones_fn = opciones_fn
+        self._al_cambiar = al_cambiar
+        self._titulo = label.replace(" *", "")
+        self._bloque, self._tf = campo_texto(
+            label, valor=valor or "", read_only=True, flotante=True,
+            hint="Elegir del catálogo",
+            suffix=icono_accion(ft.Icons.SEARCH, "Buscar", self._abrir))
+
+    @property
+    def control(self) -> ft.Control:
+        return self._bloque
+
+    @property
+    def value(self) -> str:
+        return self._tf.value or ""
+
+    @value.setter
+    def value(self, v: str) -> None:
+        self._tf.value = v or ""
+        try:
+            self._tf.update()
+        except (RuntimeError, AssertionError):
+            pass
+
+    def _abrir(self, _e=None) -> None:
+        self._dialogo._abrir_selector_catalogo(
+            self._titulo, self._opciones_fn(), self._tf.value or "", self._elegido)
+
+    def _elegido(self, opcion: str) -> None:
+        self.value = opcion
+        if callable(self._al_cambiar):
+            self._al_cambiar(opcion)
+
+
 class DialogoCapturaActivo:
     """Formulario dinámico por tipo de activo para preparar el alta en el SIPP."""
 
@@ -131,9 +178,9 @@ class DialogoCapturaActivo:
         self._controles: dict[str, tuple] = {}  # clave -> (CampoActivo, control)
         self._campo_insumo: "_CampoInsumo | None" = None    # campo de insumo activo
         self._campo_empleado: "_CampoEmpleado | None" = None  # campo de empleado activo
-        # Catálogos de centro de costo (para el desplegable dependiente grupo->centro).
-        self._dd_grupo = None
-        self._dd_centro = None
+        # Catálogos de centro de costo (para el selector dependiente grupo->centro).
+        self._campo_grupo: "_CampoCatalogo | None" = None
+        self._campo_centro: "_CampoCatalogo | None" = None
         self._mapa_grupos: dict[str, int] = {}   # nb_grupo -> id_grupo
         self._id_empresa_cap: "int | None" = None
         self._sucursal_cap: str = ""
@@ -219,7 +266,7 @@ class DialogoCapturaActivo:
         # costo se ofrecen en sus desplegables (se toman de los campos de ubicación).
         self._id_empresa_cap = ID_POR_EMPRESA.get(self.dd_empresa.value or "")
         self._sucursal_cap = (self.tf_sucursal.value or "").strip()
-        self._dd_grupo = self._dd_centro = None
+        self._campo_grupo = self._campo_centro = None
         self._mapa_grupos = {}
         self._controles = {}
 
@@ -276,17 +323,57 @@ class DialogoCapturaActivo:
             return r.departamento or ""
         return ""
 
-    def _refrescar_centros(self, _e=None) -> None:
-        """Al cambiar el Grupo centro de costo, rehace las opciones del Centro de
-        costo (dependiente) con los del grupo elegido."""
-        if self._dd_centro is None:
-            return
-        gid = self._mapa_grupos.get(self._dd_grupo.value if self._dd_grupo else None)
-        centros = (db.listar_centros_cc(self._id_empresa_cap, gid)
-                   if gid and self._id_empresa_cap is not None else [])
-        self._dd_centro.options = [ft.DropdownOption(key=c, text=c) for c in centros]
-        self._dd_centro.value = None
-        self._safe_update()
+    def _centros_del_grupo(self) -> list[str]:
+        """Centros de costo del grupo ELEGIDO ahora (para el selector dependiente)."""
+        gid = self._mapa_grupos.get(self._campo_grupo.value if self._campo_grupo else "")
+        return (db.listar_centros_cc(self._id_empresa_cap, gid)
+                if gid and self._id_empresa_cap is not None else [])
+
+    def _grupo_cambio(self, _nombre: str) -> None:
+        """Al cambiar el grupo, se limpia el centro (dependiente) para que el usuario
+        elija uno del nuevo grupo."""
+        if self._campo_centro is not None:
+            self._campo_centro.value = ""
+
+    def _abrir_selector_catalogo(self, titulo: str, opciones: list, actual: str,
+                                 al_elegir) -> None:
+        """Diálogo con buscador para elegir de una lista larga (evita el <select>
+        gigante que congela). Filtra en vivo y solo pinta un tope de resultados."""
+        _MAX = 100
+        lista = lista_resultados()
+        modal = Modal(self.page, titulo, ancho=560)
+
+        def pintar(filtro: str = "") -> None:
+            f = (filtro or "").strip().lower()
+            res = [o for o in opciones if f in o.lower()]
+            lista.controls = [
+                fila_resultado("", o, resaltado=(o == actual),
+                               on_click=lambda _e, o=o: elegir(o))
+                for o in res[:_MAX]]
+            if not res:
+                lista.controls = [ft.Container(
+                    ft.Text("Sin coincidencias.", size=12,
+                            color=ft.Colors.ON_SURFACE_VARIANT), padding=12)]
+            elif len(res) > _MAX:
+                lista.controls.append(ft.Container(
+                    ft.Text(f"…y {len(res) - _MAX} más. Afina la búsqueda.",
+                            size=11, color=ft.Colors.ON_SURFACE_VARIANT), padding=8))
+            modal.refrescar()
+
+        def elegir(opcion: str) -> None:
+            modal.cerrar()
+            al_elegir(opcion)
+
+        tf = buscador("Buscar… (Enter elige el primero)", expand=True, autofocus=True)
+        tf.on_change = lambda e: pintar(e.control.value)
+        tf.on_submit = lambda e: (
+            elegir(next((o for o in opciones
+                         if (tf.value or "").strip().lower() in o.lower()), None))
+            if any((tf.value or "").strip().lower() in o.lower() for o in opciones)
+            else None)
+        modal.cuerpo.controls = [tf, lista]
+        pintar()
+        modal.abrir()
 
     def _control_para(self, campo, valor):
         """Crea el control adecuado al tipo de campo, precargado con `valor`."""
@@ -306,36 +393,33 @@ class DialogoCapturaActivo:
                       if self._registro else "")
             return _CampoEmpleado(self, nombre=valor, id_empleado=id_ini)
 
-        # Catálogos descargados del SIPP (por empresa/sucursal). Si no hay caché
-        # para esta empresa, se cae al campo de texto (comportamiento previo).
+        # Catálogos descargados del SIPP (por empresa/sucursal). Se eligen por un
+        # diálogo con buscador (NO <select>: los centros de costo pueden ser miles
+        # y un combo gigante congela la app). Si no hay caché para esta empresa, se
+        # cae al campo de texto (comportamiento previo).
         if campo.clave == "id_Departamento" and self._id_empresa_cap is not None:
-            opciones = db.listar_departamentos(self._id_empresa_cap)
-            if opciones:
-                return CampoEtiquetado(*campo_opciones(
-                    etiqueta, opciones, valor=valor or None, flotante=True))
+            if db.listar_departamentos(self._id_empresa_cap):
+                return _CampoCatalogo(
+                    self, etiqueta, valor,
+                    opciones_fn=lambda: db.listar_departamentos(self._id_empresa_cap))
 
         if campo.clave == "id_GrupoCentroCosto" and self._id_empresa_cap is not None:
             grupos = db.listar_grupos_cc(self._id_empresa_cap, self._sucursal_cap)
             if grupos:
                 self._mapa_grupos = {g["nb_grupo"]: g["id_grupo"] for g in grupos}
-                bloque, self._dd_grupo = campo_opciones(
-                    etiqueta, [g["nb_grupo"] for g in grupos], valor=valor or None,
-                    flotante=True, on_change=self._refrescar_centros)
-                return CampoEtiquetado(bloque, self._dd_grupo)
+                self._campo_grupo = _CampoCatalogo(
+                    self, etiqueta, valor,
+                    opciones_fn=lambda: [g["nb_grupo"] for g in db.listar_grupos_cc(
+                        self._id_empresa_cap, self._sucursal_cap)],
+                    al_cambiar=self._grupo_cambio)
+                return self._campo_grupo
 
         if campo.clave == "id_CentroCosto" and self._id_empresa_cap is not None:
-            # Centros del grupo YA elegido (precargado); si cambia el grupo, la
-            # lista se rehace en _refrescar_centros.
-            gid = self._mapa_grupos.get(
-                (self._registro.datos().get("id_GrupoCentroCosto") or "").strip()
-                if self._registro else "")
-            opciones = db.listar_centros_cc(self._id_empresa_cap, gid) if gid else []
-            # Solo se usa desplegable si hay grupos cacheados (aunque el grupo aún
-            # no tenga centros): así el combo se llena al elegir grupo.
+            # Solo si hay grupos cacheados (el centro depende del grupo elegido).
             if self._mapa_grupos:
-                bloque, self._dd_centro = campo_opciones(
-                    etiqueta, opciones, valor=valor or None, flotante=True)
-                return CampoEtiquetado(bloque, self._dd_centro)
+                self._campo_centro = _CampoCatalogo(
+                    self, etiqueta, valor, opciones_fn=self._centros_del_grupo)
+                return self._campo_centro
 
         if campo.control == "select":
             opciones = None
