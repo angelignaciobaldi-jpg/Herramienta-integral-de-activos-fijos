@@ -13,6 +13,8 @@ from core import db
 from ui.comun import GRIS, NARANJA, VERDE
 
 _ANCHO = 620
+_ALTO_FILA = 52    # alto aproximado de cada fila de resultado (px)
+_ALTO_MAX = 420    # tope de la lista; a partir de aquí hace scroll
 
 
 class DialogoSelectorEmpleado:
@@ -32,16 +34,22 @@ class DialogoSelectorEmpleado:
             on_submit=self._buscar, expand=True)
         self.lista = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO, tight=True)
         self.estado = ft.Text("", size=12, color=GRIS)
+        # La lista mide según los resultados (hasta _ALTO_MAX) y luego hace scroll.
+        self._cont_lista = ft.Container(self.lista, height=_ALTO_FILA)
         self.dialogo = ft.AlertDialog(
             modal=True,
             title=ft.Text("Buscar empleado (resguardo)", size=18,
                           weight=ft.FontWeight.BOLD),
             content=ft.Container(
-                ft.Column([self.tf, self.estado, ft.Container(self.lista, height=320)],
+                ft.Column([self.tf, self.estado, self._cont_lista],
                           spacing=10, tight=True),
                 width=_ANCHO),
             actions=[ft.TextButton("Cerrar", on_click=lambda _e: self.page.pop_dialog())],
         )
+
+    def _ajustar_altura(self, n: int) -> None:
+        """Altura de la lista según el nº de resultados, con tope (luego scroll)."""
+        self._cont_lista.height = min(_ALTO_MAX, max(_ALTO_FILA, n * _ALTO_FILA + 6))
 
     def abrir(self, sugerido: str = "") -> None:
         self.tf.value = sugerido or ""
@@ -50,6 +58,7 @@ class DialogoSelectorEmpleado:
                                  "catálogos» para descargarlo del SIPP.")
             self.estado.color = NARANJA
             self.lista.controls = []
+            self._ajustar_altura(0)
         else:
             self._buscar()
         self.page.show_dialog(self.dialogo)
@@ -61,6 +70,7 @@ class DialogoSelectorEmpleado:
                              + (" (mostrando 100)" if len(resultados) == 100 else ""))
         self.estado.color = GRIS
         self.lista.controls = [self._fila(e) for e in resultados]
+        self._ajustar_altura(len(resultados))
         self._safe_update()
 
     def _fila(self, emp: "db.Empleado") -> ft.Control:
