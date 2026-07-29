@@ -38,6 +38,15 @@ from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
 # Extensiones de imagen aceptadas para el levantamiento (sin PDF: son fotos).
 IMG_EXT = ["png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 
+# El selector de empresa/sucursal del portal es frágil, así que el RPA de ALTA
+# entra SIEMPRE con una empresa/sucursal estable y la empresa/sucursal real del
+# activo se fija dentro del formulario de alta (compra y resguardo).
+_EMPRESA_RPA = "Aske"
+_SUCURSAL_RPA = "Corporativo"
+# Campos del formulario de alta que llevan la empresa / la sucursal del activo.
+_CLAVES_EMPRESA = ("id_EmpresaAgregar", "id_EmpresaResguardo")
+_CLAVES_SUCURSAL = ("id_SucursalAgregar", "id_SucursalResguardo")
+
 # Etiqueta y color por estatus.
 _ESTATUS_UI = {
     db.EST_PENDIENTE: ("Pendiente", GRIS),
@@ -904,12 +913,23 @@ class SeccionRegistroActivos:
         (camposDetalle), que el RPA empareja por rótulo. El insumo NO va como campo
         de texto (es de solo lectura): se selecciona por su ID en el modal."""
         datos = r.datos()
+        emp_real = (r.empresa or "").strip()
+        suc_real = (r.sucursal or "").strip()
         campos, detalles = [], {}
         for campo in campos_de_tipo(r.id_tipo_activo):
             # tipo, insumo y empleado se eligen aparte (por combo/modales del SIPP).
             if campo.clave in ("id_TipoActivo", "nb_NombreInsumo", "nb_Empleado"):
                 continue
-            valor = (datos.get(campo.clave) or "").strip()
+            # La empresa/sucursal (compra y resguardo) se FIJAN con las del activo:
+            # como el RPA entra con una empresa/sucursal estable, aquí se registra la
+            # que corresponde. La empresa se emite antes que la sucursal (esta
+            # depende de aquella), orden que respeta campos_de_tipo.
+            if campo.clave in _CLAVES_EMPRESA and emp_real:
+                valor = emp_real
+            elif campo.clave in _CLAVES_SUCURSAL and suc_real:
+                valor = suc_real
+            else:
+                valor = (datos.get(campo.clave) or "").strip()
             if not valor:
                 continue
             if campo.detalle:
@@ -975,15 +995,15 @@ class SeccionRegistroActivos:
             nonlocal exitosos
             async with SesionSipp(headless=False) as sipp:
                 await sipp.login(usuario, contrasena)
-                # Contexto de sesión: se toma del primer registro (un levantamiento
-                # suele ser de una misma empresa/sucursal).
-                primero = pendientes[0]
-                if primero.empresa and primero.sucursal:
-                    try:
-                        await sipp.seleccionar_empresa_sucursal(
-                            primero.empresa, primero.sucursal)
-                    except ErrorSipp as exc:
-                        fallidos.append(f"Selección de empresa/sucursal: {exc}")
+                # El RPA entra con una empresa/sucursal ESTABLE (el selector del
+                # portal es frágil); la empresa/sucursal real de cada activo se fija
+                # en el formulario de alta (ver _payload_alta).
+                try:
+                    await sipp.seleccionar_empresa_sucursal(_EMPRESA_RPA, _SUCURSAL_RPA)
+                except ErrorSipp as exc:
+                    fallidos.append(
+                        f"Selección de empresa/sucursal ({_EMPRESA_RPA}/"
+                        f"{_SUCURSAL_RPA}): {exc}")
                 for i, r in enumerate(pendientes, 1):
                     await ctrl.punto_control()
                     avance(i, r.nombre_insumo)
