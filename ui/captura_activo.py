@@ -21,6 +21,7 @@ from __future__ import annotations
 import flet as ft
 
 from core import db
+from core.empresas import ID_POR_EMPRESA
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.componentes import (CampoEtiquetado, CampoFecha, Modal,
@@ -130,6 +131,12 @@ class DialogoCapturaActivo:
         self._controles: dict[str, tuple] = {}  # clave -> (CampoActivo, control)
         self._campo_insumo: "_CampoInsumo | None" = None    # campo de insumo activo
         self._campo_empleado: "_CampoEmpleado | None" = None  # campo de empleado activo
+        # Catálogos de centro de costo (para el desplegable dependiente grupo->centro).
+        self._dd_grupo = None
+        self._dd_centro = None
+        self._mapa_grupos: dict[str, int] = {}   # nb_grupo -> id_grupo
+        self._id_empresa_cap: "int | None" = None
+        self._sucursal_cap: str = ""
         # Selectores (buscan en la caché local de los catálogos del SIPP).
         self.selector_insumo = DialogoSelectorInsumo(app, al_elegir=self._insumo_elegido)
         self.selector_empleado = DialogoSelectorEmpleado(app, al_elegir=self._empleado_elegido)
@@ -208,6 +215,12 @@ class DialogoCapturaActivo:
         """Arma los campos del tipo elegido, agrupados, precargando valores."""
         tipo = self._tipo_actual()
         datos = self._registro.datos() if self._registro else {}
+        # Empresa/sucursal del activo: definen qué departamentos/grupos/centros de
+        # costo se ofrecen en sus desplegables (se toman de los campos de ubicación).
+        self._id_empresa_cap = ID_POR_EMPRESA.get(self.dd_empresa.value or "")
+        self._sucursal_cap = (self.tf_sucursal.value or "").strip()
+        self._dd_grupo = self._dd_centro = None
+        self._mapa_grupos = {}
         self._controles = {}
 
         if tipo is None:
@@ -263,6 +276,18 @@ class DialogoCapturaActivo:
             return r.departamento or ""
         return ""
 
+    def _refrescar_centros(self, _e=None) -> None:
+        """Al cambiar el Grupo centro de costo, rehace las opciones del Centro de
+        costo (dependiente) con los del grupo elegido."""
+        if self._dd_centro is None:
+            return
+        gid = self._mapa_grupos.get(self._dd_grupo.value if self._dd_grupo else None)
+        centros = (db.listar_centros_cc(self._id_empresa_cap, gid)
+                   if gid and self._id_empresa_cap is not None else [])
+        self._dd_centro.options = [ft.DropdownOption(key=c, text=c) for c in centros]
+        self._dd_centro.value = None
+        self._safe_update()
+
     def _control_para(self, campo, valor):
         """Crea el control adecuado al tipo de campo, precargado con `valor`."""
         etiqueta = campo.etiqueta + (" *" if campo.requerido else "")
@@ -280,6 +305,37 @@ class DialogoCapturaActivo:
             id_ini = (self._registro.datos().get("id_EmpleadoResguardo", "")
                       if self._registro else "")
             return _CampoEmpleado(self, nombre=valor, id_empleado=id_ini)
+
+        # Catálogos descargados del SIPP (por empresa/sucursal). Si no hay caché
+        # para esta empresa, se cae al campo de texto (comportamiento previo).
+        if campo.clave == "id_Departamento" and self._id_empresa_cap is not None:
+            opciones = db.listar_departamentos(self._id_empresa_cap)
+            if opciones:
+                return CampoEtiquetado(*campo_opciones(
+                    etiqueta, opciones, valor=valor or None, flotante=True))
+
+        if campo.clave == "id_GrupoCentroCosto" and self._id_empresa_cap is not None:
+            grupos = db.listar_grupos_cc(self._id_empresa_cap, self._sucursal_cap)
+            if grupos:
+                self._mapa_grupos = {g["nb_grupo"]: g["id_grupo"] for g in grupos}
+                bloque, self._dd_grupo = campo_opciones(
+                    etiqueta, [g["nb_grupo"] for g in grupos], valor=valor or None,
+                    flotante=True, on_change=self._refrescar_centros)
+                return CampoEtiquetado(bloque, self._dd_grupo)
+
+        if campo.clave == "id_CentroCosto" and self._id_empresa_cap is not None:
+            # Centros del grupo YA elegido (precargado); si cambia el grupo, la
+            # lista se rehace en _refrescar_centros.
+            gid = self._mapa_grupos.get(
+                (self._registro.datos().get("id_GrupoCentroCosto") or "").strip()
+                if self._registro else "")
+            opciones = db.listar_centros_cc(self._id_empresa_cap, gid) if gid else []
+            # Solo se usa desplegable si hay grupos cacheados (aunque el grupo aún
+            # no tenga centros): así el combo se llena al elegir grupo.
+            if self._mapa_grupos:
+                bloque, self._dd_centro = campo_opciones(
+                    etiqueta, opciones, valor=valor or None, flotante=True)
+                return CampoEtiquetado(bloque, self._dd_centro)
 
         if campo.control == "select":
             opciones = None

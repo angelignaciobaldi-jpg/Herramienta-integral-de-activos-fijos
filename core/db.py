@@ -231,6 +231,32 @@ def inicializar() -> None:
             if col not in cols_sipp:
                 con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} {tipo_sql}")
 
+        # Catálogos del SIPP para el alta/modificación (por empresa). Departamento
+        # es por empresa; grupo y centro de costo son por SUCURSAL (el grupo guarda
+        # su sucursal normalizada para casar con la del activo), y el centro depende
+        # del grupo.
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS departamentos_sipp (
+                id_empresa     INTEGER NOT NULL,
+                id_departamento INTEGER NOT NULL,
+                nb_departamento TEXT,
+                PRIMARY KEY (id_empresa, id_departamento))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS grupos_cc_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_grupo      INTEGER NOT NULL,
+                nb_grupo      TEXT,
+                id_sucursal   INTEGER,
+                sucursal_norm TEXT,
+                PRIMARY KEY (id_empresa, id_grupo))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS centros_cc_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_grupo      INTEGER NOT NULL,
+                id_centro     INTEGER NOT NULL,
+                nb_centro     TEXT,
+                PRIMARY KEY (id_empresa, id_grupo, id_centro))""")
+
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
             # Esquema viejo: la clave única era (no_serie, nombre_insumo), que no
@@ -818,6 +844,90 @@ def estado_activos_sipp() -> list[dict]:
             "FROM activos_sipp GROUP BY id_empresa, empresa_nombre "
             "ORDER BY empresa_nombre").fetchall()
     return [dict(f) for f in filas]
+
+
+# --------------------------------------- catálogos de alta (depto / centro costo)
+def _norm_suc(texto) -> str:
+    """Normaliza un nombre de sucursal para casar el del activo con el del catálogo
+    (mayúsculas, sin acentos ni espacios sobrantes)."""
+    t = str(texto or "").strip().upper()
+    for a, b in (("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("Ñ", "N")):
+        t = t.replace(a, b)
+    return " ".join(t.split())
+
+
+def reemplazar_departamentos(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza los departamentos cacheados de una empresa. Cada dict:
+    id_departamento, nb_departamento."""
+    with _conectar() as con:
+        con.execute("DELETE FROM departamentos_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO departamentos_sipp "
+            "(id_empresa, id_departamento, nb_departamento) VALUES (?, ?, ?)",
+            [(id_empresa, r["id_departamento"], r.get("nb_departamento"))
+             for r in registros if r.get("id_departamento") is not None])
+    return len(registros)
+
+
+def listar_departamentos(id_empresa: int) -> list[str]:
+    """Nombres de departamento de una empresa (para el desplegable del alta)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT nb_departamento FROM departamentos_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_departamento,'') <> '' "
+            "ORDER BY nb_departamento", (id_empresa,)).fetchall()
+    return [f["nb_departamento"] for f in filas]
+
+
+def reemplazar_grupos_cc(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza los grupos de centro de costo de una empresa. Cada dict:
+    id_grupo, nb_grupo, id_sucursal, sucursal (nombre; se normaliza)."""
+    with _conectar() as con:
+        con.execute("DELETE FROM grupos_cc_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO grupos_cc_sipp "
+            "(id_empresa, id_grupo, nb_grupo, id_sucursal, sucursal_norm) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(id_empresa, r["id_grupo"], r.get("nb_grupo"), r.get("id_sucursal"),
+              _norm_suc(r.get("sucursal")))
+             for r in registros if r.get("id_grupo") is not None])
+    return len(registros)
+
+
+def listar_grupos_cc(id_empresa: int, sucursal: str) -> list[dict]:
+    """Grupos de centro de costo de una empresa para la sucursal dada (por nombre,
+    normalizado). Devuelve [{id_grupo, nb_grupo}]."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id_grupo, nb_grupo FROM grupos_cc_sipp "
+            "WHERE id_empresa = ? AND sucursal_norm = ? "
+            "AND IFNULL(nb_grupo,'') <> '' ORDER BY nb_grupo",
+            (id_empresa, _norm_suc(sucursal))).fetchall()
+    return [{"id_grupo": f["id_grupo"], "nb_grupo": f["nb_grupo"]} for f in filas]
+
+
+def reemplazar_centros_cc(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza los centros de costo de una empresa. Cada dict:
+    id_grupo, id_centro, nb_centro."""
+    with _conectar() as con:
+        con.execute("DELETE FROM centros_cc_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO centros_cc_sipp "
+            "(id_empresa, id_grupo, id_centro, nb_centro) VALUES (?, ?, ?, ?)",
+            [(id_empresa, r["id_grupo"], r["id_centro"], r.get("nb_centro"))
+             for r in registros
+             if r.get("id_grupo") is not None and r.get("id_centro") is not None])
+    return len(registros)
+
+
+def listar_centros_cc(id_empresa: int, id_grupo: int) -> list[str]:
+    """Nombres de centro de costo de un grupo (para el desplegable dependiente)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT nb_centro FROM centros_cc_sipp "
+            "WHERE id_empresa = ? AND id_grupo = ? AND IFNULL(nb_centro,'') <> '' "
+            "ORDER BY nb_centro", (id_empresa, id_grupo)).fetchall()
+    return [f["nb_centro"] for f in filas]
 
 
 def eliminar_levantamientos(ids: list[int]) -> None:

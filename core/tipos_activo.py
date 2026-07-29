@@ -110,10 +110,11 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 "Empresa (compra)", "select", grupo="Compra"),
     CampoActivo("id_SucursalAgregar", "filtrosAgregar.id_SucursalAgregar",
                 "Sucursal (compra)", "select", grupo="Compra"),
-    CampoActivo("id_CentroCosto", "filtrosAgregar.id_CentroCosto",
-                "Centro de costo", "select", grupo="Compra"),
+    # Grupo antes que Centro: el centro de costo depende del grupo elegido.
     CampoActivo("id_GrupoCentroCosto", "filtrosAgregar.id_GrupoCentroCosto",
                 "Grupo centro de costo", "select", grupo="Compra"),
+    CampoActivo("id_CentroCosto", "filtrosAgregar.id_CentroCosto",
+                "Centro de costo", "select", grupo="Compra"),
     CampoActivo("id_Departamento", "filtrosAgregar.id_Departamento",
                 "Departamento", "select", grupo="Compra"),
     CampoActivo("FH_ADQUISICION", "dt_FH_ADQUISICION", "Fecha de adquisición", "date",

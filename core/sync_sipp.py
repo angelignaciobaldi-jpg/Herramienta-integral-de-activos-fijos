@@ -22,7 +22,7 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
     `progreso(hechos, total)` y `mensaje(texto)`: callbacks opcionales para
     reflejar el avance en la UI.
     """
-    from . import activos_sipp, empleados, insumos
+    from . import activos_sipp, catalogos_sipp, empleados, insumos
 
     # Insumos: es por empresa, así que primero se fija la empresa en la sesión.
     if mensaje:
@@ -38,6 +38,11 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
         mensaje("Descargando activos…")
     act = await activos_sipp.descargar_activos(sesion, id_empresa, empresa_nombre)
 
+    # Catálogos del alta: departamentos (empresa) + grupos/centros de costo (por
+    # sucursal). Usan el id de empresa como argumento, no la sesión.
+    cat = await catalogos_sipp.descargar_catalogos(
+        sesion, id_empresa, progreso=progreso, mensaje=mensaje)
+
     # Empleados: catálogo global (una sola descarga).
     if mensaje:
         mensaje("Descargando empleados…")
@@ -45,4 +50,7 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
 
     return {"insumos": ins.get("guardados", 0),
             "activos": act.get("guardados", 0),
+            "departamentos": cat.get("departamentos", 0),
+            "grupos": cat.get("grupos", 0),
+            "centros": cat.get("centros", 0),
             "empleados": emp.get("guardados", 0)}

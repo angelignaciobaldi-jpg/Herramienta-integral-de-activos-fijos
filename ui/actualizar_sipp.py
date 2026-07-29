@@ -165,4 +165,5 @@ async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) 
         app.avisar(
             f"SIPP actualizado para «{empresa}»: {resultado.get('insumos', 0)} insumo(s), "
             f"{resultado.get('activos', 0)} activo(s), "
+            f"{resultado.get('centros', 0)} centro(s) de costo, "
             f"{resultado.get('empleados', 0)} empleado(s).", VERDE, duracion=8000)
