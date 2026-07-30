@@ -189,6 +189,24 @@ class DialogoCapturaActivo:
         self.selector_empleado = DialogoSelectorEmpleado(app, al_elegir=self._empleado_elegido)
         self._construir()
 
+    def _empresa_id_actual(self) -> "int | None":
+        return ID_POR_EMPRESA.get(self.dd_empresa.value or "")
+
+    def _sucursales_empresa(self) -> list[str]:
+        idemp = self._empresa_id_actual()
+        return db.listar_sucursales_sipp(idemp) if idemp is not None else []
+
+    def _departamentos_empresa(self) -> list[str]:
+        idemp = self._empresa_id_actual()
+        return db.listar_departamentos(idemp) if idemp is not None else []
+
+    def _cambiar_contexto(self, _e=None) -> None:
+        """Al cambiar empresa o sucursal, se repintan los campos: el grupo y el
+        centro de costo dependen de la sucursal, y los desplegables de la ubicación
+        dependen de la empresa."""
+        self._render_campos()
+        self._safe_update()
+
     def _insumo_elegido(self, id_insumo, nombre: str) -> None:
         """Callback del selector: fija el insumo elegido en el campo activo."""
         if self._campo_insumo is not None:
@@ -207,12 +225,18 @@ class DialogoCapturaActivo:
             "Tipo de activo *", list(TIPOS_ACTIVO.values()),
             flotante=True, on_change=self._cambiar_tipo)
         # Empresa/sucursal/departamento del LEVANTAMIENTO (las columnas del
-        # registro, no los campos del alta): se editan aquí en vez de con un lápiz
-        # por fila. La empresa se elige del catálogo del Grupo Petroil.
+        # registro). Misma fuente que el listado general: empresa del catálogo del
+        # Grupo Petroil; sucursal y departamento se ELIGEN del catálogo del SIPP de
+        # esa empresa (selector con buscador, como en la tabla). Al cambiar empresa
+        # o sucursal se repintan los campos (grupo/centro dependen de la sucursal).
         _, self.dd_empresa = campo_opciones(
-            "Empresa", list(NOMBRES_EMPRESAS), flotante=True)
-        _, self.tf_sucursal = campo_texto("Sucursal", flotante=True)
-        _, self.tf_departamento = campo_texto("Departamento", flotante=True)
+            "Empresa", list(NOMBRES_EMPRESAS), flotante=True,
+            on_change=self._cambiar_contexto)
+        self.campo_sucursal = _CampoCatalogo(
+            self, "Sucursal", "", opciones_fn=self._sucursales_empresa,
+            al_cambiar=lambda _v: self._cambiar_contexto())
+        self.campo_departamento = _CampoCatalogo(
+            self, "Departamento", "", opciones_fn=self._departamentos_empresa)
 
         self.modal = Modal(
             self.page, "Capturar datos del activo",
@@ -227,7 +251,8 @@ class DialogoCapturaActivo:
         self.modal.cuerpo.controls = [
             seccion_formulario(
                 "Ubicación del levantamiento", ft.Icons.PLACE,
-                [self.dd_empresa, self.tf_sucursal, self.tf_departamento]),
+                [self.dd_empresa, self.campo_sucursal.control,
+                 self.campo_departamento.control]),
             # `columnas=1`: es un campo solo y manda en todo el formulario, así
             # que ocupa el ancho completo. Con el 2 por defecto se quedaba en la
             # primera mitad y la otra se rellenaba con un hueco vacío.
@@ -244,8 +269,8 @@ class DialogoCapturaActivo:
             f"{registro.nombre_insumo} · Serie: {registro.no_serie or '—'}")
         self.dd_tipo.value = nombre_tipo(registro.id_tipo_activo) or None
         self.dd_empresa.value = registro.empresa or None
-        self.tf_sucursal.value = registro.sucursal or ""
-        self.tf_departamento.value = registro.departamento or ""
+        self.campo_sucursal.value = registro.sucursal or ""
+        self.campo_departamento.value = registro.departamento or ""
         self._render_campos()
         self.modal.abrir()
 
@@ -265,7 +290,7 @@ class DialogoCapturaActivo:
         # Empresa/sucursal del activo: definen qué departamentos/grupos/centros de
         # costo se ofrecen en sus desplegables (se toman de los campos de ubicación).
         self._id_empresa_cap = ID_POR_EMPRESA.get(self.dd_empresa.value or "")
-        self._sucursal_cap = (self.tf_sucursal.value or "").strip()
+        self._sucursal_cap = (self.campo_sucursal.value or "").strip()
         self._campo_grupo = self._campo_centro = None
         self._mapa_grupos = {}
         self._controles = {}
@@ -457,8 +482,8 @@ class DialogoCapturaActivo:
         # SIEMPRE, no depende del tipo de activo.
         db.actualizar_ubicacion_levantamiento(
             self._registro.id, empresa=self.dd_empresa.value or "",
-            sucursal=(self.tf_sucursal.value or "").strip(),
-            departamento=(self.tf_departamento.value or "").strip())
+            sucursal=(self.campo_sucursal.value or "").strip(),
+            departamento=(self.campo_departamento.value or "").strip())
 
         tipo = self._tipo_actual()
         if tipo is None:
