@@ -646,17 +646,18 @@ class Modal:
         self.page.run_task(self._aparecer)
 
     def cerrar(self) -> None:
-        # Cierre SÍNCRONO e inmediato: retira EL diálogo de este modal en el acto.
-        # Antes se difería 140ms (fade de salida) vía run_task, pero `pop_dialog()`
-        # retira SIEMPRE el diálogo de ARRIBA (Flet 0.86 no permite indicar cuál):
-        # si justo después se mostraba un SnackBar (app.avisar) —lo típico al
-        # terminar un RPA/consulta/QR—, el pop diferido retiraba el SnackBar y
-        # dejaba el modal con su barrier gris pegado, bloqueando la herramienta.
-        # Cerrar ya evita ese apilamiento; se pierde solo la animación de salida.
+        # Cierre SÍNCRONO e inmediato. `pop_dialog()` (Flet 0.86) retira SIEMPRE el
+        # diálogo de ARRIBA, no uno concreto; por eso se retira hacia abajo hasta
+        # sacar EL de este modal, descartando lo que haya quedado apilado encima
+        # (p. ej. un DatePicker o un sub-selector que no se auto-retiró, o un
+        # SnackBar). Sin esto quedaba un barrier gris pegado bloqueando la app.
         self._soltar_teclado()
         self.tarjeta.opacity = 0
         try:
-            self.page.pop_dialog()
+            for _ in range(10):
+                d = self.page.pop_dialog()
+                if d is None or d is self.dialogo:
+                    break
         except Exception:  # noqa: BLE001 — cierre tolerante (ya cerrado, etc.)
             pass
         if callable(self._al_cerrar):
