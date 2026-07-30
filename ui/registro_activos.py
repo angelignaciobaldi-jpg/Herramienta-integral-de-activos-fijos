@@ -1187,8 +1187,14 @@ class SeccionRegistroActivos:
                     avance(i, r.nombre_insumo)
                     tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
                     try:
-                        await sipp.alta_activo(tipo, campos, detalles, insumo_id, empleado_id)
-                        db.actualizar_estatus_levantamiento(r.id, db.EST_DADO_ALTA)
+                        # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
+                        # en el registro (id del activo = su etiqueta).
+                        etiqueta_gen = await sipp.alta_activo(
+                            tipo, campos, detalles, insumo_id, empleado_id)
+                        db.actualizar_estatus_levantamiento(
+                            r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
+                        if etiqueta_gen:
+                            db.fijar_etiqueta_levantamiento(r.id, etiqueta_gen)
                         exitosos += 1
                     except ErrorSipp as exc:
                         fallidos.append(f"{r.nombre_insumo} ({r.no_serie}): {exc}")

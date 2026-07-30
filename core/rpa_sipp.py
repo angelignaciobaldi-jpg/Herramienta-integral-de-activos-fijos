@@ -786,6 +786,10 @@ class SesionSipp:
         if detalles:
             await self.llenar_campos_detalle(detalles)
 
+        # La ETIQUETA se genera con el botón del portal como ÚLTIMO paso antes de
+        # guardar; el código generado se devuelve para registrarlo en la herramienta.
+        etiqueta = await self.generar_etiqueta()
+
         guardar = await self._primer_visible(
             [
                 page.locator("[ng-click*='guardarActivoFijo()']"),
@@ -794,6 +798,32 @@ class SesionSipp:
             "botón Guardar del alta de activo")
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
+        return etiqueta
+
+    async def generar_etiqueta(self) -> str:
+        """Pulsa 'Generar Etiqueta' (generarEtiqueta()) y devuelve el código que el
+        SIPP asigna en el campo filtrosAgregar.nu_Etiqueta (read-only). Debe ser el
+        ÚLTIMO paso antes de guardar el activo."""
+        page = self._exigir_pagina()
+        try:
+            boton = await self._primer_visible(
+                [page.locator("[ng-click*='generarEtiqueta']"),
+                 page.get_by_role("button", name=re.compile(r"generar\s+etiqueta", re.I))],
+                "botón Generar Etiqueta")
+            await self._click_seguro(boton)
+        except ErrorSipp:
+            return ""   # sin botón (algún tipo no la usa): no aborta el alta
+        # La etiqueta se asigna por AJAX; se espera a que el campo se llene.
+        fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
+        while asyncio.get_event_loop().time() < fin:
+            etiqueta = await page.evaluate(
+                "() => { const el = document.querySelector("
+                "\"[ng-model='filtrosAgregar.nu_Etiqueta']\");"
+                " return el ? (el.value || '') : ''; }")
+            if (etiqueta or "").strip():
+                return etiqueta.strip()
+            await page.wait_for_timeout(300)
+        return ""
 
     async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
                                detalles: "dict | None" = None) -> list:

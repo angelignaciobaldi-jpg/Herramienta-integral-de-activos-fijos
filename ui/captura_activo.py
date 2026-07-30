@@ -237,6 +237,11 @@ class DialogoCapturaActivo:
             al_cambiar=lambda _v: self._cambiar_contexto())
         self.campo_departamento = _CampoCatalogo(
             self, "Departamento", "", opciones_fn=self._departamentos_empresa)
+        # Etiqueta: la genera el SIPP al dar de alta (botón "Generar Etiqueta" del
+        # portal); aquí es de SOLO LECTURA y se llena solo tras el alta.
+        _, self.tf_etiqueta = campo_texto(
+            "Etiqueta", flotante=True, read_only=True,
+            hint="Se genera en el SIPP al dar de alta")
 
         self.modal = Modal(
             self.page, "Capturar datos del activo",
@@ -252,7 +257,7 @@ class DialogoCapturaActivo:
             seccion_formulario(
                 "Ubicación del levantamiento", ft.Icons.PLACE,
                 [self.dd_empresa, self.campo_sucursal.control,
-                 self.campo_departamento.control]),
+                 self.campo_departamento.control, self.tf_etiqueta]),
             # `columnas=1`: es un campo solo y manda en todo el formulario, así
             # que ocupa el ancho completo. Con el 2 por defecto se quedaba en la
             # primera mitad y la otra se rellenaba con un hueco vacío.
@@ -271,6 +276,7 @@ class DialogoCapturaActivo:
         self.dd_empresa.value = registro.empresa or None
         self.campo_sucursal.value = registro.sucursal or ""
         self.campo_departamento.value = registro.departamento or ""
+        self.tf_etiqueta.value = registro.etiqueta or ""
         self._render_campos()
         self.modal.abrir()
 
