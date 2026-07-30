@@ -94,7 +94,7 @@ CAMPOS_COMUNES: list[CampoActivo] = [
     CampoActivo("nb_NombreInsumo", "filtrosAgregar.nb_NombreInsumo", "Insumo",
                 "text", requerido=True, grupo="Identificación"),
     CampoActivo("nu_Serie", "filtrosAgregar.nu_Serie", "No. de serie",
-                "text", requerido=True, grupo="Identificación"),
+                "text", requerido=False, grupo="Identificación"),
     CampoActivo("de_DescripcionActivo", "filtrosAgregar.de_DescripcionActivo",
                 "Descripción", "text", grupo="Identificación"),
     CampoActivo("id_Situacion", "filtrosAgregar.id_Situacion", "Situación",
