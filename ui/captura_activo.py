@@ -34,6 +34,21 @@ from ui.selector_insumo import DialogoSelectorInsumo
 _ANCHO = 760
 _ALTO_CAMPOS = 460
 
+# Regla de negocio: los insumos de equipo personal van al grupo de centro de costo
+# "CC Empleados" y su centro de costo es el del empleado responsable. Se detecta
+# por el NOMBRE del insumo (palabras clave).
+_INSUMOS_CC_EMPLEADOS = ("MONITOR", "LAPTOP", "CELULAR", "TABLET", "CPU",
+                         "COMPUTADORA DE ESCRITORIO", "MINI PC", "MINIPC")
+_GRUPO_CC_EMPLEADOS = "CC EMPLEADOS"
+
+
+def _norm_txt(texto) -> str:
+    """Mayúsculas, sin acentos ni espacios sobrantes (para comparar nombres)."""
+    t = str(texto or "").upper()
+    for a, b in (("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("Ñ", "N")):
+        t = t.replace(a, b)
+    return " ".join(t.split())
+
 # Ícono por grupo de campos (los grupos los define core/tipos_activo.py). Si
 # apareciera uno nuevo, cae en el ícono por defecto en vez de romper.
 _ICONO_GRUPO = {
@@ -211,10 +226,48 @@ class DialogoCapturaActivo:
         """Callback del selector: fija el insumo elegido en el campo activo."""
         if self._campo_insumo is not None:
             self._campo_insumo.set(id_insumo, nombre)
+        self._aplicar_regla_cc()
 
     def _empleado_elegido(self, id_empleado, nombre: str) -> None:
         if self._campo_empleado is not None:
             self._campo_empleado.set(id_empleado, nombre)
+        self._aplicar_regla_cc()
+
+    def _valor_control(self, clave: str) -> str:
+        """Valor actual de un control ya renderizado (por su clave), o ''."""
+        par = self._controles.get(clave)
+        return (getattr(par[1], "value", "") or "") if par else ""
+
+    def _aplicar_regla_cc(self) -> None:
+        """Si el insumo es equipo personal (monitor/laptop/celular/tablet/cpu/mini
+        pc), asigna el grupo 'CC Empleados' y el centro de costo del EMPLEADO (por
+        nombre). Solo rellena lo que esté vacío (no pisa una elección previa)."""
+        if self._id_empresa_cap is None or self._campo_grupo is None:
+            return
+        insumo = _norm_txt(self._valor_control("nb_NombreInsumo")
+                           or (self._registro.nombre_insumo if self._registro else ""))
+        kw = next((k for k in _INSUMOS_CC_EMPLEADOS if k in insumo), None)
+        if kw is None:
+            return
+        gcc = next((g for g in db.listar_grupos_cc(self._id_empresa_cap, self._sucursal_cap)
+                    if _GRUPO_CC_EMPLEADOS in _norm_txt(g["nb_grupo"])), None)
+        if gcc is None:
+            return
+        if not self._campo_grupo.value:
+            self._campo_grupo.value = gcc["nb_grupo"]
+            self._mapa_grupos.setdefault(gcc["nb_grupo"], gcc["id_grupo"])
+        # Centro de costo del empleado (el que contiene su nombre); si hay varios,
+        # se prefiere el que además coincide con el tipo de equipo.
+        if self._campo_centro is not None and not self._campo_centro.value:
+            emp = _norm_txt(self._valor_control("nb_Empleado")
+                            or (self._registro.responsable if self._registro else ""))
+            if emp:
+                centros = db.listar_centros_cc(self._id_empresa_cap, gcc["id_grupo"])
+                cand = [c for c in centros if emp in _norm_txt(c)]
+                mejor = next((c for c in cand if kw in _norm_txt(c)), None) \
+                    or (cand[0] if cand else None)
+                if mejor:
+                    self._campo_centro.value = mejor
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
@@ -331,6 +384,9 @@ class DialogoCapturaActivo:
                 grupo, _ICONO_GRUPO.get(grupo, _ICONO_GRUPO_DEFECTO), controles,
                 columnas=_COLUMNAS_GRUPO.get(grupo, 2)))
         self._area_campos.controls = secciones
+        # Regla de negocio: equipo personal -> grupo "CC Empleados" + centro del
+        # empleado (solo si esos campos quedaron vacíos).
+        self._aplicar_regla_cc()
 
     def _valor_inicial(self, campo, datos: dict) -> str:
         """Valor con el que se precarga un campo: lo ya capturado si existe; si no,
