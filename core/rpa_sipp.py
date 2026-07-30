@@ -764,24 +764,30 @@ class SesionSipp:
         for ng_model, valor, control in campos:
             if not valor or not ng_model:
                 continue
-            if control == "select":
-                # El CENTRO de costo depende del GRUPO (cascada AJAX): su opción
-                # solo existe tras elegir el grupo, así que se espera a que aparezca.
-                es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
-                try:
-                    await self.set_combo(ng_model, valor, esperar=es_centro)
-                except ErrorSipp:
-                    # Algunos "select" del portal son en realidad campos de texto
-                    # con búsqueda; se intenta escribirlos.
+            # Un campo que no se pueda aplicar (ausente/oculto/no editable para ese
+            # tipo, p. ej. la Situación en algunos tipos) NO debe abortar el alta: se
+            # omite y se sigue con los demás.
+            try:
+                if control == "select":
+                    # El CENTRO de costo depende del GRUPO (cascada AJAX): su opción
+                    # solo existe tras elegir el grupo, así que se espera a que aparezca.
+                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
+                    try:
+                        await self.set_combo(ng_model, valor, esperar=es_centro)
+                    except ErrorSipp:
+                        # Algunos "select" del portal son en realidad campos de texto
+                        # con búsqueda; se intenta escribirlos.
+                        await self.set_input(ng_model, valor)
+                    if "GrupoCentroCosto" in ng_model:
+                        # Dar tiempo a que la cascada cargue los centros del grupo
+                        # antes de intentar elegir el centro.
+                        await page.wait_for_timeout(1200)
+                elif control == "date":
+                    await self.set_fecha(ng_model, valor)
+                else:
                     await self.set_input(ng_model, valor)
-                if "GrupoCentroCosto" in ng_model:
-                    # Dar tiempo a que la cascada cargue los centros del grupo antes
-                    # de intentar elegir el centro.
-                    await page.wait_for_timeout(1200)
-            elif control == "date":
-                await self.set_fecha(ng_model, valor)
-            else:
-                await self.set_input(ng_model, valor)
+            except Exception:  # noqa: BLE001 — campo no aplicable: se omite, no aborta
+                continue
 
         if detalles:
             await self.llenar_campos_detalle(detalles)
