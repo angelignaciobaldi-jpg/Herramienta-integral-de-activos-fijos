@@ -116,6 +116,7 @@ class AppActivosFijos:
         # Import perezoso de las pantallas: si una estuviera rota, el error se
         # contiene en _arrancar_app (que lo muestra en pantalla) en vez de tumbar
         # todo el proceso.
+        from ui.cartas_responsivas import SeccionCartasResponsivas
         from ui.configuracion import SeccionConfiguracion
         from ui.dashboard import SeccionDashboard
         from ui.generador_qr import SeccionGeneradorQR
@@ -125,6 +126,7 @@ class AppActivosFijos:
         self.dashboard = SeccionDashboard(self)
         self.registro = SeccionRegistroActivos(self)
         self.generador_qr = SeccionGeneradorQR(self)
+        self.cartas = SeccionCartasResponsivas(self)
 
         # Área de contenido: todas las pantallas viven aquí; solo se muestra la
         # activa (se alterna 'visible'), en vez de un TabBarView de Material.
@@ -132,6 +134,7 @@ class AppActivosFijos:
             self.dashboard.contenido,
             self.registro.contenido,
             self.generador_qr.contenido,
+            self.cartas.contenido,
         ]
         for i, seccion in enumerate(self._secciones):
             seccion.visible = i == 0
@@ -179,7 +182,8 @@ class AppActivosFijos:
         self.page.controls.clear()
         self.page.add(encabezado, self._area, pie)
         # `page.on_resize` es un slot ÚNICO; se despacha a una lista de listeners.
-        for pantalla in (self.dashboard, self.registro, self.generador_qr, self.config):
+        for pantalla in (self.dashboard, self.registro, self.generador_qr,
+                         self.cartas, self.config):
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
@@ -196,6 +200,7 @@ class AppActivosFijos:
             ("Dashboard activos fijos", ft.Icons.DASHBOARD),
             ("Registro de activos", ft.Icons.INVENTORY_2),
             ("Generador de códigos QR", ft.Icons.QR_CODE_2),
+            ("Cartas responsivas", ft.Icons.DESCRIPTION),
         ]
         controles = []
         for idx, (texto, icono) in enumerate(definiciones):
