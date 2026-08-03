@@ -5,21 +5,21 @@ Sirve al alta: para un activo con serie VÁLIDA (serie != etiqueta), se localiza
 entrada de compra, se baja la factura (para adjuntarla en el alta) y se obtiene el
 precio unitario de compra (sin retención) para el Costo.
 
-Endpoints (confirmados en vivo, app `appBandejaCompraActivos` / cfproxy):
-  - Listado por serie -> ConsultaEntradaCompra.ListadoCompraActivosFijos
-        {de_SerieInsumo: <serie>}  (el filtro de serie es lo que hace funcionar la
-        consulta; los filtros amplios sin serie el SIPP los rechaza).
-        Columnas relevantes: DE_SERIEINSUMO, ID_EMPRESA, ID_ORDENDECOMPRA,
-        ID_FACTURA, NB_PROVEEDOR, NB_NOMBREINSUMO, FACTURAPDF (directorio),
-        DE_NOMBREPDF (archivo), FACTURAXML, SN_PENDIENTEFACTURA.
-  - Descarga de la factura -> downloadFile.cfm?d=<FACTURAPDF>&n=<DE_NOMBREPDF>&b=0&a=0
-        (mismo patrón que la carta responsiva).
+Endpoints (confirmados en vivo contra PRODUCCIÓN, app `appBandejaCompraActivos`):
+  - Listado -> ConsultaEntradaCompra.ListadoCompraActivosFijos. Producción EXIGE
+        el objeto de filtros COMPLETO (todas las llaves de `_FILTROS_BASE`) e, igual
+        que la pantalla, id_Empresa + rango de fechas (fh_Inicio/fh_Fin); si faltan,
+        el SIPP rechaza la consulta. Se filtra además por de_SerieInsumo.
+        Columnas: DE_SERIEINSUMO, ID_EMPRESA, ID_ORDENDECOMPRA, ID_FACTURA,
+        NB_PROVEEDOR, NB_NOMBREINSUMO, FACTURAPDF (DIRECTORIO), DE_NOMBREPDF
+        (archivo PDF), FACTURAXML (directorio), SN_PENDIENTEFACTURA.
+  - Descarga de archivos -> Documentos.obtenerArchivo {path:<dir+archivo>,
+        sn_Temp:false} -> DATA.URI (URL firmada de Google Cloud Storage) -> se baja
+        de esa URI. NO es downloadFile.cfm (esa devuelve vacío para estos archivos).
+        El XML del CFDI tiene el MISMO nombre que el PDF con extensión .xml.
 
-PRECIO: la bandeja NO expone el precio unitario (su grid de precios está comentado
-en el controlador). Se toma del XML de la factura (CFDI) que ya devuelve la propia
-bandeja: cada Concepto del CFDI trae `ValorUnitario`, que es el precio unitario
-ANTES de impuestos (antes de IVA trasladado y de cualquier retención) — justo lo
-pedido. Si la factura tiene varios conceptos, se empareja el del activo por serie /
+PRECIO: se toma del XML del CFDI (Concepto@ValorUnitario = precio unitario ANTES de
+impuestos y de cualquier retención). Con varios conceptos se empareja por serie /
 NoIdentificacion / nombre del insumo (ver `precio_unitario_desde_xml`).
 """
 
@@ -28,10 +28,23 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from urllib.parse import quote
 
 _RUTA_PROXY = "/componentes/cfproxy.cfc?method=proxy"
+
+# Llaves que el filtro de la bandeja exige presentes (producción falla si falta
+# alguna). Se envían vacías salvo las que se usan (empresa, fechas, serie).
+_FILTROS_BASE = {
+    "id_Empresa": "", "id_Sucursal": "", "id_Almacen": "", "de_SerieInsumo": "",
+    "fl_Movimiento": "", "nb_Proveedor": "", "id_OrdenDeCompra": "",
+    "id_FamiliaInsumo": "", "id_SubFamiliaInsumo": "", "nb_NombreInsumo": "",
+    "fh_Inicio": "", "fh_Fin": "", "sn_ActivoFijo": "", "sn_InsumoRelevante": "",
+    "sn_EntradaPendienteFactura": "",
+}
+# Años hacia atrás para el rango de fechas de la consulta (la compra puede ser
+# antigua respecto al levantamiento).
+_ANIOS_ATRAS = 6
 
 
 class ErrorCompras(Exception):
@@ -48,14 +61,25 @@ class EntradaCompra:
     id_factura: "int | None"
     proveedor: str
     insumo: str
-    factura_dir: str          # FACTURAPDF (directorio del PDF)
+    factura_dir: str          # FACTURAPDF (DIRECTORIO de la factura)
     factura_pdf: str          # DE_NOMBREPDF (nombre del PDF)
-    factura_xml: str          # FACTURAXML (nombre del XML, si aplica)
     pendiente_factura: bool   # SN_PENDIENTEFACTURA
 
     @property
     def tiene_factura(self) -> bool:
-        return bool(self.factura_pdf) and not self.pendiente_factura
+        return bool(self.factura_dir and self.factura_pdf) and not self.pendiente_factura
+
+    @property
+    def ruta_pdf(self) -> str:
+        """Ruta del PDF de la factura (directorio + nombre)."""
+        return self.factura_dir + self.factura_pdf
+
+    @property
+    def ruta_xml(self) -> str:
+        """Ruta del XML del CFDI: mismo nombre que el PDF con extensión .xml."""
+        if not self.factura_pdf:
+            return ""
+        return self.factura_dir + self.factura_pdf.rsplit(".", 1)[0] + ".xml"
 
 
 def _norm(texto) -> str:
@@ -94,10 +118,26 @@ def _entier(texto):
     return int(t) if t.isdigit() else None
 
 
-async def buscar_entradas_por_serie(sesion, serie: str) -> list[EntradaCompra]:
-    """Todas las entradas de compra que coinciden con la serie (read-only)."""
+def _rango_fechas() -> "tuple[str, str]":
+    """Rango (inicio, fin) 'YYYY-MM-DD' para la consulta: _ANIOS_ATRAS años a hoy."""
+    hoy = date.today()
+    return date(hoy.year - _ANIOS_ATRAS, 1, 1).strftime("%Y-%m-%d"), hoy.strftime("%Y-%m-%d")
+
+
+async def buscar_entradas_por_serie(sesion, serie: str,
+                                    id_empresa=None) -> list[EntradaCompra]:
+    """Entradas de compra que coinciden con la serie (read-only).
+
+    Producción exige el filtro COMPLETO + empresa + rango de fechas (como la
+    pantalla). `id_empresa`: la del activo (numérica); si no se da, no se filtra por
+    empresa (algunas instancias lo permiten)."""
+    fh_ini, fh_fin = _rango_fechas()
+    filtros = dict(_FILTROS_BASE)
+    filtros.update(de_SerieInsumo=serie, fh_Inicio=fh_ini, fh_Fin=fh_fin)
+    if id_empresa:
+        filtros["id_Empresa"] = id_empresa
     datos = await _invoke(sesion, "ConsultaEntradaCompra", "ListadoCompraActivosFijos",
-                          {"de_SerieInsumo": serie})
+                          filtros)
     if not datos.get("ISOK"):
         return []
     query = datos.get("QUERY", {}) or {}
@@ -113,7 +153,6 @@ async def buscar_entradas_por_serie(sesion, serie: str) -> list[EntradaCompra]:
             insumo=_v(f, idx, "NB_NOMBREINSUMO"),
             factura_dir=_v(f, idx, "FACTURAPDF"),
             factura_pdf=_v(f, idx, "DE_NOMBREPDF"),
-            factura_xml=_v(f, idx, "FACTURAXML"),
             pendiente_factura=_v(f, idx, "SN_PENDIENTEFACTURA") in ("1", "true", "True")))
     return entradas
 
@@ -126,23 +165,38 @@ def elegir_mejor_entrada(entradas: list[EntradaCompra]) -> "EntradaCompra | None
     return con_factura[0] if con_factura else entradas[0]
 
 
-async def buscar_entrada_por_serie(sesion, serie: str) -> "EntradaCompra | None":
+async def buscar_entrada_por_serie(sesion, serie: str,
+                                   id_empresa=None) -> "EntradaCompra | None":
     """La mejor entrada de compra para la serie (con factura si la hay)."""
-    return elegir_mejor_entrada(await buscar_entradas_por_serie(sesion, serie))
+    return elegir_mejor_entrada(await buscar_entradas_por_serie(sesion, serie, id_empresa))
+
+
+async def _bajar_archivo(sesion, path: str) -> "bytes | None":
+    """Bytes de un archivo de Documentos. `Documentos.obtenerArchivo` devuelve una
+    URI firmada (Google Cloud Storage) de la que se baja el contenido."""
+    if not path:
+        return None
+    datos = await _invoke(sesion, "Documentos", "obtenerArchivo",
+                          {"path": path, "sn_Temp": False})
+    if not datos.get("ISOK"):
+        return None
+    uri = (datos.get("DATA") or {}).get("URI")
+    if not uri:
+        return None
+    try:
+        resp = await sesion.context.request.get(uri)
+        return await resp.body()
+    except Exception as exc:  # noqa: BLE001
+        raise ErrorCompras(f"No se pudo descargar «{path}»: {exc}") from exc
 
 
 async def descargar_factura(sesion, entrada: EntradaCompra, carpeta) -> "Path | None":
     """Descarga el PDF de la factura de la entrada a `carpeta`. None si no tiene."""
-    if not entrada.factura_pdf:
+    if not entrada.tiene_factura:
         return None
-    url = (sesion.BASE_URL + "/downloadFile.cfm?d=" + quote(entrada.factura_dir)
-           + "&n=" + quote(entrada.factura_pdf) + "&b=0&a=0")
-    try:
-        resp = await sesion.context.request.get(url)
-        contenido = await resp.body()
-    except Exception as exc:  # noqa: BLE001
-        raise ErrorCompras(
-            f"No se pudo descargar la factura «{entrada.factura_pdf}»: {exc}") from exc
+    contenido = await _bajar_archivo(sesion, entrada.ruta_pdf)
+    if not contenido:
+        return None
     carpeta = Path(carpeta)
     carpeta.mkdir(parents=True, exist_ok=True)
     destino = carpeta / entrada.factura_pdf
@@ -218,33 +272,16 @@ def folio_desde_xml(xml_bytes: bytes) -> str:
     return (serie + folio).strip() if (serie or folio) else ""
 
 
-async def _bajar_bytes_factura(sesion, entrada: EntradaCompra,
-                               nombre: str) -> "bytes | None":
-    """Descarga por downloadFile.cfm un archivo (PDF/XML) del directorio de la
-    factura. `nombre` es el archivo (DE_NOMBREPDF o FACTURAXML)."""
-    if not nombre:
-        return None
-    url = (sesion.BASE_URL + "/downloadFile.cfm?d=" + quote(entrada.factura_dir)
-           + "&n=" + quote(nombre) + "&b=0&a=0")
-    try:
-        resp = await sesion.context.request.get(url)
-        return await resp.body()
-    except Exception as exc:  # noqa: BLE001
-        raise ErrorCompras(f"No se pudo descargar «{nombre}»: {exc}") from exc
-
-
 async def datos_factura(sesion, entrada: EntradaCompra) -> dict:
-    """Descarga el XML de la factura UNA vez y devuelve {precio, folio}.
+    """Descarga el XML del CFDI UNA vez y devuelve {precio, folio}.
 
     `precio`: unitario antes de impuestos (None si no se identifica).
     `folio`: folio del CFDI ('' si no está). Si no hay XML, ambos vacíos."""
-    if not entrada.factura_xml:
+    contenido = await _bajar_archivo(sesion, entrada.ruta_xml)
+    if not contenido:
         return {"precio": None, "folio": ""}
-    datos = await _bajar_bytes_factura(sesion, entrada, entrada.factura_xml)
-    if not datos:
-        return {"precio": None, "folio": ""}
-    return {"precio": precio_unitario_desde_xml(datos, entrada),
-            "folio": folio_desde_xml(datos)}
+    return {"precio": precio_unitario_desde_xml(contenido, entrada),
+            "folio": folio_desde_xml(contenido)}
 
 
 async def precio_unitario_compra(sesion, entrada: EntradaCompra) -> "float | None":

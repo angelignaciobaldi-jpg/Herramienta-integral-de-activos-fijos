@@ -836,10 +836,12 @@ class SesionSipp:
         compra', pone el precio (CFDI ValorUnitario) en Costo, el folio en Factura y
         adjunta el PDF. Solo para serie válida (existe y != etiqueta)."""
         from core import compras_sipp as compras
+        from core.empresas import ID_POR_EMPRESA
 
         if not compras.serie_valida(serie, etiqueta_actual):
             return
-        entrada = await compras.buscar_entrada_por_serie(self, serie)
+        id_empresa = ID_POR_EMPRESA.get((empresa or "").strip())
+        entrada = await compras.buscar_entrada_por_serie(self, serie, id_empresa)
         if entrada is None:
             return
 
