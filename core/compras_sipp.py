@@ -16,15 +16,17 @@ Endpoints (confirmados en vivo, app `appBandejaCompraActivos` / cfproxy):
         (mismo patrón que la carta responsiva).
 
 PRECIO: la bandeja NO expone el precio unitario (su grid de precios está comentado
-en el controlador). Se decidió tomarlo del DETALLE DE LA ORDEN DE COMPRA
-(IM_PRECIOUNITARIO del renglón del insumo). Ese endpoint vive en el módulo de
-Órdenes de Compra (aún no capturado); `precio_unitario_compra` queda pendiente de
-cablear en cuanto se confirme (ver TODO).
+en el controlador). Se toma del XML de la factura (CFDI) que ya devuelve la propia
+bandeja: cada Concepto del CFDI trae `ValorUnitario`, que es el precio unitario
+ANTES de impuestos (antes de IVA trasladado y de cualquier retención) — justo lo
+pedido. Si la factura tiene varios conceptos, se empareja el del activo por serie /
+NoIdentificacion / nombre del insumo (ver `precio_unitario_desde_xml`).
 """
 
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -148,11 +150,80 @@ async def descargar_factura(sesion, entrada: EntradaCompra, carpeta) -> "Path | 
     return destino
 
 
-async def precio_unitario_compra(sesion, entrada: EntradaCompra) -> "float | None":
-    """Precio unitario de compra (sin retención) del insumo, del DETALLE DE LA OC.
+def _local(tag: str) -> str:
+    """Nombre local de una etiqueta XML (sin el {namespace})."""
+    return tag.rsplit("}", 1)[-1]
 
-    TODO: cablear con el endpoint del módulo de Órdenes de Compra (aún no
-    capturado). Con `entrada.id_empresa` + `entrada.id_orden_compra` se pedirá el
-    detalle de la OC y se tomará IM_PRECIOUNITARIO del renglón cuyo insumo coincide
-    con `entrada.insumo`. Devuelve None mientras no esté disponible."""
-    return None
+
+def _conceptos_cfdi(xml_bytes: bytes) -> list[dict]:
+    """Conceptos del CFDI como dicts de atributos (namespace-agnóstico, 3.3/4.0)."""
+    raiz = ET.fromstring(xml_bytes)
+    return [dict(el.attrib) for el in raiz.iter() if _local(el.tag) == "Concepto"]
+
+
+def _elegir_concepto(conceptos: list[dict], entrada: EntradaCompra) -> "dict | None":
+    """Empareja el concepto del CFDI con el activo (por serie/insumo)."""
+    if not conceptos:
+        return None
+    if len(conceptos) == 1:
+        return conceptos[0]
+    serie, insumo = _norm(entrada.serie), _norm(entrada.insumo)
+    # 1) serie exacta en NoIdentificacion; 2) serie contenida en la descripción.
+    for c in conceptos:
+        if serie and _norm(c.get("NoIdentificacion")) == serie:
+            return c
+    for c in conceptos:
+        if serie and serie in _norm(c.get("Descripcion")):
+            return c
+    # 3) nombre del insumo contenido en la descripción.
+    for c in conceptos:
+        if insumo and insumo in _norm(c.get("Descripcion")):
+            return c
+    # 4) si todos comparten ValorUnitario, es inequívoco.
+    valores = {c.get("ValorUnitario") for c in conceptos}
+    return conceptos[0] if len(valores) == 1 else None
+
+
+def precio_unitario_desde_xml(xml_bytes: bytes,
+                              entrada: EntradaCompra) -> "float | None":
+    """Precio unitario ANTES de impuestos (CFDI `Concepto@ValorUnitario`) del activo.
+
+    Devuelve None si el XML no es parseable o no se puede identificar el concepto
+    del activo con certeza (varios conceptos con distinto precio)."""
+    try:
+        conceptos = _conceptos_cfdi(xml_bytes)
+    except ET.ParseError:
+        return None
+    concepto = _elegir_concepto(conceptos, entrada)
+    if not concepto:
+        return None
+    try:
+        return float(concepto.get("ValorUnitario"))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _bajar_bytes_factura(sesion, entrada: EntradaCompra,
+                               nombre: str) -> "bytes | None":
+    """Descarga por downloadFile.cfm un archivo (PDF/XML) del directorio de la
+    factura. `nombre` es el archivo (DE_NOMBREPDF o FACTURAXML)."""
+    if not nombre:
+        return None
+    url = (sesion.BASE_URL + "/downloadFile.cfm?d=" + quote(entrada.factura_dir)
+           + "&n=" + quote(nombre) + "&b=0&a=0")
+    try:
+        resp = await sesion.context.request.get(url)
+        return await resp.body()
+    except Exception as exc:  # noqa: BLE001
+        raise ErrorCompras(f"No se pudo descargar «{nombre}»: {exc}") from exc
+
+
+async def precio_unitario_compra(sesion, entrada: EntradaCompra) -> "float | None":
+    """Precio unitario (antes de impuestos/retención) del activo, del XML de la
+    factura de su entrada de compra. None si no hay XML o no se identifica."""
+    if not entrada.factura_xml:
+        return None
+    datos = await _bajar_bytes_factura(sesion, entrada, entrada.factura_xml)
+    if not datos:
+        return None
+    return precio_unitario_desde_xml(datos, entrada)
