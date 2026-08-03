@@ -203,6 +203,21 @@ def precio_unitario_desde_xml(xml_bytes: bytes,
         return None
 
 
+def folio_desde_xml(xml_bytes: bytes) -> str:
+    """Folio de la factura (CFDI `Comprobante@Serie`+`@Folio`), '' si no se puede."""
+    try:
+        raiz = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return ""
+    comp = raiz if _local(raiz.tag) == "Comprobante" else next(
+        (e for e in raiz.iter() if _local(e.tag) == "Comprobante"), None)
+    if comp is None:
+        return ""
+    serie = (comp.attrib.get("Serie") or "").strip()
+    folio = (comp.attrib.get("Folio") or "").strip()
+    return (serie + folio).strip() if (serie or folio) else ""
+
+
 async def _bajar_bytes_factura(sesion, entrada: EntradaCompra,
                                nombre: str) -> "bytes | None":
     """Descarga por downloadFile.cfm un archivo (PDF/XML) del directorio de la
@@ -218,12 +233,21 @@ async def _bajar_bytes_factura(sesion, entrada: EntradaCompra,
         raise ErrorCompras(f"No se pudo descargar «{nombre}»: {exc}") from exc
 
 
+async def datos_factura(sesion, entrada: EntradaCompra) -> dict:
+    """Descarga el XML de la factura UNA vez y devuelve {precio, folio}.
+
+    `precio`: unitario antes de impuestos (None si no se identifica).
+    `folio`: folio del CFDI ('' si no está). Si no hay XML, ambos vacíos."""
+    if not entrada.factura_xml:
+        return {"precio": None, "folio": ""}
+    datos = await _bajar_bytes_factura(sesion, entrada, entrada.factura_xml)
+    if not datos:
+        return {"precio": None, "folio": ""}
+    return {"precio": precio_unitario_desde_xml(datos, entrada),
+            "folio": folio_desde_xml(datos)}
+
+
 async def precio_unitario_compra(sesion, entrada: EntradaCompra) -> "float | None":
     """Precio unitario (antes de impuestos/retención) del activo, del XML de la
     factura de su entrada de compra. None si no hay XML o no se identifica."""
-    if not entrada.factura_xml:
-        return None
-    datos = await _bajar_bytes_factura(sesion, entrada, entrada.factura_xml)
-    if not datos:
-        return None
-    return precio_unitario_desde_xml(datos, entrada)
+    return (await datos_factura(sesion, entrada)).get("precio")

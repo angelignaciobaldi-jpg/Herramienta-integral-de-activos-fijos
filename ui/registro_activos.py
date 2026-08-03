@@ -1190,7 +1190,9 @@ class SeccionRegistroActivos:
                         # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
                         # en el registro (id del activo = su etiqueta).
                         etiqueta_gen = await sipp.alta_activo(
-                            tipo, campos, detalles, insumo_id, empleado_id)
+                            tipo, campos, detalles, insumo_id, empleado_id,
+                            serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
+                            empresa=r.empresa or "", sucursal=r.sucursal or "")
                         db.actualizar_estatus_levantamiento(
                             r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
                         if etiqueta_gen:

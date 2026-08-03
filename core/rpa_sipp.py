@@ -723,7 +723,9 @@ class SesionSipp:
 
     async def alta_activo(self, tipo_nombre: str, campos: list,
                           detalles: "dict | None" = None,
-                          insumo_id=None, empleado_id=None) -> None:
+                          insumo_id=None, empleado_id=None,
+                          serie: str = "", etiqueta_actual: str = "",
+                          empresa: str = "", sucursal: str = "") -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -733,6 +735,9 @@ class SesionSipp:
             detalles: características del insumo {etiqueta -> valor} (camposDetalle).
             insumo_id: Cve Insumo del SIPP; se selecciona por el modal 'Buscar
                 Insumo' (el nombre del insumo es de solo lectura, se elige así).
+            serie/etiqueta_actual: para buscar la factura en la bandeja de compras
+                (solo si la serie es válida: existe y != etiqueta). empresa/sucursal:
+                las del activo, para los datos de compra.
 
         Abre el formulario, elige el tipo, selecciona el insumo por id (lo que
         dispara la carga de las características), llena todo y pulsa Guardar.
@@ -792,6 +797,13 @@ class SesionSipp:
         if detalles:
             await self.llenar_campos_detalle(detalles)
 
+        # Factura + precio desde la bandeja de compras (best-effort): nunca aborta
+        # el alta; solo actúa si la serie es válida y existe la entrada de compra.
+        try:
+            await self._adjuntar_compra(serie, etiqueta_actual, empresa, sucursal)
+        except Exception:  # noqa: BLE001 — no crítico: se omite sin tumbar el alta
+            pass
+
         # La ETIQUETA se genera con el botón del portal como ÚLTIMO paso antes de
         # guardar; el código generado se devuelve para registrarlo en la herramienta.
         etiqueta = await self.generar_etiqueta()
@@ -805,6 +817,65 @@ class SesionSipp:
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
         return etiqueta
+
+    async def _activar_datos_compra(self) -> None:
+        """Marca el checkbox 'Datos de compra' (filtrosAgregar.sn_DatosCompra) para
+        habilitar Costo/Factura/Archivo (están ng-disabled hasta que se activa)."""
+        page = self._exigir_pagina()
+        await page.evaluate(
+            "() => { const el = document.querySelector("
+            "\"[ng-model='filtrosAgregar.sn_DatosCompra']\");"
+            " if (el && !el.checked) { const s = angular.element(el).scope();"
+            " s.$apply(() => { s.filtrosAgregar.sn_DatosCompra = 1;"
+            " if (typeof s.resetCamposCompra === 'function') s.resetCamposCompra(); }); } }")
+        await page.wait_for_timeout(600)
+
+    async def _adjuntar_compra(self, serie: str, etiqueta_actual: str,
+                               empresa: str, sucursal: str) -> None:
+        """Busca la entrada de compra por serie y, si la halla, activa 'Datos de
+        compra', pone el precio (CFDI ValorUnitario) en Costo, el folio en Factura y
+        adjunta el PDF. Solo para serie válida (existe y != etiqueta)."""
+        from core import compras_sipp as compras
+
+        if not compras.serie_valida(serie, etiqueta_actual):
+            return
+        entrada = await compras.buscar_entrada_por_serie(self, serie)
+        if entrada is None:
+            return
+
+        info = await compras.datos_factura(self, entrada)  # {precio, folio}
+        page = self._exigir_pagina()
+        # Habilita la sección; de paso, ya visibles, empresa/sucursal de compra no
+        # cuelgan (antes colgaban por estar ocultas). Se ponen las del propio activo.
+        await self._activar_datos_compra()
+        for ng_model, valor, esperar in (
+                ("filtrosAgregar.id_EmpresaAgregar", empresa, True),
+                ("filtrosAgregar.id_SucursalAgregar", sucursal, True)):
+            if valor:
+                try:
+                    await self.set_combo(ng_model, valor, esperar=esperar)
+                    await page.wait_for_timeout(400)
+                except Exception:  # noqa: BLE001 — no aplica: se omite
+                    continue
+        if info.get("precio") is not None:
+            try:
+                await self.set_input("filtrosAgregar.im_Costo", f"{info['precio']:.2f}")
+            except Exception:  # noqa: BLE001
+                pass
+        if info.get("folio"):
+            try:
+                await self.set_input("filtrosAgregar.nb_Factura", info["folio"])
+            except Exception:  # noqa: BLE001
+                pass
+        if entrada.tiene_factura:
+            try:
+                carpeta = os.path.join(rutas.DATOS, "facturas_alta")
+                ruta = await compras.descargar_factura(self, entrada, carpeta)
+                if ruta:
+                    await page.set_input_files("#ar_ArchivoSoporteFactura", str(ruta))
+                    await page.wait_for_timeout(600)  # ng-change subirFactura(this)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def generar_etiqueta(self) -> str:
         """Pulsa 'Generar Etiqueta' (generarEtiqueta()) y devuelve el código que el
