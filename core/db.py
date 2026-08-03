@@ -423,7 +423,9 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
     única se ignoran (son el mismo activo). Devuelve (agregados, duplicados).
 
     Cada dict acepta: nombre_insumo (obligatorio), etiqueta, no_serie,
-    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen.
+    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen y —para
+    la carga masiva con todos los campos del alta— id_tipo_activo (int) y datos
+    (dict que se serializa a datos_json, lo que consume el RPA de alta).
     """
     if not registros:
         return 0, 0
@@ -432,10 +434,13 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
         insumo = r.get("nombre_insumo", "")
         etiqueta = (r.get("etiqueta") or "").strip()
         serie = r.get("no_serie", "") or ""
+        datos = r.get("datos")
+        datos_json = json.dumps(datos, ensure_ascii=False) if datos else None
         filas.append((
             r.get("empresa", ""), r.get("sucursal", ""), r.get("departamento", ""),
             insumo, etiqueta or None, serie, r.get("responsable", ""),
             r.get("ubicacion", ""), r.get("ruta_imagen"),
+            r.get("id_tipo_activo"), datos_json,
             clave_levantamiento(insumo, etiqueta, serie),
         ))
     with _conectar() as con:
@@ -443,8 +448,9 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
         con.executemany(
             """INSERT OR IGNORE INTO levantamiento
                (empresa, sucursal, departamento, nombre_insumo, etiqueta,
-                no_serie, responsable, ubicacion, ruta_imagen, clave_unica)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                no_serie, responsable, ubicacion, ruta_imagen,
+                id_tipo_activo, datos_json, clave_unica)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             filas)
         despues = con.execute("SELECT COUNT(*) FROM levantamiento").fetchone()[0]
     agregados = despues - antes

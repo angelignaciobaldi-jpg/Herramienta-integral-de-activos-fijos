@@ -31,6 +31,15 @@ _CAMPO_A_ETIQUETA = {
     "empresa": "Empresa", "sucursal": "Sucursal", "insumo": "Insumo",
     "etiqueta": "Etiqueta", "serie": "Serie", "responsable": "Responsable",
     "origen": "Ubicación", "ubicacion": "Ubicación",
+    # Campos del alta (plantilla completa).
+    "id_TipoActivo": "Tipo", "de_DescripcionActivo": "Descripción",
+    "id_Situacion": "Situación", "im_Costo": "Costo", "nb_Factura": "Factura",
+    "nb_Proveedor": "Proveedor", "id_EmpresaAgregar": "Empresa compra",
+    "id_SucursalAgregar": "Sucursal compra", "id_GrupoCentroCosto": "Grupo CC",
+    "id_CentroCosto": "Centro de costo", "id_Departamento": "Departamento",
+    "FH_ADQUISICION": "F. adquisición", "FH_GARANTIA": "F. garantía",
+    "FH_ASIGNACION": "F. asignación", "marca": "Marca", "modelo": "Modelo",
+    "cliente": "Cliente", "placa": "Placa",
 }
 
 
