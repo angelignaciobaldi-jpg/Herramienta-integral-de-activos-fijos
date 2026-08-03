@@ -25,13 +25,20 @@ NoIdentificacion / nombre del insumo (ver `precio_unitario_desde_xml`).
 
 from __future__ import annotations
 
+import difflib
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 _RUTA_PROXY = "/componentes/cfproxy.cfc?method=proxy"
+
+# Similitud mínima (0..1) para dar por coincidente la serie del activo con la de
+# una entrada de la bandeja: como la captura puede tener errores en CUALQUIERA de
+# las dos, no se exige coincidencia exacta sino ≥ este umbral. Ajustable.
+UMBRAL_SIMILITUD_SERIE = 0.90
 
 # Llaves que el filtro de la bandeja exige presentes (producción falla si falta
 # alguna). Se envían vacías salvo las que se usan (empresa, fechas, serie).
@@ -86,6 +93,20 @@ def _norm(texto) -> str:
     return " ".join(str(texto or "").strip().upper().split())
 
 
+def _norm_serie(serie) -> str:
+    """Normaliza una serie para comparar: mayúsculas y solo alfanuméricos (quita
+    espacios, guiones, '/', etc., que suelen variar entre capturas)."""
+    return re.sub(r"[^A-Z0-9]", "", str(serie or "").upper())
+
+
+def similitud_serie(a, b) -> float:
+    """Similitud 0..1 entre dos series (normalizadas). 0 si alguna queda vacía."""
+    na, nb = _norm_serie(a), _norm_serie(b)
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
 def serie_valida(serie, etiqueta) -> bool:
     """La serie es utilizable solo si existe y NO coincide con la etiqueta.
 
@@ -124,16 +145,15 @@ def _rango_fechas() -> "tuple[str, str]":
     return date(hoy.year - _ANIOS_ATRAS, 1, 1).strftime("%Y-%m-%d"), hoy.strftime("%Y-%m-%d")
 
 
-async def buscar_entradas_por_serie(sesion, serie: str,
-                                    id_empresa=None) -> list[EntradaCompra]:
-    """Entradas de compra que coinciden con la serie (read-only).
+async def _consultar_bandeja(sesion, serie: str, id_empresa) -> list[EntradaCompra]:
+    """Consulta cruda de la bandeja (read-only). `serie` vacía = sin filtro de serie
+    (trae las entradas de la empresa para emparejar de forma aproximada).
 
     Producción exige el filtro COMPLETO + empresa + rango de fechas (como la
-    pantalla). `id_empresa`: la del activo (numérica); si no se da, no se filtra por
-    empresa (algunas instancias lo permiten)."""
+    pantalla). `id_empresa`: la del activo (numérica)."""
     fh_ini, fh_fin = _rango_fechas()
     filtros = dict(_FILTROS_BASE)
-    filtros.update(de_SerieInsumo=serie, fh_Inicio=fh_ini, fh_Fin=fh_fin)
+    filtros.update(de_SerieInsumo=serie or "", fh_Inicio=fh_ini, fh_Fin=fh_fin)
     if id_empresa:
         filtros["id_Empresa"] = id_empresa
     datos = await _invoke(sesion, "ConsultaEntradaCompra", "ListadoCompraActivosFijos",
@@ -145,7 +165,7 @@ async def buscar_entradas_por_serie(sesion, serie: str,
     entradas: list[EntradaCompra] = []
     for f in query.get("DATA") or []:
         entradas.append(EntradaCompra(
-            serie=_v(f, idx, "DE_SERIEINSUMO") or serie,
+            serie=_v(f, idx, "DE_SERIEINSUMO"),
             id_empresa=_entier(_v(f, idx, "ID_EMPRESA")),
             id_orden_compra=_entier(_v(f, idx, "ID_ORDENDECOMPRA")),
             id_factura=_entier(_v(f, idx, "ID_FACTURA")),
@@ -157,18 +177,44 @@ async def buscar_entradas_por_serie(sesion, serie: str,
     return entradas
 
 
+async def buscar_entradas_por_serie(
+        sesion, serie: str, id_empresa=None,
+        umbral: float = UMBRAL_SIMILITUD_SERIE) -> list[EntradaCompra]:
+    """Entradas de compra cuya serie coincide con `serie` al menos en `umbral`
+    (0..1) de similitud, ordenadas de más a menos parecida (read-only).
+
+    Tolera errores de captura en cualquiera de las dos series: primero intenta el
+    filtro exacto del SIPP (rápido) y, si no arroja coincidencias aceptables, trae
+    las entradas de la empresa y empareja por similitud."""
+    def aceptables(entradas):
+        califs = [(similitud_serie(e.serie, serie), e) for e in entradas]
+        elegidas = [(s, e) for s, e in califs if s >= umbral]
+        # más parecidas primero y, a igual parecido, las que tienen factura.
+        elegidas.sort(key=lambda se: (se[0], se[1].tiene_factura), reverse=True)
+        return [e for _s, e in elegidas]
+
+    exactas = aceptables(await _consultar_bandeja(sesion, serie, id_empresa))
+    if exactas:
+        return exactas
+    # Aproximado: sin filtro de serie, se empareja contra las de la empresa.
+    return aceptables(await _consultar_bandeja(sesion, "", id_empresa))
+
+
 def elegir_mejor_entrada(entradas: list[EntradaCompra]) -> "EntradaCompra | None":
-    """De varias coincidencias, prefiere una CON factura (no pendiente)."""
+    """De las coincidencias (ya ordenadas por similitud), prefiere una CON factura."""
     if not entradas:
         return None
     con_factura = [e for e in entradas if e.tiene_factura]
     return con_factura[0] if con_factura else entradas[0]
 
 
-async def buscar_entrada_por_serie(sesion, serie: str,
-                                   id_empresa=None) -> "EntradaCompra | None":
-    """La mejor entrada de compra para la serie (con factura si la hay)."""
-    return elegir_mejor_entrada(await buscar_entradas_por_serie(sesion, serie, id_empresa))
+async def buscar_entrada_por_serie(
+        sesion, serie: str, id_empresa=None,
+        umbral: float = UMBRAL_SIMILITUD_SERIE) -> "EntradaCompra | None":
+    """La mejor entrada de compra para la serie (≥ umbral de similitud; con factura
+    si la hay)."""
+    return elegir_mejor_entrada(
+        await buscar_entradas_por_serie(sesion, serie, id_empresa, umbral))
 
 
 async def _bajar_archivo(sesion, path: str) -> "bytes | None":
