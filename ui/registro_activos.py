@@ -27,7 +27,7 @@ import os
 
 import flet as ft
 
-from core import archivos, credenciales, db
+from core import archivos, compras_sipp, credenciales, db, rutas
 from core.empresas import ID_POR_EMPRESA
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
@@ -589,6 +589,13 @@ class SeccionRegistroActivos:
                 icon=ft.Icons.INFO_OUTLINE, icon_size=20, icon_color=VERDE,
                 tooltip="Ver información registrada en el SIPP",
                 on_click=lambda _e, reg=r: self._ver_info_sipp(reg)))
+        # Buscar factura en el sistema: solo si el activo tiene un No. de serie
+        # válido (existe y no coincide con la etiqueta).
+        if compras_sipp.serie_valida(r.no_serie, r.etiqueta):
+            controles_accion.append(ft.IconButton(
+                icon=ft.Icons.RECEIPT_LONG, icon_size=20,
+                tooltip="Buscar factura en el sistema (por No. de serie)",
+                on_click=lambda _e, reg=r: self._buscar_factura_sistema(reg)))
         controles_accion += [
             ft.IconButton(
                 icon=ft.Icons.ASSIGNMENT, icon_size=20,
@@ -637,6 +644,77 @@ class SeccionRegistroActivos:
         la empresa, así que sus desplegables deben rearmarse con el catálogo nuevo."""
         self._set_ubic(id_lev, empresa=empresa, ya_de_alta=ya_de_alta)
         self._refrescar()
+
+    async def _buscar_factura_sistema(self, reg: "db.Levantamiento") -> None:
+        """Busca en la bandeja de compras la factura del activo por su No. de serie,
+        la descarga y ofrece abrirla; informa proveedor, folio y precio del CFDI."""
+        if not compras_sipp.serie_valida(reg.no_serie, reg.etiqueta):
+            self.app.avisar("El activo no tiene un No. de serie válido para buscar "
+                            "factura.", NARANJA)
+            return
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+        id_empresa = ID_POR_EMPRESA.get((reg.empresa or "").strip())
+
+        modal = Modal(self.page, "Buscar factura en sistema",
+                      subtitulo=f"Serie: {reg.no_serie}", ancho=440)
+        modal.cuerpo.controls = [ft.Text("Buscando la factura en el SIPP…", size=13),
+                                 ft.ProgressBar()]
+        modal.abrir()
+
+        entrada, info, ruta, error = None, None, None, None
+
+        async def flujo() -> None:
+            nonlocal entrada, info, ruta, error
+            try:
+                async with SesionSipp(headless=True) as sipp:
+                    await sipp.login(usuario, contrasena)
+                    entrada = await compras_sipp.buscar_entrada_por_serie(
+                        sipp, reg.no_serie, id_empresa)
+                    if entrada is not None:
+                        info = await compras_sipp.datos_factura(sipp, entrada)
+                        if entrada.tiene_factura:
+                            ruta = await compras_sipp.descargar_factura(
+                                sipp, entrada, os.path.join(rutas.DATOS, "facturas"))
+            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                error = str(exc)
+
+        bucle = BucleRpa()
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        finally:
+            bucle.cerrar()
+            modal.cerrar()
+
+        if error:
+            self.app.avisar(f"No se pudo buscar la factura: {error}", ROJO, duracion=8000)
+            return
+        if entrada is None:
+            self.app.avisar(f"No se encontró factura para la serie «{reg.no_serie}».",
+                           NARANJA, duracion=7000)
+            return
+        precio = (info or {}).get("precio")
+        folio = (info or {}).get("folio")
+        partes = []
+        if entrada.proveedor:
+            partes.append(entrada.proveedor)
+        if folio:
+            partes.append(f"folio {folio}")
+        if precio is not None:
+            partes.append(f"${precio:,.2f}")
+        resumen = (" · " + " · ".join(partes)) if partes else ""
+        if ruta:
+            self.app.avisar(
+                f"Factura encontrada{resumen}.", VERDE, accion="Abrir",
+                on_accion=lambda _e, x=str(ruta): self.app.abrir_en_sistema(x),
+                duracion=9000)
+        else:
+            self.app.avisar(
+                f"Entrada de compra encontrada, sin PDF de factura (pendiente){resumen}.",
+                NARANJA, duracion=8000)
 
     def _actualizar_conteos(self) -> None:
         """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""
