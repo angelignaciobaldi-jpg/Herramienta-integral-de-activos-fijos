@@ -18,15 +18,17 @@ Uso:
 
 from __future__ import annotations
 
+import asyncio
+
 import flet as ft
 
 from core import db
 from core.empresas import ID_POR_EMPRESA
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
-from ui.comun import GRIS, NOMBRES_EMPRESAS, ROJO, VERDE
+from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.componentes import (CampoEtiquetado, CampoFecha, Modal,
-                            boton_herramienta, boton_primario, buscador,
-                            campo_opciones, campo_texto, fila_resultado,
+                            boton_herramienta, boton_primario, boton_secundario,
+                            buscador, campo_opciones, campo_texto, fila_resultado,
                             icono_accion, lista_resultados, seccion_formulario)
 from ui.selector_empleado import DialogoSelectorEmpleado
 from ui.selector_insumo import DialogoSelectorInsumo
@@ -380,9 +382,15 @@ class DialogoCapturaActivo:
                 # Todos los campos son envoltorios con `.control` y `.value`;
                 # al layout va siempre `.control`.
                 controles.append(ctrl.control)
-            secciones.append(seccion_formulario(
+            seccion = seccion_formulario(
                 grupo, _ICONO_GRUPO.get(grupo, _ICONO_GRUPO_DEFECTO), controles,
-                columnas=_COLUMNAS_GRUPO.get(grupo, 2)))
+                columnas=_COLUMNAS_GRUPO.get(grupo, 2))
+            # En "Compra": botón para autollenar costo/factura/proveedor desde la
+            # factura de la bandeja de compras (búsqueda por serie).
+            if grupo == "Compra":
+                seccion = ft.Column([self._barra_traer_factura(), seccion],
+                                    spacing=8, tight=True)
+            secciones.append(seccion)
         self._area_campos.controls = secciones
         # Regla de negocio: equipo personal -> grupo "CC Empleados" + centro del
         # empleado (solo si esos campos quedaron vacíos).
@@ -490,6 +498,14 @@ class DialogoCapturaActivo:
                     self, etiqueta, valor,
                     opciones_fn=lambda: db.listar_departamentos(self._id_empresa_cap))
 
+        # Sucursal de COMPRA: mismo desplegable que la sucursal de la ubicación del
+        # levantamiento (sucursales de la empresa, cacheadas del SIPP).
+        if campo.clave == "id_SucursalAgregar" and self._id_empresa_cap is not None:
+            if self._sucursales_empresa():
+                return _CampoCatalogo(
+                    self, etiqueta, valor or self._sucursal_cap,
+                    opciones_fn=self._sucursales_empresa)
+
         if campo.clave == "id_GrupoCentroCosto" and self._id_empresa_cap is not None:
             grupos = db.listar_grupos_cc(self._id_empresa_cap, self._sucursal_cap)
             if grupos:
@@ -532,6 +548,99 @@ class DialogoCapturaActivo:
             return CampoEtiquetado(*campo_texto(
                 etiqueta, valor=valor, hint="0.00", flotante=True))
         return CampoEtiquetado(*campo_texto(etiqueta, valor=valor, flotante=True))
+
+    # ------------------------------------------ datos de factura (autollenar)
+    def _barra_traer_factura(self) -> ft.Control:
+        """Fila con el botón que trae costo/factura/proveedor desde la bandeja."""
+        self._ring_factura = ft.ProgressRing(width=18, height=18, stroke_width=2,
+                                             visible=False)
+        self._btn_factura = boton_secundario(
+            "Traer datos de la factura", ft.Icons.RECEIPT_LONG,
+            self._traer_datos_factura,
+            tooltip="Busca en la bandeja de compras la factura del activo (por su "
+                    "No. de serie) y llena Costo, Factura y Proveedor")
+        return ft.Row([self._btn_factura, self._ring_factura], spacing=10,
+                      vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+    def _fijar_valor(self, clave: str, valor: str) -> None:
+        """Fija el valor de un control ya renderizado (si existe y hay valor)."""
+        par = self._controles.get(clave)
+        if par and valor:
+            par[1].value = valor
+
+    async def _traer_datos_factura(self, _e=None) -> None:
+        """Busca la factura del activo por su serie en la bandeja de compras y
+        autollena Costo (precio del CFDI), Factura (folio) y Proveedor."""
+        from core import compras_sipp as compras, credenciales
+
+        r = self._registro
+        serie = (self._valor_control("nu_Serie") or (r.no_serie if r else "") or "").strip()
+        etiqueta = (r.etiqueta if r else "") or (self.tf_etiqueta.value or "")
+        if not compras.serie_valida(serie, etiqueta):
+            self.app.avisar("El activo no tiene un No. de serie válido (o coincide con "
+                            "la etiqueta) para buscar su factura.", NARANJA)
+            return
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+        id_empresa = ID_POR_EMPRESA.get(self.dd_empresa.value or "")
+
+        self._ring_factura.visible = True
+        self._btn_factura.disabled = True
+        self._safe_update()
+
+        entrada, info, error = None, None, None
+
+        async def flujo() -> None:
+            nonlocal entrada, info, error
+            from core.rpa_sipp import SesionSipp
+            try:
+                async with SesionSipp(headless=True) as sipp:
+                    await sipp.login(usuario, contrasena)
+                    entrada = await compras.buscar_entrada_por_serie(
+                        sipp, serie, id_empresa)
+                    if entrada is not None:
+                        info = await compras.datos_factura(sipp, entrada)
+            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                error = str(exc)
+
+        from core.rpa_sipp import BucleRpa
+        bucle = BucleRpa()
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        finally:
+            bucle.cerrar()
+            self._ring_factura.visible = False
+            self._btn_factura.disabled = False
+
+        if error:
+            self._safe_update()
+            self.app.avisar(f"No se pudo consultar la factura: {error}", ROJO,
+                           duracion=8000)
+            return
+        if entrada is None:
+            self._safe_update()
+            self.app.avisar(f"No se encontró entrada de compra para la serie «{serie}».",
+                           NARANJA, duracion=7000)
+            return
+        precio = (info or {}).get("precio")
+        folio = (info or {}).get("folio")
+        if precio is not None:
+            self._fijar_valor("im_Costo", f"{precio:.2f}")
+        self._fijar_valor("nb_Factura", folio or "")
+        self._fijar_valor("nb_Proveedor", entrada.proveedor)
+        self._safe_update()
+        detalle = []
+        if precio is not None:
+            detalle.append(f"costo {precio:.2f}")
+        if folio:
+            detalle.append(f"factura {folio}")
+        if entrada.proveedor:
+            detalle.append(entrada.proveedor)
+        self.app.avisar("Datos de la factura traídos" + (": " + ", ".join(detalle)
+                        if detalle else "") + ".", VERDE, duracion=7000)
 
     # ---------------------------------------------------------- guardar
     def _guardar(self, _e=None) -> None:
