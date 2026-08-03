@@ -96,6 +96,64 @@ class ResultadoImportacion:
     errores: list = field(default_factory=list)
 
 
+# Encabezados de la PLANTILLA de carga masiva (orden y nombres canónicos que el
+# detector reconoce). El TIPO de activo NO va: se asigna después en la herramienta.
+PLANTILLA_ENCABEZADOS = ["INSUMO", "CANTIDAD", "ETIQUETA", "SERIE", "RESPONSABLE",
+                         "EMPRESA", "SUCURSAL", "UBICACION"]
+
+
+def generar_plantilla(ruta: str) -> str:
+    """Crea en `ruta` un Excel plantilla de carga masiva: hoja «Activos» con los
+    encabezados y una de «Instrucciones». Devuelve la ruta escrita.
+
+    Se deja SIN filas de datos para no importar ejemplos por error; el formato y el
+    truco de varias etiquetas por fila se explican en la hoja de instrucciones."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Activos"
+    ws.append(PLANTILLA_ENCABEZADOS)
+    for celda in ws[1]:
+        celda.font = Font(bold=True, color="FFFFFF")
+        celda.fill = PatternFill("solid", fgColor="1F3A5F")
+        celda.alignment = Alignment(horizontal="center", vertical="center")
+    anchos = [34, 10, 24, 22, 30, 22, 22, 26]
+    for i, ancho in enumerate(anchos, 1):
+        ws.column_dimensions[get_column_letter(i)].width = ancho
+    ws.freeze_panes = "A2"
+
+    ins = wb.create_sheet("Instrucciones")
+    ins.column_dimensions["A"].width = 100
+    guia = [
+        "CARGA MASIVA DE ACTIVOS — INSTRUCCIONES",
+        "",
+        "Captura un activo por fila en la hoja «Activos». Columnas:",
+        "• INSUMO (obligatorio): nombre del insumo tal como está en el SIPP.",
+        "• CANTIDAD: cuántas piezas iguales. Si es más de 1, pon todas sus ETIQUETAS "
+        "en la misma celda separadas por «/» (ej. 0048399/0048400/0048401): cada "
+        "etiqueta se registra como un activo.",
+        "• ETIQUETA: número(s) de inventario. Es el identificador principal.",
+        "• SERIE: número de serie (opcional). Si hay varias, sepáralas por «/» en el "
+        "mismo orden que las etiquetas.",
+        "• RESPONSABLE: empleado resguardante.",
+        "• EMPRESA y SUCURSAL: si las dejas vacías, se usan las del selector de la "
+        "pantalla al importar.",
+        "• UBICACION: ubicación física del activo.",
+        "",
+        "El TIPO de activo y el centro de costo se asignan después en la herramienta "
+        "(al capturar cada activo), no en esta plantilla.",
+        "No cambies los nombres de los encabezados de la hoja «Activos».",
+    ]
+    for i, linea in enumerate(guia, 1):
+        ins.cell(row=i, column=1, value=linea)
+    ins["A1"].font = Font(bold=True, size=13)
+
+    wb.save(ruta)
+    return ruta
+
+
 def analizar(ruta: str) -> list[HojaDetectada]:
     """Analiza el archivo y devuelve qué hojas se pueden importar y cuántos
     activos saldrían de cada una (ya expandidos). No modifica nada."""
