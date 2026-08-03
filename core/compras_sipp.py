@@ -64,6 +64,8 @@ class EntradaCompra:
 
     serie: str
     id_empresa: "int | None"
+    id_sucursal: "int | None"
+    id_proveedor: "int | None"
     id_orden_compra: "int | None"
     id_factura: "int | None"
     proveedor: str
@@ -167,6 +169,8 @@ async def _consultar_bandeja(sesion, serie: str, id_empresa) -> list[EntradaComp
         entradas.append(EntradaCompra(
             serie=_v(f, idx, "DE_SERIEINSUMO"),
             id_empresa=_entier(_v(f, idx, "ID_EMPRESA")),
+            id_sucursal=_entier(_v(f, idx, "ID_SUCURSAL")),
+            id_proveedor=_entier(_v(f, idx, "ID_PROVEEDOR")),
             id_orden_compra=_entier(_v(f, idx, "ID_ORDENDECOMPRA")),
             id_factura=_entier(_v(f, idx, "ID_FACTURA")),
             proveedor=_v(f, idx, "NB_PROVEEDOR"),
@@ -261,25 +265,45 @@ def _conceptos_cfdi(xml_bytes: bytes) -> list[dict]:
     return [dict(el.attrib) for el in raiz.iter() if _local(el.tag) == "Concepto"]
 
 
+_ACENTOS = str.maketrans("ÁÉÍÓÚÜÑ", "AEIOUUN")
+
+
+def _tokens(texto) -> set:
+    """Palabras significativas (>=3 caracteres alfanuméricos), en mayúsculas."""
+    up = str(texto or "").upper().translate(_ACENTOS)
+    return set(re.findall(r"[A-Z0-9]{3,}", up))
+
+
 def _elegir_concepto(conceptos: list[dict], entrada: EntradaCompra) -> "dict | None":
-    """Empareja el concepto del CFDI con el activo (por serie/insumo)."""
+    """Empareja el concepto del CFDI con el activo. Con un solo concepto es directo;
+    con varios, intenta por serie y, si no, por los tokens del nombre del insumo
+    PONDERADOS por rareza (un token presente en un solo concepto pesa más). Si no hay
+    un ganador claro, devuelve None (mejor dejar el costo a captura manual que
+    arriesgar un monto equivocado)."""
     if not conceptos:
         return None
     if len(conceptos) == 1:
         return conceptos[0]
-    serie, insumo = _norm(entrada.serie), _norm(entrada.insumo)
-    # 1) serie exacta en NoIdentificacion; 2) serie contenida en la descripción.
+    serie = _norm(entrada.serie)
+    # 1) serie en NoIdentificacion o dentro de la descripción.
     for c in conceptos:
         if serie and _norm(c.get("NoIdentificacion")) == serie:
             return c
     for c in conceptos:
         if serie and serie in _norm(c.get("Descripcion")):
             return c
-    # 3) nombre del insumo contenido en la descripción.
-    for c in conceptos:
-        if insumo and insumo in _norm(c.get("Descripcion")):
-            return c
-    # 4) si todos comparten ValorUnitario, es inequívoco.
+    # 2) tokens del nombre del insumo, pesados por rareza (IDF simple): el concepto
+    # con mayor puntaje gana, pero solo si es un ganador ÚNICO.
+    itk = _tokens(entrada.insumo)
+    if itk:
+        ctks = [_tokens(c.get("Descripcion")) for c in conceptos]
+        df = {tok: sum(1 for ct in ctks if tok in ct) for tok in itk}
+        puntajes = [sum(1.0 / df[tok] for tok in itk if df.get(tok) and tok in ct)
+                    for ct in ctks]
+        mejor = max(range(len(conceptos)), key=lambda i: puntajes[i])
+        if puntajes[mejor] > 0 and puntajes.count(puntajes[mejor]) == 1:
+            return conceptos[mejor]
+    # 3) si todos comparten ValorUnitario, es inequívoco.
     valores = {c.get("ValorUnitario") for c in conceptos}
     return conceptos[0] if len(valores) == 1 else None
 
@@ -318,12 +342,31 @@ def folio_desde_xml(xml_bytes: bytes) -> str:
     return (serie + folio).strip() if (serie or folio) else ""
 
 
+async def _bajar_xml_factura(sesion, entrada: EntradaCompra) -> "bytes | None":
+    """Bytes del XML del CFDI. Vía robusta: `ProveedoresFacturas.generarXML` por
+    ID_FACTURA devuelve la ruta real del XML (el nombre no siempre coincide con el
+    del PDF). Respaldo: mismo nombre que el PDF con extensión .xml."""
+    if entrada.id_factura is not None:
+        datos = await _invoke(sesion, "ProveedoresFacturas", "generarXML",
+                              {"id_Empresa": entrada.id_empresa,
+                               "id_Sucursal": entrada.id_sucursal,
+                               "id_Proveedor": entrada.id_proveedor,
+                               "id_Factura": entrada.id_factura})
+        j = datos.get("JSON") or {}
+        ruta = (j.get("DE_RUTA") or "") + (j.get("NB_ARCHIVO") or "")
+        if datos.get("ISOK") and ruta:
+            contenido = await _bajar_archivo(sesion, ruta)
+            if contenido:
+                return contenido
+    return await _bajar_archivo(sesion, entrada.ruta_xml)
+
+
 async def datos_factura(sesion, entrada: EntradaCompra) -> dict:
     """Descarga el XML del CFDI UNA vez y devuelve {precio, folio}.
 
     `precio`: unitario antes de impuestos (None si no se identifica).
     `folio`: folio del CFDI ('' si no está). Si no hay XML, ambos vacíos."""
-    contenido = await _bajar_archivo(sesion, entrada.ruta_xml)
+    contenido = await _bajar_xml_factura(sesion, entrada)
     if not contenido:
         return {"precio": None, "folio": ""}
     return {"precio": precio_unitario_desde_xml(contenido, entrada),
