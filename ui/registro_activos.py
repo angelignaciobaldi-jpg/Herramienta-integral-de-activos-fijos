@@ -1114,42 +1114,28 @@ class SeccionRegistroActivos:
         sin_cache: list[str] = []
         for empresa, regs in por_empresa.items():
             proveedor = ProveedorSipp(ID_POR_EMPRESA[empresa])
-            # El ANCLA es la ETIQUETA (identificador): casi siempre existe. Solo se
-            # usa la serie cuando el registro no tiene etiqueta. Así se evita un
-            # falso "dado de alta" por una serie genérica repetida.
-            claves = sorted({r.identificador() for r in regs if r.identificador()})
+            # Criterio: el identificador del alta es la ETIQUETA. Sin etiqueta se da
+            # por hecho que NO está dado de alta (ni se busca). Con etiqueta se busca
+            # EXACTA en el listado del SIPP: si está -> dado de alta; si no -> no dado
+            # de alta (se dará de alta). Sin serie ni coincidencia parcial.
+            etiquetas = sorted({(r.etiqueta or "").strip()
+                                for r in regs if (r.etiqueta or "").strip()})
             try:
-                resultados = proveedor.buscar_por_serie(claves)
+                resultados = proveedor.buscar_por_etiqueta(etiquetas)
             except SinCacheActivos:
                 sin_cache.append(empresa)
                 continue
-            # Coincidencias PARCIALES (≥85%) para los que no dieron match exacto:
-            # captan errores de dedo / un dígito faltante en la etiqueta.
-            no_exactos = [r.identificador() for r in regs
-                          if r.identificador()
-                          and not (resultados.get(r.identificador())
-                                   and resultados[r.identificador()].dado_de_alta)]
-            parciales = (proveedor.coincidencias_parciales(no_exactos, _UMBRAL_PARCIAL)
-                         if no_exactos else {})
             for r in regs:
-                ident = r.identificador()
-                res = resultados.get(ident) if ident else None
+                etq = (r.etiqueta or "").strip()
+                res = resultados.get(etq) if etq else None
                 if res and res.dado_de_alta:
-                    dado, datos_sipp, es_parcial = True, res.datos, False
-                    id_sipp = res.id_activo_sipp
-                elif ident and parciales.get(ident):
-                    pres = parciales[ident]
-                    dado, datos_sipp, es_parcial = True, pres.datos, True
-                    id_sipp = pres.id_activo_sipp
+                    dado, datos_sipp, id_sipp = True, res.datos, res.id_activo_sipp
                 else:
-                    dado, datos_sipp, es_parcial, id_sipp = False, None, False, None
+                    dado, datos_sipp, id_sipp = False, None, None
                 estatus = db.EST_DADO_ALTA if dado else db.EST_NO_DADO_ALTA
-                # Al dar de alta se guardan los datos del SIPP (con la marca parcial
-                # si aplica); si no, se limpian.
                 db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp, datos_sipp)
-                # Prefill del tipo/detalle SOLO en coincidencia EXACTA: la parcial
-                # la confirma el usuario antes de adoptar los datos del SIPP.
-                if dado and datos_sipp and not es_parcial:
+                # Prefill del tipo/detalle desde el SIPP en la coincidencia exacta.
+                if dado and datos_sipp:
                     try:
                         idt = int(datos_sipp.get("id_tipo"))
                     except (TypeError, ValueError):

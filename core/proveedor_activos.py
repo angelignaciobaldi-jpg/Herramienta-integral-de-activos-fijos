@@ -153,6 +153,29 @@ class ProveedorSipp(ProveedorActivos):
                     idx.setdefault(clave, a)
         return idx
 
+    def buscar_por_etiqueta(self, etiquetas: list[str]) -> dict[str, ResultadoBusqueda]:
+        """Busca por ETIQUETA EXACTA en el listado de activos del SIPP (caché).
+
+        Criterio del alta: la etiqueta es el identificador. Si la etiqueta está en el
+        listado, el activo YA está dado de alta; si no, NO lo está (se dará de alta).
+        Sin respaldo por serie ni coincidencia parcial."""
+        if not self.hay_cache():
+            raise SinCacheActivos(
+                "No hay activos del SIPP descargados para esta empresa. "
+                "Descárgalos con «Actualizar información del SIPP».")
+        idx = self._indice_etiquetas()
+        resultado: dict[str, ResultadoBusqueda] = {}
+        for etq in etiquetas:
+            activo = idx.get(_norm(etq))
+            if activo:
+                e = (activo.get("etiqueta") or "").strip()
+                resultado[etq] = ResultadoBusqueda(
+                    dado_de_alta=True, id_activo_sipp=str(e),
+                    datos=dict(activo, origen="sipp"))
+            else:
+                resultado[etq] = ResultadoBusqueda(dado_de_alta=False)
+        return resultado
+
     def buscar_por_serie(self, series: list[str]) -> dict[str, ResultadoBusqueda]:
         idx = self._indice()
         if not idx:
