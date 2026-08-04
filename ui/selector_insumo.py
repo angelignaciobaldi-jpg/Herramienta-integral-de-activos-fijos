@@ -77,8 +77,14 @@ class DialogoSelectorInsumo:
         self._resultados = db.buscar_insumos(
             texto, solo_activo_fijo=self.chk_af.value, limite=_LIMITE)
         n = len(self._resultados)
-        self.estado.value = (f"{n} resultado(s)"
-                             + (f" (mostrando {_LIMITE})" if n == _LIMITE else ""))
+        total = db.contar_insumos(texto, solo_activo_fijo=self.chk_af.value)
+        # El tope evita pintar miles de filas (congelaría); si hay más, se avisa que
+        # escriba para acotar (el filtro corre sobre TODO el catálogo en la base).
+        if total > n:
+            self.estado.value = (f"Mostrando {n} de {total:,}. Escribe una descripción "
+                                 f"o Cve para acotar la búsqueda.")
+        else:
+            self.estado.value = f"{total:,} resultado(s)"
         self.estado.color = GRIS
         self.lista.controls = [self._fila(i) for i in self._resultados]
         self.modal.refrescar()

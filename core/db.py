@@ -732,6 +732,29 @@ def buscar_insumos(texto: str = "", empresa_id: int | None = None,
     return [Insumo(**dict(f)) for f in filas]
 
 
+def contar_insumos(texto: str = "", empresa_id: int | None = None,
+                   solo_activo_fijo: bool = False) -> int:
+    """Cuántos insumos DISTINTOS coinciden con el filtro (para saber cuántos hay más
+    allá del tope que se pinta en el selector)."""
+    cond, params = [], []
+    if empresa_id is not None:
+        cond.append("empresa_id = ?"); params.append(empresa_id)
+    if solo_activo_fijo:
+        cond.append("activo_fijo = 1")
+    texto = (texto or "").strip()
+    if texto:
+        if texto.isdigit():
+            cond.append("(CAST(id_insumo AS TEXT) LIKE ? OR LOWER(nombre) LIKE ?)")
+            params += [f"{texto}%", f"%{texto.lower()}%"]
+        else:
+            cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        return con.execute(
+            f"SELECT COUNT(DISTINCT id_insumo) FROM insumos_sipp{where}", params
+        ).fetchone()[0]
+
+
 def estado_catalogo_insumos() -> list[dict]:
     """Por cada empresa cacheada: id, nombre, cuántos insumos y cuándo se bajó."""
     with _conectar() as con:
@@ -781,6 +804,22 @@ def buscar_empleados(texto: str = "", limite: int = 50) -> list[Empleado]:
             f"SELECT id_empleado, nombre, puesto, email FROM empleados_sipp{where} "
             f"ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
     return [Empleado(**dict(f)) for f in filas]
+
+
+def contar_empleados(texto: str = "") -> int:
+    """Cuántos empleados coinciden con el filtro (para el total del selector)."""
+    cond, params = [], []
+    texto = (texto or "").strip()
+    if texto:
+        if texto.isdigit():
+            cond.append("(CAST(id_empleado AS TEXT) LIKE ? OR LOWER(nombre) LIKE ?)")
+            params += [f"{texto}%", f"%{texto.lower()}%"]
+        else:
+            cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        return con.execute(
+            f"SELECT COUNT(*) FROM empleados_sipp{where}", params).fetchone()[0]
 
 
 def estado_catalogo_empleados() -> dict:
