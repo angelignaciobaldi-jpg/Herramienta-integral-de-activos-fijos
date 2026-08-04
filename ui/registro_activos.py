@@ -1231,10 +1231,11 @@ class SeccionRegistroActivos:
                 modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
-        exitosos, fallidos = 0, []
+        from core import reporte_altas
+        resultados: list[dict] = []      # una fila por activo (para el reporte)
+        errores_generales: list[str] = []
 
         async def flujo() -> None:
-            nonlocal exitosos
             async with SesionSipp(headless=False) as sipp:
                 await sipp.login(usuario, contrasena)
                 # El RPA entra con una empresa/sucursal ESTABLE (el selector del
@@ -1243,13 +1244,23 @@ class SeccionRegistroActivos:
                 try:
                     await sipp.seleccionar_empresa_sucursal(_EMPRESA_RPA, _SUCURSAL_RPA)
                 except ErrorSipp as exc:
-                    fallidos.append(
+                    errores_generales.append(
                         f"Selección de empresa/sucursal ({_EMPRESA_RPA}/"
                         f"{_SUCURSAL_RPA}): {exc}")
                 for i, r in enumerate(pendientes, 1):
                     await ctrl.punto_control()
                     avance(i, r.nombre_insumo)
+                    fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
+                            "serie": r.no_serie or "", "estatus": reporte_altas.PENDIENTE,
+                            "observacion": ""}
                     tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
+                    # Sin insumo resuelto: no se puede dar de alta -> se salta y se
+                    # anota, sin intentar (el alta fallaría en el SIPP).
+                    if not insumo_id:
+                        fila["observacion"] = ("No se encontró el insumo en el catálogo "
+                                               "del SIPP; captúralo en la ficha.")
+                        resultados.append(fila)
+                        continue
                     try:
                         # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
                         # en el registro (id del activo = su etiqueta).
@@ -1261,9 +1272,15 @@ class SeccionRegistroActivos:
                             r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
                         if etiqueta_gen:
                             db.fijar_etiqueta_levantamiento(r.id, etiqueta_gen)
-                        exitosos += 1
-                    except ErrorSipp as exc:
-                        fallidos.append(f"{r.nombre_insumo} ({r.no_serie}): {exc}")
+                            fila["etiqueta"] = etiqueta_gen
+                        fila["estatus"] = reporte_altas.ALTA
+                        fila["observacion"] = (f"Etiqueta generada: {etiqueta_gen}"
+                                               if etiqueta_gen else "Alta registrada")
+                    # Un registro con error (insumo no hallado en el modal, campo, red…)
+                    # NO aborta el lote: se anota y se sigue con el siguiente.
+                    except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
+                        fila["observacion"] = str(exc)
+                    resultados.append(fila)
 
         detenido = False
         try:
@@ -1271,21 +1288,91 @@ class SeccionRegistroActivos:
         except RpaDetenido:
             detenido = True
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            fallidos.append(str(exc))
+            errores_generales.append(str(exc))
         finally:
             bucle.cerrar()
             modal.cerrar()
             self._refrescar()
 
-        if detenido:
-            self.app.avisar(f"Proceso detenido. {exitosos} activo(s) registrado(s).",
-                            NARANJA)
-        elif fallidos:
-            self.app.avisar(
-                f"{exitosos} registrado(s), {len(fallidos)} con error: {fallidos[0]}",
-                ROJO, duracion=9000)
-        else:
-            self.app.avisar(f"{exitosos} activo(s) registrado(s) en el SIPP.", VERDE)
+        self._mostrar_reporte_altas(resultados, detenido, errores_generales)
+
+    def _mostrar_reporte_altas(self, filas: list, detenido: bool,
+                               errores_generales: list) -> None:
+        """Reporte final del proceso de altas: estadísticas (realizadas/pendientes),
+        observaciones por activo y opción de exportar a Excel."""
+        from core import reporte_altas
+        res = reporte_altas.resumen_altas(filas, detenido)
+
+        def stat(n, etiqueta, color):
+            return ft.Column(
+                [ft.Text(str(n), size=24, weight=ft.FontWeight.BOLD, color=color),
+                 ft.Text(etiqueta, size=11, color=GRIS)],
+                spacing=0, tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER)
+
+        stats = ft.Row(
+            [stat(res["realizadas"], "Realizadas", VERDE),
+             stat(res["pendientes"], "Pendientes", NARANJA),
+             stat(res["total"], "Total", ft.Colors.ON_SURFACE_VARIANT)],
+            alignment=ft.MainAxisAlignment.SPACE_EVENLY)
+
+        lista = ft.ListView(spacing=4, expand=True)
+        # Pendientes primero (son las que requieren atención).
+        for f in sorted(filas, key=lambda x: x.get("estatus") == reporte_altas.ALTA):
+            ok = f.get("estatus") == reporte_altas.ALTA
+            titulo = f.get("insumo", "")
+            if f.get("etiqueta"):
+                titulo += f"  ·  {f['etiqueta']}"
+            lista.controls.append(ft.Row(
+                [ft.Icon(ft.Icons.CHECK_CIRCLE if ok else ft.Icons.ERROR_OUTLINE,
+                         size=16, color=VERDE if ok else NARANJA),
+                 ft.Column(
+                     [ft.Text(titulo, size=12, weight=ft.FontWeight.W_500,
+                              color=ft.Colors.ON_SURFACE),
+                      ft.Text(f.get("observacion", ""), size=11, color=GRIS,
+                              no_wrap=False)],
+                     spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        cuerpo = [stats, ft.Divider()]
+        if errores_generales:
+            cuerpo.append(ft.Text("Observaciones generales: "
+                                  + "; ".join(errores_generales), size=11, color=ROJO,
+                                  no_wrap=False))
+        cuerpo.append(ft.Container(lista, height=280))
+
+        modal = Modal(self.page, "Reporte de altas",
+                      subtitulo="Proceso detenido" if detenido else None, ancho=580)
+        modal.cuerpo.controls = cuerpo
+
+        async def _exportar(_e=None) -> None:
+            await self._exportar_reporte_altas(filas, detenido, errores_generales)
+
+        modal.set_acciones([
+            boton_herramienta("Cerrar", on_click=lambda _e: modal.cerrar()),
+            boton_primario("Exportar (Excel)", ft.Icons.DOWNLOAD, _exportar),
+        ])
+        modal.abrir()
+
+    async def _exportar_reporte_altas(self, filas: list, detenido: bool,
+                                      errores_generales: list) -> None:
+        from core import reporte_altas
+        destino = await self.app.picker.save_file(
+            dialog_title="Guardar reporte de altas",
+            file_name="Reporte de altas.xlsx", allowed_extensions=["xlsx"])
+        if not destino:
+            return
+        ruta = destino if destino.lower().endswith(".xlsx") else destino + ".xlsx"
+        try:
+            await asyncio.to_thread(
+                reporte_altas.generar_reporte_altas, ruta, filas, detenido,
+                errores_generales)
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            self.app.avisar(f"No se pudo generar el reporte: {exc}", ROJO)
+            return
+        self.app.avisar("Reporte exportado.", VERDE, accion="Abrir",
+                        on_accion=lambda _e, x=ruta: self.app.abrir_en_sistema(x),
+                        duracion=8000)
 
     # --------------------------------------------- RPA: modificación en SIPP
     @staticmethod
