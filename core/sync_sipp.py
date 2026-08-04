@@ -30,8 +30,12 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
     await sesion.preparar_sesion_empresa(empresa_nombre)
     if mensaje:
         mensaje("Descargando insumos…")
+    # Se cachea el catálogo COMPLETO (no solo activo fijo): la paginación baja todas
+    # las páginas igual, así que no cuesta más red, y el selector filtra localmente
+    # con su casilla «Solo activo fijo». Antes solo se guardaban los de activo fijo y
+    # el resto no aparecía aunque se desmarcara la casilla.
     ins = await insumos.descargar_catalogo(
-        sesion, progreso=progreso, solo_activo_fijo=True)
+        sesion, progreso=progreso, solo_activo_fijo=False)
 
     # Activos de la empresa (para QR y para la búsqueda del levantamiento).
     if mensaje:
