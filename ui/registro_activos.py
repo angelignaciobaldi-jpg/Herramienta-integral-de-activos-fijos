@@ -1263,7 +1263,7 @@ class SeccionRegistroActivos:
                     avance(i, r.nombre_insumo)
                     fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
                             "serie": r.no_serie or "", "estatus": reporte_altas.PENDIENTE,
-                            "observacion": ""}
+                            "observacion": "", "_empresa": r.empresa or ""}
                     tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
                     # Sin insumo resuelto: no se puede dar de alta -> se salta y se
                     # anota, sin intentar (el alta fallaría en el SIPP).
@@ -1293,6 +1293,12 @@ class SeccionRegistroActivos:
                         fila["observacion"] = str(exc)
                     resultados.append(fila)
 
+                # Confirmación final: por cada empresa, se trae su listado del SIPP y
+                # se verifica que las etiquetas generadas estén presentes (que el alta
+                # realmente quedó). Lo que no aparezca se marca para revisar.
+                avance(total, "Confirmando altas…")
+                await self._confirmar_altas(sipp, resultados)
+
         detenido = False
         try:
             await asyncio.wrap_future(bucle.enviar(flujo()))
@@ -1306,6 +1312,42 @@ class SeccionRegistroActivos:
             self._refrescar()
 
         self._mostrar_reporte_altas(resultados, detenido, errores_generales)
+
+    async def _confirmar_altas(self, sipp, resultados: list) -> None:
+        """Verifica que las altas hayan quedado en el SIPP: por empresa, trae su
+        listado de activos y comprueba que la etiqueta generada de cada alta esté
+        presente. Anota la confirmación en cada fila; lo que no aparezca se marca
+        como pendiente para revisar."""
+        from collections import defaultdict
+
+        from core import reporte_altas
+        from core.catalogos_sipp import _query
+        from core.empresas import ID_POR_EMPRESA
+
+        por_empresa: dict = defaultdict(list)
+        for fila in resultados:
+            if fila.get("estatus") == reporte_altas.ALTA and fila.get("etiqueta"):
+                idemp = ID_POR_EMPRESA.get((fila.get("_empresa") or "").strip())
+                if idemp is not None:
+                    por_empresa[idemp].append(fila)
+        for idemp, filas_e in por_empresa.items():
+            try:
+                idx, filas_sipp = await _query(
+                    sipp, "ActivosFijosNuevo", "getListadoActivosFijos",
+                    {"id_Empresa": idemp, "sn_Registro": 1})
+                col = idx.get("DE_ETIQUETA")
+                presentes = {str(f[col]).strip().upper()
+                             for f in filas_sipp if col is not None and f[col]}
+            except Exception:  # noqa: BLE001 — si falla la consulta, no se confirma
+                presentes = None
+            for fila in filas_e:
+                if presentes is None:
+                    fila["observacion"] += "  ·  No se pudo confirmar en el SIPP."
+                elif fila["etiqueta"].strip().upper() in presentes:
+                    fila["observacion"] += "  ·  Confirmado en el SIPP."
+                else:
+                    fila["estatus"] = reporte_altas.PENDIENTE
+                    fila["observacion"] += "  ·  No aparece en el listado del SIPP (revisar)."
 
     def _mostrar_reporte_altas(self, filas: list, detenido: bool,
                                errores_generales: list) -> None:

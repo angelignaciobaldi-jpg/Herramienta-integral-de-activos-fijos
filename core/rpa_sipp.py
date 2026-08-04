@@ -814,9 +814,21 @@ class SesionSipp:
         except Exception:  # noqa: BLE001 — no crítico: se omite sin tumbar el alta
             pass
 
-        # La ETIQUETA se genera con el botón del portal como ÚLTIMO paso antes de
-        # guardar; el código generado se devuelve para registrarlo en la herramienta.
+        # La ETIQUETA se genera con el botón del portal ANTES de guardar; el código
+        # generado se devuelve para registrarlo en la herramienta.
         etiqueta = await self.generar_etiqueta()
+
+        # El No. de serie es OBLIGATORIO en el SIPP. Si el activo NO trae serie, se
+        # usa la ETIQUETA como número de serie (la generada por el SIPP; como
+        # respaldo, la del levantamiento). Se hace tras generar la etiqueta.
+        serie_final = ((serie or "").strip() or (etiqueta or "").strip()
+                       or (etiqueta_actual or "").strip())
+        if serie_final:
+            try:
+                await self.set_input("filtrosAgregar.nu_Serie", serie_final)
+                await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001 — no crítico
+                pass
 
         guardar = await self._primer_visible(
             [
