@@ -536,7 +536,7 @@ class Modal:
         # El subtítulo va en MAYÚSCULAS con interletraje amplio: identifica el
         # registro que se está editando sin competir con el título.
         self._txt_subtitulo = ft.Text(
-            subtitulo.upper(), theme_style=ft.TextThemeStyle.LABEL_LARGE,
+            (subtitulo or "").upper(), theme_style=ft.TextThemeStyle.LABEL_LARGE,
             color=ft.Colors.ON_SURFACE_VARIANT, visible=bool(subtitulo))
 
         encabezado = ft.Container(

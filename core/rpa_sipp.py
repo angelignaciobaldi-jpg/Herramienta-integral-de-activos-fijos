@@ -538,19 +538,28 @@ class SesionSipp:
 
     async def set_input(self, ng_model: str, valor: str) -> None:
         """Escribe `valor` en un input por su ng-model. Se filtra por ':visible'
-        porque el portal repite ng-models en paneles ocultos (ng-hide)."""
+        porque el portal repite ng-models en paneles ocultos (ng-hide).
+
+        Si el campo NO está presente/visible para este tipo de activo, se omite de
+        inmediato (chequeo corto) en vez de esperar el timeout completo: así el RPA
+        avanza «conforme encuentra los campos» y no se atora en los no aplicables."""
         page = self._exigir_pagina()
         campo = page.locator(f'[ng-model="{ng_model}"]:visible').first
         try:
-            await campo.fill(valor, timeout=3_000)
+            await campo.wait_for(state="visible", timeout=1_500)
+        except PlaywrightTimeoutError:
+            return  # campo ausente/oculto para este tipo: se omite y se sigue
+        try:
+            await campo.fill(valor, timeout=2_500)
         except Exception:  # noqa: BLE001 — respaldo: fijar por JS y avisar a Angular
-            # timeout corto: si el campo no está visible (sección oculta), falla
-            # rápido en vez de colgarse los 30 s por defecto del locator.
-            await campo.evaluate(
-                "(el, v) => { el.value = v;"
-                " el.dispatchEvent(new Event('input', {bubbles:true}));"
-                " el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                valor, timeout=3_000)
+            try:
+                await campo.evaluate(
+                    "(el, v) => { el.value = v;"
+                    " el.dispatchEvent(new Event('input', {bubbles:true}));"
+                    " el.dispatchEvent(new Event('change', {bubbles:true})); }",
+                    valor, timeout=2_500)
+            except Exception:  # noqa: BLE001 — no editable (deshabilitado): se omite
+                pass
 
     async def set_fecha(self, ng_model: str, valor: str) -> None:
         """Escribe una fecha (DD/MM/AAAA) en un input con máscara. Se usa `fill`,
@@ -677,8 +686,9 @@ class SesionSipp:
         await self._click_seguro(page.locator("[ng-click='listarInsumos()']").first)
         await page.wait_for_timeout(2_500)  # la grid del modal recarga por AJAX
         # Cada fila del resultado trae un botón 'agregarInsumo(row)' que lo elige y
-        # cierra el modal. Buscando por id exacto, la primera es la correcta.
-        boton = page.locator("[ng-click='agregarInsumo(row)']").first
+        # cierra el modal (a veces como 'grid.appScope.agregarInsumo(row)', por eso
+        # match por contiene). Buscando por id exacto, la primera es la correcta.
+        boton = page.locator("[ng-click*='agregarInsumo(row)']").first
         try:
             await boton.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
         except PlaywrightTimeoutError as exc:
