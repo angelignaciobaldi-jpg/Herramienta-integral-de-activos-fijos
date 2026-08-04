@@ -827,6 +827,24 @@ class SesionSipp:
         except Exception:  # noqa: BLE001 — no crítico: se omite sin tumbar el alta
             pass
 
+        # La ETIQUETA/folio la genera el SIPP POR EMPRESA (getEtiqueta usa
+        # filtrosAgregar.id_EmpresaAgregar). Si esa empresa va vacía, el SIPP
+        # devuelve un folio por defecto que SE REPITE entre activos. Se fija la
+        # empresa del activo en el scope antes de generar (sin depender de que el
+        # campo de compra esté visible).
+        from core.empresas import ID_POR_EMPRESA
+        id_emp = ID_POR_EMPRESA.get((empresa or "").strip())
+        if id_emp is not None:
+            try:
+                await page.evaluate(
+                    "(id) => { const el = document.querySelector("
+                    "\"[ng-model='filtrosAgregar.id_TipoActivo']\");"
+                    " if (el) { const s = angular.element(el).scope();"
+                    " s.$apply(() => { s.filtrosAgregar.id_EmpresaAgregar = id; }); } }",
+                    id_emp)
+            except Exception:  # noqa: BLE001 — no crítico
+                pass
+
         # La ETIQUETA se genera con el botón del portal ANTES de guardar; el código
         # generado se devuelve para registrarlo en la herramienta.
         etiqueta = await self.generar_etiqueta()
@@ -914,11 +932,22 @@ class SesionSipp:
             except Exception:  # noqa: BLE001
                 pass
 
-    async def generar_etiqueta(self) -> str:
-        """Pulsa 'Generar Etiqueta' (generarEtiqueta()) y devuelve el código que el
-        SIPP asigna en el campo filtrosAgregar.nu_Etiqueta (read-only). Debe ser el
-        ÚLTIMO paso antes de guardar el activo."""
+    async def _leer_etiqueta(self) -> str:
         page = self._exigir_pagina()
+        val = await page.evaluate(
+            "() => { const el = document.querySelector("
+            "\"[ng-model='filtrosAgregar.nu_Etiqueta']\");"
+            " return el ? (el.value || '') : ''; }")
+        return (val or "").strip()
+
+    async def generar_etiqueta(self) -> str:
+        """Pulsa 'Generar Etiqueta' (generarEtiqueta()) y devuelve el código NUEVO
+        que el SIPP asigna en filtrosAgregar.nu_Etiqueta (read-only).
+
+        Se captura el valor previo y se espera uno NO vacío y DISTINTO, para no
+        devolver una etiqueta rancia (evita que se repita entre activos)."""
+        page = self._exigir_pagina()
+        antes = await self._leer_etiqueta()
         try:
             boton = await self._primer_visible(
                 [page.locator("[ng-click*='generarEtiqueta']"),
@@ -927,17 +956,15 @@ class SesionSipp:
             await self._click_seguro(boton)
         except ErrorSipp:
             return ""   # sin botón (algún tipo no la usa): no aborta el alta
-        # La etiqueta se asigna por AJAX; se espera a que el campo se llene.
+        # La etiqueta se asigna por AJAX; se espera a que aparezca una NUEVA.
         fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
         while asyncio.get_event_loop().time() < fin:
-            etiqueta = await page.evaluate(
-                "() => { const el = document.querySelector("
-                "\"[ng-model='filtrosAgregar.nu_Etiqueta']\");"
-                " return el ? (el.value || '') : ''; }")
-            if (etiqueta or "").strip():
-                return etiqueta.strip()
+            etiqueta = await self._leer_etiqueta()
+            if etiqueta and etiqueta != antes:
+                return etiqueta
             await page.wait_for_timeout(300)
-        return ""
+        # Si no cambió (el botón no regeneró), se devuelve lo que haya (mejor que nada).
+        return await self._leer_etiqueta()
 
     async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
                                detalles: "dict | None" = None) -> list:

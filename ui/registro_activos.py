@@ -1316,31 +1316,29 @@ class SeccionRegistroActivos:
         self._mostrar_reporte_altas(resultados, detenido, errores_generales)
 
     async def _confirmar_altas(self, sipp, resultados: list) -> None:
-        """Verifica que las altas hayan quedado en el SIPP: por empresa, trae su
-        listado de activos y comprueba que la etiqueta generada de cada alta esté
-        presente. Anota la confirmación en cada fila; lo que no aparezca se marca
-        como pendiente para revisar."""
+        """Verifica que las altas hayan quedado en el SIPP y, de paso, REFRESCA la
+        caché de activos de cada empresa (así una búsqueda posterior es consistente
+        y no marca 'no dado de alta' un activo recién creado). Por empresa, descarga
+        su listado fresco y comprueba que la etiqueta generada de cada alta esté."""
         from collections import defaultdict
 
-        from core import reporte_altas
-        from core.catalogos_sipp import _query
+        from core import activos_sipp, reporte_altas
         from core.empresas import ID_POR_EMPRESA
 
         por_empresa: dict = defaultdict(list)
         for fila in resultados:
             if fila.get("estatus") == reporte_altas.ALTA and fila.get("etiqueta"):
-                idemp = ID_POR_EMPRESA.get((fila.get("_empresa") or "").strip())
+                nombre = (fila.get("_empresa") or "").strip()
+                idemp = ID_POR_EMPRESA.get(nombre)
                 if idemp is not None:
-                    por_empresa[idemp].append(fila)
-        for idemp, filas_e in por_empresa.items():
+                    por_empresa[(idemp, nombre)].append(fila)
+        for (idemp, nombre), filas_e in por_empresa.items():
             try:
-                idx, filas_sipp = await _query(
-                    sipp, "ActivosFijosNuevo", "getListadoActivosFijos",
-                    {"id_Empresa": idemp, "sn_Registro": 1})
-                col = idx.get("DE_ETIQUETA")
-                presentes = {str(f[col]).strip().upper()
-                             for f in filas_sipp if col is not None and f[col]}
-            except Exception:  # noqa: BLE001 — si falla la consulta, no se confirma
+                # Descarga y CACHEA los activos frescos de la empresa.
+                await activos_sipp.descargar_activos(sipp, idemp, nombre)
+                presentes = {(a.get("etiqueta") or "").strip().upper()
+                             for a in db.listar_activos_sipp(idemp)}
+            except Exception:  # noqa: BLE001 — si falla la descarga, no se confirma
                 presentes = None
             for fila in filas_e:
                 if presentes is None:
