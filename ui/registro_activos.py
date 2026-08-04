@@ -1053,10 +1053,12 @@ class SeccionRegistroActivos:
         """Compara cada activo del levantamiento contra los activos REALES ya
         descargados del SIPP (caché por empresa): dado de alta si su etiqueta O
         su número de serie coincide con los de algún activo cacheado."""
-        registros = [r for r in db.listar_levantamiento()
-                     if (r.etiqueta or "").strip() or (r.no_serie or "").strip()]
+        # Se evalúan TODOS los registros: los que tienen etiqueta se verifican contra
+        # el listado del SIPP; los que NO tienen etiqueta se dan por NO dados de alta
+        # (criterio), en vez de quedarse en "Pendiente".
+        registros = db.listar_levantamiento()
         if not registros:
-            self.app.avisar("No hay etiquetas ni números de serie que buscar.", ROJO)
+            self.app.avisar("No hay activos en el levantamiento para buscar.", ROJO)
             return
         # El caché es por empresa: se agrupan los registros por su empresa.
         from collections import defaultdict
@@ -1120,11 +1122,20 @@ class SeccionRegistroActivos:
             # de alta (se dará de alta). Sin serie ni coincidencia parcial.
             etiquetas = sorted({(r.etiqueta or "").strip()
                                 for r in regs if (r.etiqueta or "").strip()})
-            try:
-                resultados = proveedor.buscar_por_etiqueta(etiquetas)
-            except SinCacheActivos:
-                sin_cache.append(empresa)
-                continue
+            resultados = {}
+            if etiquetas:   # sin etiquetas no hace falta la caché (todos serán no dado)
+                try:
+                    resultados = proveedor.buscar_por_etiqueta(etiquetas)
+                except SinCacheActivos:
+                    sin_cache.append(empresa)
+                    # Sin caché no se pueden verificar los que tienen etiqueta; pero
+                    # los que NO tienen etiqueta sí se marcan no dado de alta.
+                    for r in regs:
+                        if not (r.etiqueta or "").strip():
+                            db.actualizar_estatus_levantamiento(
+                                r.id, db.EST_NO_DADO_ALTA, None, None)
+                            hechos += 1
+                    continue
             for r in regs:
                 etq = (r.etiqueta or "").strip()
                 res = resultados.get(etq) if etq else None
