@@ -699,10 +699,15 @@ class SesionSipp:
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
-    async def seleccionar_empleado(self, id_empleado) -> None:
-        """Elige el empleado de resguardo por su ID exacto en el modal 'Buscar
-        Empleado' (Asignación del Activo): abre el modal, teclea el id, busca y
-        pulsa el botón 'agregarEmpleado(row)' de la fila."""
+    async def seleccionar_empleado(self, id_empleado, nombre: str = "") -> None:
+        """Elige el empleado de resguardo en el modal 'Buscar Empleado' (Asignación
+        del Activo): abre el modal y busca por ID si se tiene (exacto) o, si no, por
+        NOMBRE; luego pulsa el botón de la fila. Así el modal se abre y busca al
+        empleado aunque no se haya resuelto su id."""
+        id_empleado = str(id_empleado or "").strip()
+        nombre = (nombre or "").strip()
+        if not id_empleado and not nombre:
+            return  # nada que buscar
         page = self._exigir_pagina()
         abrir = await self._primer_visible(
             [page.locator("[ng-click*=\"abrirModal('empleados', 2\"]"),
@@ -716,18 +721,24 @@ class SesionSipp:
         except PlaywrightTimeoutError as exc:
             await self._capturar_diagnostico("modal_empleados")
             raise ErrorSipp("No se abrió el modal 'Buscar Empleado'.") from exc
-        await self.set_input("js_filtroModalEmpleado.id_Empleado", str(id_empleado))
+        # Buscar por id (exacto) si se tiene; si no, por nombre.
+        if id_empleado:
+            await self.set_input("js_filtroModalEmpleado.id_Empleado", id_empleado)
+            criterio = f"id {id_empleado}"
+        else:
+            await self.set_input("js_filtroModalEmpleado.nb_NombreEmpleado", nombre)
+            criterio = f"nombre «{nombre}»"
         await self._click_seguro(
             page.locator("[ng-click=\"listarDatosGrid('listadoEmpleados')\"]").first)
         await page.wait_for_timeout(2_500)
+        # El botón de la fila puede venir como 'grid.appScope.agregarEmpleado(row)'.
         boton = page.locator("[ng-click*='agregarEmpleado(row)']").first
         try:
             await boton.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
         except PlaywrightTimeoutError as exc:
             await self._capturar_diagnostico("empleado_no_encontrado")
             raise ErrorSipp(
-                f"No apareció el empleado con id {id_empleado} en el catálogo del "
-                "SIPP. ¿El catálogo local está desactualizado?") from exc
+                f"No apareció el empleado ({criterio}) en el catálogo del SIPP.") from exc
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
@@ -735,7 +746,8 @@ class SesionSipp:
                           detalles: "dict | None" = None,
                           insumo_id=None, empleado_id=None,
                           serie: str = "", etiqueta_actual: str = "",
-                          empresa: str = "", sucursal: str = "") -> None:
+                          empresa: str = "", sucursal: str = "",
+                          empleado_nombre: str = "") -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -771,9 +783,10 @@ class SesionSipp:
             await self.seleccionar_insumo(insumo_id)
             await page.wait_for_timeout(800)
 
-        # El empleado de resguardo se elige por ID en su propio modal.
-        if empleado_id:
-            await self.seleccionar_empleado(empleado_id)
+        # El empleado de resguardo se elige en su modal: por ID si se tiene, o por
+        # NOMBRE. Así el modal se abre y busca aunque no se haya resuelto el id.
+        if empleado_id or empleado_nombre:
+            await self.seleccionar_empleado(empleado_id, empleado_nombre)
             await page.wait_for_timeout(500)
 
         for ng_model, valor, control in campos:

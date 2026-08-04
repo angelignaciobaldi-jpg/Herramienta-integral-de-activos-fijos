@@ -1278,7 +1278,9 @@ class SeccionRegistroActivos:
                         etiqueta_gen = await sipp.alta_activo(
                             tipo, campos, detalles, insumo_id, empleado_id,
                             serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
-                            empresa=r.empresa or "", sucursal=r.sucursal or "")
+                            empresa=r.empresa or "", sucursal=r.sucursal or "",
+                            empleado_nombre=(r.datos().get("nb_Empleado")
+                                             or r.responsable or ""))
                         db.actualizar_estatus_levantamiento(
                             r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
                         if etiqueta_gen:
