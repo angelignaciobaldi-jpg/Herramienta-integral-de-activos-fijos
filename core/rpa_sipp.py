@@ -847,6 +847,24 @@ class SesionSipp:
         except Exception:  # noqa: BLE001 — no crítico: se omite sin tumbar el alta
             pass
 
+        # RE-APLICAR los campos de la Asignación que dependen de cascada/auto-relleno
+        # (grupo -> centro -> departamento): elegir el empleado o la empresa/sucursal
+        # de resguardo puede recargarlos o limpiarlos, así que se fijan AL FINAL, en
+        # orden de dependencia, para que persistan al guardar.
+        for clave in ("filtrosAgregar.id_GrupoCentroCosto",
+                      "filtrosAgregar.id_CentroCosto",
+                      "filtrosAgregar.id_Departamento"):
+            valor = next((v for ng, v, _c in campos if ng == clave and v), "")
+            if not valor:
+                continue
+            try:
+                es_centro = clave.endswith("id_CentroCosto")
+                await self.set_combo(clave, valor, esperar=es_centro)
+                if clave.endswith("id_GrupoCentroCosto"):
+                    await page.wait_for_timeout(1000)  # deja cargar los centros
+            except Exception:  # noqa: BLE001 — no aplica: se omite
+                pass
+
         # La ETIQUETA/folio es un consecutivo GLOBAL del SIPP (getEtiqueta ignora
         # empresa y tipo): devuelve el "siguiente" disponible y avanza al guardar
         # cada activo. Se genera con el botón del portal ANTES de guardar; el código
