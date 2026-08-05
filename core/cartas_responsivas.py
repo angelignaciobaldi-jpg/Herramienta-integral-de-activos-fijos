@@ -94,16 +94,26 @@ async def listar_activos_empleado(sesion, id_empresa, id_empleado) -> list[Activ
     return activos
 
 
-async def generar_carta(sesion, ids_activo: list[int], carpeta_destino) -> list[Path]:
+async def generar_carta(sesion, ids_activo: list[int], carpeta_destino,
+                        id_empresa=None, id_empleado=None,
+                        id_sucursal="", id_grupo_centro_costo="") -> list[Path]:
     """Genera la carta responsiva de los activos y descarga el/los PDF a
     `carpeta_destino`. **Consume un folio del SIPP.** Devuelve las rutas escritas.
 
-    El SIPP puede devolver un solo archivo o una lista (varios); se descargan todos.
+    El servidor exige `id_Empresa` (el JS del portal lo trae comentado, pero el
+    backend lo pide); se envían también empleado/sucursal/grupo como el payload
+    original. El SIPP puede devolver un solo archivo o una lista; se descargan todos.
     """
     if not ids_activo:
         raise ErrorCartaResponsiva("Selecciona al menos un activo fijo.")
+    if not id_empresa:
+        raise ErrorCartaResponsiva("Falta la empresa para generar la carta.")
     datos = await _invoke(sesion, "ActivosFijosNuevo", "cartaResponsiva",
-                          {"ActivosFijos": list(ids_activo)})
+                          {"ActivosFijos": list(ids_activo),
+                           "id_Empresa": id_empresa,
+                           "id_Sucursal": id_sucursal or "",
+                           "id_Empleado": id_empleado or "",
+                           "id_GrupoCentroCosto": id_grupo_centro_costo or ""})
     if not datos.get("ISOK"):
         raise ErrorCartaResponsiva(datos.get("MSG") or "El SIPP no generó la carta.")
     archivos = datos.get("JSON")

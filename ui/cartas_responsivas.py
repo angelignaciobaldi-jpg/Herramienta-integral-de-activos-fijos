@@ -330,6 +330,8 @@ class SeccionCartasResponsivas:
         creds = credenciales.cargar()
         usuario, contrasena = creds
         ids = list(self._seleccion)
+        id_empresa = self._empresa_id()
+        id_empleado = self._id_empleado
 
         ui_loop = asyncio.get_running_loop()
         txt = ft.Text("Generando la carta en el SIPP…", size=13)
@@ -348,7 +350,9 @@ class SeccionCartasResponsivas:
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
-                    rutas = await cr.generar_carta(sipp, ids, carpeta)
+                    rutas = await cr.generar_carta(sipp, ids, carpeta,
+                                                   id_empresa=id_empresa,
+                                                   id_empleado=id_empleado)
             except Exception as exc:  # noqa: BLE001 — se reporta al usuario
                 error = str(exc)
 
