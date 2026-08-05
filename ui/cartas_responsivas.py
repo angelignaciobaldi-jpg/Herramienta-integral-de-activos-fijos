@@ -27,6 +27,10 @@ from ui.componentes import (Modal, boton_herramienta, boton_primario,
                             boton_secundario, buscador, campo_opciones,
                             tarjeta_seccion)
 
+# Alto aproximado de una fila de la lista (px) y tope antes de activar el scroll.
+_ALTO_FILA = 40
+_ALTO_MAX_LISTA = 520
+
 
 class SeccionCartasResponsivas:
     """Lista los activos dados de alta de un empleado y genera su carta responsiva."""
@@ -54,9 +58,11 @@ class SeccionCartasResponsivas:
         self.buscador_filtro.on_change = lambda _e: self._pintar_lista()
         self.chk_todos = ft.Checkbox(label="Seleccionar todos", value=False,
                                      on_change=self._alternar_todos)
-        # Altura generosa y fija: el ListView (virtualizado) desplaza sus filas y el
-        # contenido de la pantalla tiene su propio scroll general.
-        self.lista = ft.ListView(height=520, spacing=2, padding=ft.Padding.only(right=8))
+        # Altura DINÁMICA (se recalcula en _pintar_lista según cuántas filas hay):
+        # crece con el contenido hasta un tope y solo entonces desplaza. El contenido
+        # de la pantalla tiene además su propio scroll general.
+        self.lista = ft.ListView(height=_ALTO_FILA, spacing=2,
+                                 padding=ft.Padding.only(right=8))
         self.txt_estado = ft.Text("", size=13, color=GRIS)
         self.txt_conteo = ft.Text("", size=12, color=GRIS)
 
@@ -239,6 +245,9 @@ class SeccionCartasResponsivas:
         activos = self._filtrados()
         self._filas = {}
         self.lista.controls = [self._fila(a) for a in activos]
+        # La lista se ajusta al contenido: crece con las filas hasta un tope y solo
+        # ahí aparece su scroll (evita un recuadro en blanco enorme con pocas filas).
+        self.lista.height = min(max(len(activos), 1) * _ALTO_FILA, _ALTO_MAX_LISTA)
         self.txt_conteo.value = (f"{len(self._seleccion)} seleccionado(s) de "
                                  f"{len(self._activos)} activo(s)"
                                  + (f" · {len(activos)} en el filtro"
