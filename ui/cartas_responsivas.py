@@ -25,11 +25,13 @@ from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
 from ui.componentes import (Modal, boton_herramienta, boton_primario,
                             boton_secundario, buscador, campo_opciones,
-                            tarjeta_seccion)
+                            campo_texto, tarjeta_seccion)
 
 # Alto aproximado de una fila de la lista (px) y tope antes de activar el scroll.
 _ALTO_FILA = 40
 _ALTO_MAX_LISTA = 520
+# Preferencia: próximo folio (consecutivo LOCAL de la carta responsiva).
+_CLAVE_FOLIO = "carta_folio_siguiente"
 
 
 class SeccionCartasResponsivas:
@@ -294,7 +296,16 @@ class SeccionCartasResponsivas:
                 self._seleccion.discard(a.id_activo)
         self._pintar_lista()
 
-    # ------------------------------------------------------ generar (RPA, folio)
+    # ------------------------------------------------------ generar (LOCAL + folio)
+    def _folio_siguiente(self) -> str:
+        """Próximo folio (contador LOCAL, editable). 6 dígitos con ceros."""
+        from core import preferencias
+        n = preferencias.cargar_valor(_CLAVE_FOLIO, 1)
+        try:
+            return f"{int(n):06d}"
+        except (TypeError, ValueError):
+            return "000001"
+
     async def _generar_carta(self, _e=None) -> None:
         if not self._seleccion:
             self.app.avisar("Selecciona al menos un activo para la carta.", NARANJA)
@@ -303,15 +314,20 @@ class SeccionCartasResponsivas:
         if not creds or not creds[0]:
             self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
             return
-        # Confirmación: la generación consume un folio del SIPP.
+        _, self._tf_folio = campo_texto(
+            "Folio", valor=self._folio_siguiente(), flotante=True,
+            hint="Consecutivo de la carta (editable)")
         modal = Modal(self.page, "Generar carta responsiva", ancho=480)
         modal.cuerpo.controls = [
             ft.Text(f"Se generará la carta responsiva de «{self._nombre_empleado}» "
                     f"con {len(self._seleccion)} activo(s).", size=14,
                     weight=ft.FontWeight.W_600),
-            ft.Text("El SIPP asignará el folio al generar (consume un folio). "
-                    "Después elegirás dónde guardar el PDF.", size=12, color=NARANJA),
+            self._tf_folio,
+            ft.Text("La carta se arma en la herramienta (el SIPP no la genera) y se "
+                    "guarda como PDF donde elijas. El folio es un consecutivo local.",
+                    size=11, color=GRIS),
         ]
+
         async def _hacer(_e=None) -> None:
             await self._confirmar_generar(modal)
 
@@ -322,40 +338,45 @@ class SeccionCartasResponsivas:
         modal.abrir()
 
     async def _confirmar_generar(self, modal) -> None:
+        from core import preferencias
+
+        folio = (self._tf_folio.value or "").strip() or self._folio_siguiente()
         modal.cerrar()
         carpeta = await self.app.picker.get_directory_path(
             dialog_title="Elige dónde guardar la carta responsiva (PDF)")
         if not carpeta:
             return
+        import os
+        import re as _re
         creds = credenciales.cargar()
         usuario, contrasena = creds
-        ids = list(self._seleccion)
+        activos_sel = [a for a in self._activos if a.id_activo in self._seleccion]
         id_empresa = self._empresa_id()
         id_empleado = self._id_empleado
-        etiquetas = [a.etiqueta for a in self._activos
-                     if a.id_activo in self._seleccion and a.etiqueta]
+        nombre = self._nombre_empleado or (activos_sel[0].empleado if activos_sel else "")
+        # Nombre de archivo seguro: EMPLEADO_folio.pdf (como los ejemplos).
+        base = _re.sub(r"[^A-Za-z0-9]+", "_", f"{nombre}_{folio}").strip("_") or "carta"
+        ruta_pdf = os.path.join(carpeta, base + ".pdf")
 
-        ui_loop = asyncio.get_running_loop()
-        txt = ft.Text("Generando la carta en el SIPP…", size=13)
-        barra = ft.ProgressBar()
+        txt = ft.Text("Generando la carta…", size=13)
         prog = Modal(self.page, "Generando carta responsiva",
-                     subtitulo=self._nombre_empleado, ancho=460)
-        prog.cuerpo.controls = [txt, barra]
+                     subtitulo=nombre, ancho=460)
+        prog.cuerpo.controls = [txt, ft.ProgressBar()]
         prog.abrir()
 
-        rutas, error = [], None
+        ruta, error = None, None
 
         async def flujo() -> None:
-            nonlocal rutas, error
-            from core import cartas_responsivas as cr
+            nonlocal ruta, error
+            from core import carta_responsiva_local as crl
             from core.rpa_sipp import SesionSipp
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
-                    rutas = await cr.generar_carta(sipp, ids, carpeta,
-                                                   id_empresa=id_empresa,
-                                                   id_empleado=id_empleado,
-                                                   etiquetas=etiquetas)
+                    ruta = await crl.generar_carta_local(
+                        sipp, activos_sel, ruta_pdf, folio,
+                        nombre_empleado=nombre, id_empleado=id_empleado,
+                        id_empresa=id_empresa)
             except Exception as exc:  # noqa: BLE001 — se reporta al usuario
                 error = str(exc)
 
@@ -370,11 +391,15 @@ class SeccionCartasResponsivas:
         if error:
             self.app.avisar(f"No se pudo generar la carta: {error}", ROJO, duracion=9000)
             return
-        primera = str(rutas[0]) if rutas else carpeta
+        # Avanza el contador local de folio para la siguiente carta.
+        try:
+            preferencias.guardar_valor(_CLAVE_FOLIO, int(folio) + 1)
+        except (TypeError, ValueError):
+            pass
         self.app.avisar(
-            f"Carta responsiva generada ({len(rutas)} archivo/s).", VERDE,
-            accion="Abrir", on_accion=lambda _e: self.app.abrir_en_sistema(primera),
-            duracion=8000)
+            f"Carta responsiva generada (folio {folio}).", VERDE, accion="Abrir",
+            on_accion=lambda _e, x=str(ruta): self.app.abrir_en_sistema(x),
+            duracion=9000)
 
     # ------------------------------------------------------ utilidades
     def _sincronizar_estado(self) -> None:
