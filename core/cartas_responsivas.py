@@ -112,15 +112,19 @@ async def generar_carta(sesion, ids_activo: list[int], carpeta_destino,
         raise ErrorCartaResponsiva("Falta la empresa para generar la carta.")
     ids = [str(i) for i in ids_activo]
     etqs = [str(e) for e in (etiquetas or []) if str(e).strip()]
+    # El backend declara DOS argumentos distintos: ActivosFijos (ARRAY, 1er arg) y
+    # activosFijos (STRING, 6º arg). El JS del portal solo manda el array, por eso
+    # su propio botón falla. Se envían AMBOS con su nombre/tipo exacto.
     datos = await _invoke(sesion, "ActivosFijosNuevo", "cartaResponsiva",
-                          {"id_Empresa": id_empresa,
+                          {"ActivosFijos": list(ids_activo),   # array (1er arg)
+                           "activosFijos": ",".join(ids),       # string (6º arg)
+                           "ar_ActivosFijos": list(ids_activo),
+                           "activosFijosEtiquetas": ",".join(etqs),
+                           "id_Empresa": id_empresa,
                            "id_Sucursal": id_sucursal or "",
                            "id_Empleado": id_empleado or "",
                            "id_GrupoCentroCosto": id_grupo_centro_costo or "",
-                           "id_ActivoFijo": "",
-                           "activosFijos": ",".join(ids),        # STRING (lo exigido)
-                           "ar_ActivosFijos": list(ids_activo),  # array (por si lo usa)
-                           "activosFijosEtiquetas": ",".join(etqs)})
+                           "id_ActivoFijo": ""})
     if not datos.get("ISOK"):
         raise ErrorCartaResponsiva(datos.get("MSG") or "El SIPP no generó la carta.")
     archivos = datos.get("JSON")
