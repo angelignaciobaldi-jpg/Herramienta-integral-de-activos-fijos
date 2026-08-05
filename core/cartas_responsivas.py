@@ -95,25 +95,32 @@ async def listar_activos_empleado(sesion, id_empresa, id_empleado) -> list[Activ
 
 
 async def generar_carta(sesion, ids_activo: list[int], carpeta_destino,
-                        id_empresa=None, id_empleado=None,
+                        id_empresa=None, id_empleado=None, etiquetas=None,
                         id_sucursal="", id_grupo_centro_costo="") -> list[Path]:
     """Genera la carta responsiva de los activos y descarga el/los PDF a
     `carpeta_destino`. **Consume un folio del SIPP.** Devuelve las rutas escritas.
 
-    El servidor exige `id_Empresa` (el JS del portal lo trae comentado, pero el
-    backend lo pide); se envían también empleado/sucursal/grupo como el payload
-    original. El SIPP puede devolver un solo archivo o una lista; se descargan todos.
+    OJO: el JS del portal envía `ActivosFijos` como ARRAY, pero el backend
+    `cartaResponsiva` exige `activosFijos` como STRING (y `id_Empresa`); por eso el
+    botón del propio SIPP falla ("Cannot cast Array to string"). Aquí se envía el
+    payload que el backend espera (activosFijos string + ar_ActivosFijos array +
+    etiquetas), para intentar sortear ese bug del portal.
     """
     if not ids_activo:
         raise ErrorCartaResponsiva("Selecciona al menos un activo fijo.")
     if not id_empresa:
         raise ErrorCartaResponsiva("Falta la empresa para generar la carta.")
+    ids = [str(i) for i in ids_activo]
+    etqs = [str(e) for e in (etiquetas or []) if str(e).strip()]
     datos = await _invoke(sesion, "ActivosFijosNuevo", "cartaResponsiva",
-                          {"ActivosFijos": list(ids_activo),
-                           "id_Empresa": id_empresa,
+                          {"id_Empresa": id_empresa,
                            "id_Sucursal": id_sucursal or "",
                            "id_Empleado": id_empleado or "",
-                           "id_GrupoCentroCosto": id_grupo_centro_costo or ""})
+                           "id_GrupoCentroCosto": id_grupo_centro_costo or "",
+                           "id_ActivoFijo": "",
+                           "activosFijos": ",".join(ids),        # STRING (lo exigido)
+                           "ar_ActivosFijos": list(ids_activo),  # array (por si lo usa)
+                           "activosFijosEtiquetas": ",".join(etqs)})
     if not datos.get("ISOK"):
         raise ErrorCartaResponsiva(datos.get("MSG") or "El SIPP no generó la carta.")
     archivos = datos.get("JSON")
