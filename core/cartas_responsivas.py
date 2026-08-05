@@ -37,12 +37,16 @@ class ActivoCarta:
     nombre: str
     serie: str
     etiqueta: str
+    ubicacion: str
     departamento: str
     grupo_cc: str
     centro_cc: str
     empresa: str
     sucursal: str
+    id_empleado: "int | None"
     empleado: str
+    id_empresa: "int | None"
+    fecha: "object | None" = None   # FH_MOVIMIENTO (fecha de registro), datetime.date
 
 
 async def _invoke(sesion, component: str, metodo: str, args: dict) -> dict:
@@ -65,33 +69,77 @@ def _val(fila, idx: dict, col: str) -> str:
     return "" if v is None else str(v)
 
 
-async def listar_activos_empleado(sesion, id_empresa, id_empleado) -> list[ActivoCarta]:
-    """Activos dados de alta (sn_Alta=1) del empleado en la empresa. Read-only."""
-    datos = await _invoke(sesion, "ActivosFijosNuevo", "getActivosFijosPorEmpleado",
-                          {"id_Empresa": id_empresa, "id_Sucursal": "",
-                           "id_Empleado": id_empleado, "id_GrupoCentroCosto": "",
-                           "id_CentroCosto": "", "id_Departamento": "", "sn_Alta": 1})
+def _entier(texto):
+    t = str(texto or "").strip()
+    return int(t) if t.isdigit() else None
+
+
+def _fecha(texto):
+    """Parsea la fecha del SIPP ('DD/MM/AAAA' o ISO) a date; None si no se puede."""
+    from datetime import datetime
+    t = (texto or "").strip()
+    if not t:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(t[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _activo_desde_listado(f, idx: dict) -> "ActivoCarta | None":
+    id_af = _val(f, idx, "ID_ACTIVOFIJO")
+    if not id_af:
+        return None
+    return ActivoCarta(
+        id_activo=int(id_af),
+        nombre=_val(f, idx, "NB_ACTIVOFIJO"),
+        serie=_val(f, idx, "DE_SERIEACTIVO"),
+        etiqueta=_val(f, idx, "DE_ETIQUETA"),
+        ubicacion=_val(f, idx, "NB_UBICACION"),
+        departamento=_val(f, idx, "NB_DEPARTAMENTO"),
+        grupo_cc=_val(f, idx, "NB_GRUPOCENTROCOSTO"),
+        centro_cc=_val(f, idx, "NB_CENTROCOSTO"),
+        empresa=_val(f, idx, "NB_EMPRESA"),
+        sucursal=_val(f, idx, "NB_SUCURSAL"),
+        id_empleado=_entier(_val(f, idx, "ID_EMPLEADORESGUARDO")),
+        empleado=_val(f, idx, "NB_EMPLEADORESGUARDO"),
+        id_empresa=_entier(_val(f, idx, "ID_EMPRESA")),
+        fecha=_fecha(_val(f, idx, "FH_MOVIMIENTO")))
+
+
+async def listar_activos_empresa(sesion, id_empresa, fh_inicio=None, fh_fin=None,
+                                 id_empleado=None) -> list[ActivoCarta]:
+    """Activos dados de alta de la empresa (getListadoActivosFijos, sn_Registro=1),
+    opcionalmente filtrados por rango de fecha de REGISTRO (FH_MOVIMIENTO) y/o por
+    empleado. Trae empleado, empresa, ubicación y fecha (para agrupar y filtrar)."""
+    datos = await _invoke(sesion, "ActivosFijosNuevo", "getListadoActivosFijos",
+                          {"id_Empresa": id_empresa, "sn_Registro": 1})
     if not datos.get("ISOK"):
         raise ErrorCartaResponsiva(datos.get("MSG") or "El SIPP rechazó la consulta.")
     query = datos.get("QUERY", {}) or {}
     idx = {c: i for i, c in enumerate(query.get("COLUMNS") or [])}
     activos: list[ActivoCarta] = []
     for f in query.get("DATA") or []:
-        id_af = _val(f, idx, "ID_ACTIVOFIJO")
-        if not id_af:
+        a = _activo_desde_listado(f, idx)
+        if a is None:
             continue
-        activos.append(ActivoCarta(
-            id_activo=int(id_af),
-            nombre=_val(f, idx, "NB_ACTIVOFIJO"),
-            serie=_val(f, idx, "DE_SERIEACTIVO"),
-            etiqueta=_val(f, idx, "DE_ETIQUETA"),
-            departamento=_val(f, idx, "NB_DEPARTAMENTO"),
-            grupo_cc=_val(f, idx, "NB_GRUPOCENTROCOSTO"),
-            centro_cc=_val(f, idx, "NB_CENTROCOSTO"),
-            empresa=_val(f, idx, "NB_EMPRESA"),
-            sucursal=_val(f, idx, "NB_SUCURSAL"),
-            empleado=_val(f, idx, "NB_EMPLEADORESGUARDO")))
+        if id_empleado is not None and a.id_empleado != id_empleado:
+            continue
+        if fh_inicio and (a.fecha is None or a.fecha < fh_inicio):
+            continue
+        if fh_fin and (a.fecha is None or a.fecha > fh_fin):
+            continue
+        activos.append(a)
     return activos
+
+
+async def listar_activos_empleado(sesion, id_empresa, id_empleado,
+                                  fh_inicio=None, fh_fin=None) -> list[ActivoCarta]:
+    """Activos dados de alta del empleado en la empresa (con filtro de fecha opcional)."""
+    return await listar_activos_empresa(sesion, id_empresa, fh_inicio, fh_fin,
+                                        id_empleado=id_empleado)
 
 
 async def generar_carta(sesion, ids_activo: list[int], carpeta_destino,

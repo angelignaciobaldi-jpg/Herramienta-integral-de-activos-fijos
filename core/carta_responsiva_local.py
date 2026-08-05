@@ -303,17 +303,62 @@ async def generar_carta_local(sesion, activos: list, ruta_pdf: str, folio: str,
 
     filas = []
     for a in activos:
-        carac = await _caracteristicas(sesion, id_empresa, a.id_activo)
+        emp_a = getattr(a, "id_empresa", None) or id_empresa
+        carac = await _caracteristicas(sesion, emp_a, a.id_activo)
         # CLIENTE = centro de costo (como en el documento oficial); si obtenerCamposDetalle
         # ya trae un "CLIENTE", se respeta; si no, se antepone el centro de costo.
         if a.centro_cc and not any(x.upper().startswith("CLIENTE:") for x in carac):
             carac = [f"CLIENTE:{a.centro_cc}"] + carac
+        ubic = getattr(a, "ubicacion", "") or a.departamento or area
         filas.append({
             "serie": a.serie, "descripcion": a.nombre, "etiqueta": a.etiqueta,
-            "ubicacion": a.departamento or area, "caracteristicas": carac})
+            "ubicacion": ubic, "caracteristicas": carac})
 
     html_str = construir_html(folio, trabajador, puesto, empresa, area, sucursal, filas)
     ruta = Path(ruta_pdf)
     ruta.parent.mkdir(parents=True, exist_ok=True)
     await qr.html_a_pdf(html_str, str(ruta))
     return str(ruta)
+
+
+def nombre_archivo_carta(nombre_empleado: str, empresa: str) -> str:
+    """Nombre de archivo de la carta: 'Carta responsiva NOMBRE - EMPRESA' (saneado)."""
+    import re
+    base = f"Carta responsiva {nombre_empleado} - {empresa}".strip()
+    return re.sub(r'[\\/:*?"<>|]+', "", base).strip()
+
+
+async def generar_cartas_masivas(sesion, grupos: list, carpeta, folio_inicial,
+                                 empresa_nombre: str, progreso=None) -> tuple:
+    """Genera una carta por colaborador. `grupos`: lista de
+    (nombre_empleado, id_empleado, [ActivoCarta seleccionados]). El folio avanza en
+    cada carta. Devuelve (resultados, folio_siguiente). `progreso(hechos, total)`."""
+    import os
+
+    resultados = []
+    try:
+        folio = int(folio_inicial)
+    except (TypeError, ValueError):
+        folio = 1
+    carpeta = Path(carpeta)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    incluibles = [(n, e, a) for (n, e, a) in grupos if a]
+    total = len(incluibles)
+    for i, (nombre, id_empleado, activos) in enumerate(incluibles, 1):
+        ruta = os.path.join(str(carpeta),
+                            nombre_archivo_carta(nombre, empresa_nombre) + ".pdf")
+        folio_txt = f"{folio:06d}"
+        try:
+            await generar_carta_local(
+                sesion, activos, ruta, folio_txt, nombre_empleado=nombre,
+                id_empleado=id_empleado,
+                id_empresa=getattr(activos[0], "id_empresa", None))
+            resultados.append({"nombre": nombre, "ruta": ruta, "folio": folio_txt,
+                               "ok": True, "observacion": f"{len(activos)} activo(s)"})
+            folio += 1
+        except Exception as exc:  # noqa: BLE001 — una carta con error no aborta el lote
+            resultados.append({"nombre": nombre, "ruta": "", "folio": "", "ok": False,
+                               "observacion": str(exc)})
+        if progreso:
+            progreso(i, total)
+    return resultados, folio
