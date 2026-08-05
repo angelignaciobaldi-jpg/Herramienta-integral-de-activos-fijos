@@ -153,8 +153,11 @@ class SeccionCartasResponsivas:
         self.m_cf_hasta = CampoFecha(self.page, "Hasta (registro)", flotante=True)
         self.m_progreso = ft.ProgressRing(width=22, height=22, stroke_width=3,
                                           visible=False)
-        self.m_buscar_colab = buscador("Filtrar colaborador (nombre)…", expand=True)
-        self.m_buscar_colab.on_change = lambda _e: self._pintar_colaboradores()
+        # Búsqueda por BOTÓN/Enter (no en cada tecla): repintar 120 secciones por
+        # pulsación es pesado. Escribe el nombre y pulsa «Buscar».
+        self.m_buscar_colab = buscador(
+            "Nombre del colaborador… (Enter o «Buscar»)",
+            on_submit=self._pintar_colaboradores, expand=True)
         self.m_lista = ft.Column(spacing=6, tight=True,
                                  horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self.m_estado = ft.Text("", size=13, color=GRIS)
@@ -178,7 +181,10 @@ class SeccionCartasResponsivas:
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
         tarjeta_lista = tarjeta_seccion(ft.Column(
-            [ft.Row([self.m_buscar_colab]),
+            [ft.Row([self.m_buscar_colab,
+                     boton_secundario("Buscar", ft.Icons.SEARCH,
+                                      self._pintar_colaboradores)],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
              ft.Container(self.m_lista)],
             spacing=10, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
@@ -498,9 +504,11 @@ class SeccionCartasResponsivas:
         self._safe_update()
 
     def _pintar_colaboradores(self, _e=None) -> None:
-        t = (self.m_buscar_colab.value or "").strip().lower()
+        # Coincide si TODAS las palabras escritas están en el nombre (en cualquier
+        # orden), así "rendon rodolfo" también encuentra "RODOLFO ... RENDON ...".
+        palabras = (self.m_buscar_colab.value or "").strip().lower().split()
         items = [(eid, g) for eid, g in self._m_por_empleado.items()
-                 if not t or t in g["nombre"].lower()]
+                 if all(p in g["nombre"].lower() for p in palabras)]
         recortado = items[:_MAX_COLAB]
         self.m_lista.controls = [self._tile_colaborador(eid, g) for eid, g in recortado]
         if len(items) > _MAX_COLAB:
