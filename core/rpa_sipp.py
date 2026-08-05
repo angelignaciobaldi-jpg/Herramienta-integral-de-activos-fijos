@@ -827,25 +827,9 @@ class SesionSipp:
         except Exception:  # noqa: BLE001 — no crítico: se omite sin tumbar el alta
             pass
 
-        # La ETIQUETA/folio la genera el SIPP POR EMPRESA (getEtiqueta usa
-        # filtrosAgregar.id_EmpresaAgregar). Si esa empresa va vacía, el SIPP
-        # devuelve un folio por defecto que SE REPITE entre activos. Se fija la
-        # empresa del activo en el scope antes de generar (sin depender de que el
-        # campo de compra esté visible).
-        from core.empresas import ID_POR_EMPRESA
-        id_emp = ID_POR_EMPRESA.get((empresa or "").strip())
-        if id_emp is not None:
-            try:
-                await page.evaluate(
-                    "(id) => { const el = document.querySelector("
-                    "\"[ng-model='filtrosAgregar.id_TipoActivo']\");"
-                    " if (el) { const s = angular.element(el).scope();"
-                    " s.$apply(() => { s.filtrosAgregar.id_EmpresaAgregar = id; }); } }",
-                    id_emp)
-            except Exception:  # noqa: BLE001 — no crítico
-                pass
-
-        # La ETIQUETA se genera con el botón del portal ANTES de guardar; el código
+        # La ETIQUETA/folio es un consecutivo GLOBAL del SIPP (getEtiqueta ignora
+        # empresa y tipo): devuelve el "siguiente" disponible y avanza al guardar
+        # cada activo. Se genera con el botón del portal ANTES de guardar; el código
         # generado se devuelve para registrarlo en la herramienta.
         etiqueta = await self.generar_etiqueta()
 
