@@ -117,7 +117,12 @@ _JS_ELEGIR_OPCION = r"""(args) => {
     const norm = s => (s || '')
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
         .replace(/\s+/g, ' ').trim().toLowerCase();
-    const sel = document.querySelector('select[ng-model="' + ngModel + '"]');
+    // El portal REPITE el ng-model en paneles ocultos (agregar/editar): hay que
+    // tomar el select VISIBLE, no el primero (que suele ser el oculto). Por eso
+    // Situación/Departamento no se aplicaban al formulario real.
+    const sels = Array.from(
+        document.querySelectorAll('select[ng-model="' + ngModel + '"]'));
+    const sel = sels.find(s => s.offsetParent !== null) || sels[0];
     if (!sel) return {ok: false, motivo: 'select-no-encontrado'};
     const objetivo = norm(texto);
     const opts = Array.from(sel.options).filter(o => o.value !== '' && o.value !== '0');
