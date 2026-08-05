@@ -160,6 +160,7 @@ class SeccionCartasResponsivas:
             on_submit=self._pintar_colaboradores, expand=True)
         self.m_lista = ft.Column(spacing=6, tight=True,
                                  horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        self.m_conteo = ft.Text("", size=12, color=GRIS)   # feedback del filtro
         self.m_estado = ft.Text("", size=13, color=GRIS)
 
         cabecera = ft.Column(
@@ -185,6 +186,7 @@ class SeccionCartasResponsivas:
                      boton_secundario("Buscar", ft.Icons.SEARCH,
                                       self._pintar_colaboradores)],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
+             self.m_conteo,
              ft.Container(self.m_lista)],
             spacing=10, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
@@ -515,6 +517,14 @@ class SeccionCartasResponsivas:
             self.m_lista.controls.append(ft.Text(
                 f"…y {len(items) - _MAX_COLAB} colaborador(es) más. Filtra por nombre.",
                 size=11, color=GRIS))
+        # Feedback del filtro para que el usuario sepa que la búsqueda se aplicó.
+        total = len(self._m_por_empleado)
+        if palabras:
+            self.m_conteo.value = (f"{len(items)} colaborador(es) coinciden con "
+                                   f"«{self.m_buscar_colab.value.strip()}» (de {total}).")
+        else:
+            self.m_conteo.value = f"{total} colaborador(es)."
+        self.m_conteo.color = NARANJA if (palabras and not items) else GRIS
         self._safe_update()
 
     def _sel_colab(self, eid) -> set:
