@@ -54,7 +54,9 @@ class SeccionCartasResponsivas:
         self.buscador_filtro.on_change = lambda _e: self._pintar_lista()
         self.chk_todos = ft.Checkbox(label="Seleccionar todos", value=False,
                                      on_change=self._alternar_todos)
-        self.lista = ft.ListView(expand=True, spacing=2, padding=ft.Padding.only(right=8))
+        # Altura generosa y fija: el ListView (virtualizado) desplaza sus filas y el
+        # contenido de la pantalla tiene su propio scroll general.
+        self.lista = ft.ListView(height=520, spacing=2, padding=ft.Padding.only(right=8))
         self.txt_estado = ft.Text("", size=13, color=GRIS)
         self.txt_conteo = ft.Text("", size=12, color=GRIS)
 
@@ -95,22 +97,21 @@ class SeccionCartasResponsivas:
                     ft.Row([self.chk_todos, self.txt_conteo],
                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     self._encabezado_tabla(),
-                    ft.Container(self.lista, expand=True),
+                    self.lista,
                 ],
-                spacing=10, expand=True,
+                spacing=10, tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
-        tarjeta_lista.expand = True  # tarjeta_seccion no expone `expand`; se fija aquí.
 
         self.barra_generar = ft.Row(
             [boton_primario("Generar carta responsiva (PDF)", ft.Icons.DESCRIPTION,
                             self._generar_carta)],
             alignment=ft.MainAxisAlignment.END)
 
-        # Sin scroll en el Column externo: así el ListView interno tiene altura
-        # acotada y crece; la cabecera y la barra son de alto fijo.
+        # Scroll GENERAL de la pantalla: la cabecera, la tarjeta de la lista y la
+        # barra se desplazan juntas; la lista tiene además su propio scroll interno.
         self.contenido = ft.Column(
             [tarjeta_seccion(cabecera), tarjeta_lista, self.barra_generar],
-            expand=True, spacing=14,
+            expand=True, spacing=14, scroll=ft.ScrollMode.AUTO,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self._sincronizar_estado()
 
