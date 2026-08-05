@@ -351,6 +351,9 @@ class SeccionRegistroActivos:
         """Callback de `Pestanas` (ya repintó el segmentado antes de llamarnos)."""
         self._tab = clave
         self._pagina = 0  # cada pestaña arranca en su primera página
+        # La selección es POR PESTAÑA: al cambiar de estatus se limpia, para que el
+        # check general y las acciones masivas solo afecten a la pestaña activa.
+        self._seleccionados.clear()
         self._actualizar_barra_rpa()
         # `_refrescar()` termina actualizando la pantalla; un segundo
         # `_safe_update()` aquí volvía a mandar los ~790 controles.
