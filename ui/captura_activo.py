@@ -686,10 +686,14 @@ class DialogoCapturaActivo:
         # registro: es la que se muestra en la tabla y con la que se busca el
         # insumo (en el listado y en la bandeja de compras).
         serie = (valores.get("nu_Serie") or "").strip()
+        # El nombre del insumo elegido en "Identificación" se refleja en la COLUMNA
+        # del registro (la que se ve en el listado): es el insumo REAL del SIPP.
+        insumo_cap = (valores.get("nb_NombreInsumo") or "").strip()
         db.actualizar_datos_levantamiento(
             self._registro.id, id_tipo_activo=tipo, datos=valores,
             modificado=True if ya_de_alta else None,
-            no_serie=serie if serie else None)
+            no_serie=serie if serie else None,
+            nombre_insumo=insumo_cap or None)
         self.modal.cerrar()
         self.app.avisar("Datos del activo guardados.", VERDE)
         if callable(self.al_guardar):
