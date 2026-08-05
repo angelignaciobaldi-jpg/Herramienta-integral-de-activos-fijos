@@ -133,66 +133,36 @@ class SeccionRegistroActivos:
         self._por_pagina = _POR_PAGINA[0]
         # Formulario dinámico de captura por tipo de activo (prepara el alta en SIPP).
         self.dialogo_captura = DialogoCapturaActivo(app, al_guardar=self._tras_importar)
-        # Carga masiva desde Excel: toma el contexto de los selectores de arriba.
+        # Carga masiva desde Excel: la empresa/sucursal salen de las columnas del
+        # propio Excel (ya no hay selectores de contexto en la pantalla).
         self.dialogo_carga = DialogoCargaMasiva(
             app, contexto=self._contexto_actual, al_terminar=self._tras_importar)
         self._construir()
 
     def _contexto_actual(self) -> tuple:
-        """(empresa, sucursal, departamento) de los selectores, para etiquetar lo
-        que se cargue (el Excel no trae esos datos)."""
-        return (self.dd_empresa.value or "",
-                (self.tf_sucursal.value or "").strip(),
-                (self.tf_departamento.value or "").strip())
+        """Contexto para la carga masiva de Excel. El Excel estandarizado trae sus
+        propias columnas EMPRESA/SUCURSAL, así que no se impone ninguno aquí."""
+        return ("", "", "")
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
-        # Selectores de contexto: se aplican a las imágenes al SUBIRLAS (un
-        # levantamiento suele ser de una empresa/sucursal). Editables por fila.
-        # Van en una tarjeta de sección, con la etiqueta ARRIBA de cada campo.
-        # Sin `width`: cada bloque se lleva un tercio del panel vía `expand`, así
-        # el reparto sigue al ancho de la ventana en vez de quedar fijo.
-        bloque_emp, self.dd_empresa = campo_opciones(
-            "Empresa", NOMBRES_EMPRESAS, hint="Seleccionar empresa")
-        bloque_suc, self.tf_sucursal = campo_texto("Sucursal")
-        bloque_dep, self.tf_departamento = campo_texto("Departamento")
-        for bloque in (bloque_emp, bloque_suc, bloque_dep):
-            bloque.expand = True
-        contexto = ft.Column(
-            [
-                ft.Text("Datos del levantamiento (se aplican a las imágenes que subas; "
-                        "puedes ajustarlos por fila):",
-                        theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
-                # Sin `wrap`: con `expand` los tres reparten SIEMPRE el ancho en
-                # tercios; envolver los devolvería a su tamaño natural.
-                ft.Row([bloque_emp, bloque_suc, bloque_dep], spacing=16,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ],
-            spacing=12, tight=True,
-        )
-        contexto = tarjeta_seccion(contexto)
-
-        # Barra de carga + búsqueda.
+        # Barra de carga + búsqueda. El alta de activos se unifica en UN botón
+        # ("Subir archivos") que abre un modal con los métodos (carpeta / ZIP /
+        # Excel); la empresa y sucursal se piden en el propio modal (carpeta/ZIP),
+        # por eso ya no hay campos de contexto arriba.
         self.progreso = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)
         self.estado = ft.Text("", size=12, color=GRIS)
         barra_acciones = ft.Row(
             [
                 boton_primario("Subir archivos", ft.Icons.UPLOAD_FILE,
-                               self._subir_archivos),
-                boton_secundario("Subir carpeta", ft.Icons.FOLDER_OPEN,
-                                 self._subir_carpeta),
-                boton_secundario("Subir ZIP", ft.Icons.FOLDER_ZIP, self._subir_zip,
-                                 tooltip="Carpeta comprimida del levantamiento: "
-                                         "se extrae y se procesa igual"),
-                boton_secundario("Carga masiva (Excel)", ft.Icons.TABLE_VIEW,
-                                 self.dialogo_carga.abrir,
-                                 tooltip="Importa un inventario completo desde Excel"),
+                               self._abrir_subir,
+                               tooltip="Da de alta activos desde una carpeta, un ZIP "
+                                       "o un Excel"),
                 boton_secundario("Buscar en SIPP", ft.Icons.SEARCH, self._buscar),
                 boton_secundario("Actualizar información del SIPP", ft.Icons.SYNC,
                                  self._actualizar_sipp,
-                                 tooltip="Descarga del SIPP, para la empresa de "
-                                         "arriba, sus insumos y activos, más el "
-                                         "catálogo de empleados (global)"),
+                                 tooltip="Descarga del SIPP los insumos y activos de "
+                                         "una empresa, más el catálogo de empleados"),
                 self.progreso,
                 self.estado,
             ],
@@ -338,7 +308,6 @@ class SeccionRegistroActivos:
 
         cuerpo = ft.Column(
             [
-                contexto,
                 barra_acciones,
                 ft.Divider(height=1, color=ft.Colors.OUTLINE_VARIANT),
                 # Pestañas a la izquierda, herramientas de selección a la derecha.
@@ -970,15 +939,84 @@ class SeccionRegistroActivos:
         self.app.avisar("Registro eliminado.", VERDE)
 
     # ------------------------------------------------------ carga de imágenes
-    async def _subir_archivos(self, _e=None) -> None:
-        archivos = await self.app.picker.pick_files(
-            dialog_title="Selecciona las imágenes del levantamiento",
-            allowed_extensions=IMG_EXT, allow_multiple=True)
-        if not archivos:
-            return
-        self._registrar_imagenes([(a.name, a.path) for a in archivos])
+    # -------------------------------------------- modal unificado de carga
+    def _abrir_subir(self, _e=None) -> None:
+        """Modal que unifica los métodos de alta: carpeta, ZIP o Excel."""
+        modal = Modal(self.page, "Subir archivos para dar de alta", ancho=560)
 
-    async def _subir_carpeta(self, _e=None) -> None:
+        def _opcion(icono, titulo, desc, on_click):
+            return ft.Container(
+                ft.Row([ft.Icon(icono, size=26, color=ft.Colors.PRIMARY),
+                        ft.Column([ft.Text(titulo, size=14, weight=ft.FontWeight.W_600),
+                                   ft.Text(desc, size=12, color=GRIS, no_wrap=False)],
+                                  spacing=2, tight=True, expand=True)],
+                       spacing=14, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=14, border_radius=8,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                ink=True, on_click=on_click)
+
+        async def _ir_excel(_e=None):
+            modal.cerrar()
+            await self.dialogo_carga.abrir()
+
+        modal.cuerpo.spacing = 10
+        modal.cuerpo.controls = [
+            ft.Text("Elige cómo cargar los activos para el registro del RPA:",
+                    size=13, color=GRIS),
+            _opcion(ft.Icons.FOLDER_OPEN, "Carga de carpeta",
+                    "Todas las imágenes de una carpeta (y sus subcarpetas).",
+                    lambda _e: self._pedir_contexto(modal, "carpeta")),
+            _opcion(ft.Icons.FOLDER_ZIP, "Carga de carpeta comprimida (ZIP)",
+                    "Un .zip del levantamiento; se extrae y se procesa igual.",
+                    lambda _e: self._pedir_contexto(modal, "zip")),
+            _opcion(ft.Icons.TABLE_VIEW, "Carga masiva con Excel",
+                    "Plantilla de Excel con los datos del alta (empresa/sucursal en "
+                    "las columnas).", _ir_excel),
+        ]
+        modal.set_acciones([boton_herramienta(
+            "Cancelar", on_click=lambda _e: modal.cerrar())])
+        modal.abrir()
+
+    def _pedir_contexto(self, modal, metodo: str) -> None:
+        """Para carpeta/ZIP: pide empresa y sucursal antes de procesar."""
+        _, dd_emp = campo_opciones("Empresa", list(NOMBRES_EMPRESAS), flotante=True)
+        bloque_suc, dd_suc = campo_opciones("Sucursal", [], flotante=True)
+
+        def _recargar_suc(_e=None):
+            idemp = ID_POR_EMPRESA.get(dd_emp.value or "")
+            sucs = db.listar_sucursales_sipp(idemp) if idemp is not None else []
+            dd_suc.options = [ft.DropdownOption(key=s, text=s) for s in sucs]
+            modal.refrescar()
+        dd_emp.on_change = _recargar_suc
+
+        modal.cuerpo.controls = [
+            ft.Text("¿A qué empresa y sucursal corresponde "
+                    + ("la carpeta?" if metodo == "carpeta" else "el ZIP?"),
+                    size=13, weight=ft.FontWeight.W_600),
+            dd_emp, dd_suc,
+            ft.Text("La sucursal ofrece las cacheadas del SIPP; si no aparece, usa "
+                    "«Actualizar información del SIPP» o escríbela.", size=11, color=GRIS),
+        ]
+
+        async def _continuar(_e=None):
+            empresa = (dd_emp.value or "").strip()
+            sucursal = (dd_suc.value or "").strip()
+            if not empresa:
+                self.app.avisar("Elige una empresa.", NARANJA)
+                return
+            modal.cerrar()
+            if metodo == "carpeta":
+                await self._subir_carpeta(empresa, sucursal)
+            else:
+                await self._subir_zip(empresa, sucursal)
+
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: modal.cerrar()),
+            boton_primario("Continuar", ft.Icons.ARROW_FORWARD, _continuar),
+        ])
+        modal.refrescar()
+
+    async def _subir_carpeta(self, empresa: str = "", sucursal: str = "") -> None:
         """Carga una carpeta de imágenes, incluyendo sus SUBCARPETAS (los
         levantamientos suelen venir organizados por área)."""
         carpeta = await self.app.picker.get_directory_path(
@@ -993,9 +1031,9 @@ class SeccionRegistroActivos:
         if not entradas:
             self.app.avisar("La carpeta no contiene imágenes compatibles.", NARANJA)
             return
-        self._registrar_imagenes(entradas)
+        self._registrar_imagenes(entradas, empresa, sucursal)
 
-    async def _subir_zip(self, _e=None) -> None:
+    async def _subir_zip(self, empresa: str = "", sucursal: str = "") -> None:
         """Carga un levantamiento comprimido (.zip): lo extrae y sigue el proceso
         normal. Las imágenes se guardan en la carpeta de datos de la app para que
         se puedan seguir abriendo desde la tabla."""
@@ -1020,15 +1058,13 @@ class SeccionRegistroActivos:
         if not extraidas:
             self.app.avisar("El ZIP no contiene imágenes compatibles.", NARANJA)
             return
-        self._registrar_imagenes(archivos.listar_imagenes(carpeta))
+        self._registrar_imagenes(archivos.listar_imagenes(carpeta), empresa, sucursal)
 
-    def _registrar_imagenes(self, entradas: list[tuple[str, str]]) -> None:
+    def _registrar_imagenes(self, entradas: list[tuple[str, str]], empresa: str = "",
+                            sucursal: str = "", departamento: str = "") -> None:
         """Da de alta un registro por imagen (parseando su nombre) etiquetándolo con
-        los selectores de contexto actuales. Cuenta cuántas se agregaron y cuántas se
-        omitieron por estar repetidas (misma serie+insumo)."""
-        empresa = self.dd_empresa.value or ""
-        sucursal = (self.tf_sucursal.value or "").strip()
-        departamento = (self.tf_departamento.value or "").strip()
+        la empresa/sucursal indicadas en el modal. Cuenta cuántas se agregaron y
+        cuántas se omitieron por estar repetidas (misma serie+insumo)."""
         agregadas, omitidas = 0, 0
         for nombre, ruta in entradas:
             nombre_insumo, no_serie = parsear_nombre(nombre)
@@ -1543,12 +1579,7 @@ class SeccionRegistroActivos:
         (insumos + activos) y los empleados (global)."""
         from ui.actualizar_sipp import DialogoActualizarSipp
 
-        def _fijar(nombre: str) -> None:
-            self.dd_empresa.value = nombre
-            self._safe_update()
-
-        DialogoActualizarSipp(self.app, set_empresa=_fijar,
-                              al_terminar=self._refrescar).abrir()
+        DialogoActualizarSipp(self.app, al_terminar=self._refrescar).abrir()
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando
