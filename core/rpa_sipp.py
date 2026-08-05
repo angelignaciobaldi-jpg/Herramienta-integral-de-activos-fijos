@@ -117,25 +117,39 @@ _JS_ELEGIR_OPCION = r"""(args) => {
     const norm = s => (s || '')
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
         .replace(/\s+/g, ' ').trim().toLowerCase();
-    // El portal REPITE el ng-model en paneles ocultos (agregar/editar): hay que
-    // tomar el select VISIBLE, no el primero (que suele ser el oculto). Por eso
-    // Situación/Departamento no se aplicaban al formulario real.
+    // El portal REPITE el ng-model en paneles ocultos (agregar/editar) y muchos
+    // combos son "chosen": su <select> real está OCULTO (offsetParent null), por lo
+    // que no se puede filtrar por visible. Se aplica el valor a TODOS los <select>
+    // que coincidan (el activo se sincroniza; los inactivos son inofensivos), y se
+    // sincroniza Angular y el widget chosen en cada uno.
     const sels = Array.from(
         document.querySelectorAll('select[ng-model="' + ngModel + '"]'));
-    const sel = sels.find(s => s.offsetParent !== null) || sels[0];
-    if (!sel) return {ok: false, motivo: 'select-no-encontrado'};
+    if (!sels.length) return {ok: false, motivo: 'select-no-encontrado'};
     const objetivo = norm(texto);
-    const opts = Array.from(sel.options).filter(o => o.value !== '' && o.value !== '0');
-    let opt = opts.find(o => norm(o.textContent) === objetivo)
-           || opts.find(o => norm(o.textContent).startsWith(objetivo))
-           || opts.find(o => norm(o.textContent).includes(objetivo));
-    if (!opt) return {ok: false, motivo: 'opcion-no-encontrada',
-                      disponibles: opts.map(o => o.textContent.trim())};
-    sel.value = opt.value;
     const jq = window.jQuery || window.$;
-    if (jq) { try { jq(sel).val(opt.value).trigger('change').trigger('chosen:updated'); } catch (e) {} }
-    sel.dispatchEvent(new Event('change', {bubbles: true}));
-    return {ok: true, elegido: opt.textContent.trim()};
+    let aplicado = false, elegido = '', disponibles = [];
+    for (const sel of sels) {
+        // OJO: NO excluir value '0' — hay opciones válidas con 0 (p. ej. Situación
+        // "Activo Fijo" = 0). Solo se descarta el placeholder ('' o "Seleccionar").
+        const opts = Array.from(sel.options).filter(
+            o => o.value !== '' && norm(o.textContent) !== 'seleccionar'
+                 && norm(o.textContent) !== 'seleccione');
+        const opt = opts.find(o => norm(o.textContent) === objetivo)
+                 || opts.find(o => norm(o.textContent).startsWith(objetivo))
+                 || opts.find(o => norm(o.textContent).includes(objetivo));
+        if (!opt) { disponibles = opts.map(o => o.textContent.trim()); continue; }
+        sel.value = opt.value;
+        // El evento 'change' nativo del <select> sincroniza el ng-model de Angular;
+        // el trigger de jQuery + chosen:updated refresca el widget "chosen".
+        sel.dispatchEvent(new Event('change', {bubbles: true}));
+        if (jq) {
+            try { jq(sel).val(opt.value).trigger('change').trigger('chosen:updated'); }
+            catch (e) {}
+        }
+        aplicado = true; elegido = opt.textContent.trim();
+    }
+    return aplicado ? {ok: true, elegido}
+                    : {ok: false, motivo: 'opcion-no-encontrada', disponibles};
 }"""
 
 
