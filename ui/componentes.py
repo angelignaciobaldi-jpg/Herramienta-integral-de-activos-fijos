@@ -232,7 +232,8 @@ def campo_texto(etiqueta: str | None = None, *, valor: str = "",
 def campo_opciones(etiqueta: str | None, opciones: Iterable[str], *,
                    valor: str | None = None, width: int | None = None,
                    hint: str | None = None, on_change=None,
-                   flotante: bool = False) -> tuple[ft.Control, ft.Dropdown]:
+                   flotante: bool = False,
+                   editable: bool = True) -> tuple[ft.Control, ft.Dropdown]:
     """Selector. Devuelve `(bloque, campo)`; `flotante` como en `campo_texto`.
 
     Usa `ft.Dropdown` (Material 3), que por dentro es un campo de texto con un
@@ -240,10 +241,15 @@ def campo_opciones(etiqueta: str | None, opciones: Iterable[str], *,
     `DropdownM2` calculaba la suya aparte y nunca alineaba. El parámetro sigue
     llamándose `on_change` aunque el control exponga `on_select`, para no
     obligar a las pantallas a cambiar.
+
+    `editable=True` (por defecto) permite ESCRIBIR para filtrar las opciones
+    (agiliza catálogos largos como empresas/sucursales); pásalo False para un
+    selector cerrado.
     """
     campo = _estilo_campo(ft.Dropdown(
         value=valor, width=width, hint_text=hint,
         label=etiqueta if flotante else None,
+        editable=editable, enable_filter=editable,
         # Sin `expanded_insets`, un DropdownMenu de Material se dimensiona al
         # ANCHO DE SU OPCIÓN MÁS LARGA, no al del contenedor: por eso quedaba
         # más angosto que su celda por mucho STRETCH que llevara el padre.
