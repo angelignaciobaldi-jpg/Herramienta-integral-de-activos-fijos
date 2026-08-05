@@ -555,6 +555,19 @@ class SeccionCartasResponsivas:
             refrescar_conteo()
             filtrar()
 
+        def th(txt, expand=None, ancho=None):
+            return ft.Container(
+                ft.Text(txt, size=11, weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE_VARIANT),
+                expand=expand, width=ancho,
+                padding=ft.Padding.symmetric(horizontal=0, vertical=2))
+
+        encabezado = ft.Container(
+            ft.Row([ft.Container(width=34), th("Insumo", expand=3),
+                    th("Serie", expand=2), th("Etiqueta", ancho=90),
+                    th("Ubicación", expand=2)], spacing=4),
+            border=ft.Border(bottom=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)))
+
         buscador_sec.on_change = lambda _e: filtrar()
         filtrar()
         contenido = ft.Column(
@@ -562,6 +575,7 @@ class SeccionCartasResponsivas:
                      ft.Checkbox(label="Todos",
                                  on_change=lambda e: marcar_todos(e.control.value))],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
+             encabezado,
              ft.Container(lista_sec, padding=ft.Padding.only(left=4))],
             spacing=6, tight=True)
         return ft.ExpansionTile(
