@@ -3,9 +3,24 @@ name: Pipeline de Compilación y Empaquetado Automático
 # Se dispara al PUBLICAR un Release en GitHub (no en push/merge a main).
 # El AutoUpdater de la app lee releases/latest, así que el flujo natural es:
 #   crear el Release con su tag (mayor que el anterior) -> publicar.
+#
+# `workflow_dispatch` añade el botón «Run workflow» de la pestaña Actions. Sirve
+# para recompilar sin publicar un Release, y sobre todo para DIAGNOSTICAR: si el
+# botón corre pero un Release no dispara nada, el problema está en el evento; si
+# no corre ninguno de los dos, Actions está bloqueado a nivel de repositorio.
+#
+# El botón solo aparece cuando este archivo está en la rama POR DEFECTO.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Tag con el que sellar la compilación. Es obligatorio porque el CI
+          escribe este valor en core/version.py: sin él, una ejecución manual
+          publicaría un instalable que miente sobre su propia versión.
+        required: true
 
 # Permite que el GITHUB_TOKEN automático suba el instalador al Release.
 permissions:
@@ -26,7 +41,10 @@ jobs:
       - name: Sincronizar versión con el tag del Release
         shell: pwsh
         run: |
-          $tag = "${{ github.event.release.tag_name }}"
+          # En una ejecución manual no hay release, así que el tag lo pone la
+          # entrada del formulario. El `||` de las expresiones de Actions toma
+          # el primero que no esté vacío.
+          $tag = "${{ github.event.release.tag_name || inputs.tag }}"
           $ver = $tag -replace '^v', ''
           Write-Host "Tag del release: $tag  ->  version: $ver"
           (Get-Content core/version.py) `
@@ -85,9 +103,23 @@ jobs:
 
       # 4. Publicar el instalador como asset del Release (nombre exacto que busca
       #    el AutoUpdater: Instalador_ActivosFijos.exe).
+      #
+      #    Solo cuando el disparo VIENE de un Release: en una ejecución manual no
+      #    hay ninguno al que adjuntarlo, y la acción fallaría al final de un
+      #    build de media hora.
       - name: Subir Instalador al Release de GitHub
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: Output/Instalador_ActivosFijos.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # En las manuales el instalable se deja como artefacto de la ejecución, que
+      # es de donde se descarga para probarlo sin publicar nada.
+      - name: Guardar Instalador como artefacto (ejecución manual)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Instalador_ActivosFijos
+          path: Output/Instalador_ActivosFijos.exe
