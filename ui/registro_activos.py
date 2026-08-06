@@ -992,8 +992,8 @@ class SeccionRegistroActivos:
                     color=GRIS),
             ft.Text("SIPP", size=12, weight=ft.FontWeight.W_700, expand=True,
                     color=GRIS),
-            ft.Text("Excel", size=12, weight=ft.FontWeight.W_700, expand=True,
-                    color=GRIS),
+            ft.Text("Excel/levantamiento", size=12, weight=ft.FontWeight.W_700,
+                    expand=True, color=GRIS),
         ], spacing=8)
 
         iguales = [d for d in difs if not d.difiere]
@@ -1022,8 +1022,13 @@ class SeccionRegistroActivos:
                                   weight=ft.FontWeight.W_600, color=GRIS))
             cuerpo += [_fila_igual(d) for d in iguales]
 
+        # Alto estimado del cuerpo (el Modal solo activa su scroll si se le pasa
+        # un alto; luego lo recorta a lo que quepa en pantalla). Cada diferencia
+        # ocupa ~2 líneas; los coincidentes, una.
+        alto_est = (200 + len(distintos) * 72
+                    + (52 + len(iguales) * 30 if iguales else 0))
         modal = Modal(self.page, "Comparar SIPP vs Excel",
-                      subtitulo=reg.nombre_insumo, ancho=680)
+                      subtitulo=reg.nombre_insumo, ancho=680, alto_cuerpo=alto_est)
         modal.cuerpo.controls = cuerpo
 
         def aplicar(_e=None) -> None:
