@@ -1033,14 +1033,27 @@ class SeccionRegistroActivos:
 
         def aplicar(_e=None) -> None:
             datos = dict(reg.datos())
+            cambios_col: dict = {}       # empresa / sucursal / departamento
+            nuevo_insumo = None
+            nueva_serie = None
             n_push = 0
             no_empujables: list[str] = []
             for d in distintos:
                 c = d.campo
-                if eleccion[c.clave] == "sipp":
-                    datos[c.clave] = d.sipp_crudo   # traer el dato del SIPP (local)
-                else:                                # gana el Excel
-                    datos[c.clave] = d.excel_crudo
+                gana_excel = eleccion[c.clave] == "excel"
+                valor = d.excel_crudo if gana_excel else d.sipp_crudo
+                # Reflejar el valor donde vive: en datos_json (formulario/RPA) y/o
+                # en la columna del registro (listado y campos del formulario).
+                if c.clave_datos:
+                    datos[c.clave_datos] = valor
+                if c.columna == "nombre_insumo":
+                    nuevo_insumo = valor or None
+                elif c.columna == "no_serie":
+                    nueva_serie = valor
+                elif c.columna:            # empresa / sucursal / departamento
+                    cambios_col[c.columna] = valor
+                # ¿se enviará al SIPP? Solo lo empujable elegido como Excel.
+                if gana_excel:
                     if c.empujable and c.ng_model:
                         n_push += 1
                     else:
@@ -1048,7 +1061,10 @@ class SeccionRegistroActivos:
             # Si hay algo que empujar al SIPP, se marca modificado para que el RPA
             # de modificación lo reenvíe. Si solo se conservó el SIPP, no hace falta.
             db.actualizar_datos_levantamiento(
-                reg.id, datos=datos, modificado=True if n_push else None)
+                reg.id, datos=datos, nombre_insumo=nuevo_insumo,
+                no_serie=nueva_serie, modificado=True if n_push else None)
+            if cambios_col:
+                db.actualizar_ubicacion_levantamiento(reg.id, **cambios_col)
             modal.cerrar()
             self._refrescar()
             if n_push:
