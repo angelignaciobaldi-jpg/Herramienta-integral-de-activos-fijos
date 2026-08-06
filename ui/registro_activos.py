@@ -35,7 +35,7 @@ from ui.captura_activo import DialogoCapturaActivo
 from ui.carga_masiva import DialogoCargaMasiva
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.componentes import (GUTTER_SCROLL, Modal, Pestanas, boton_herramienta,
-                            boton_primario, boton_secundario, buscador,
+                            boton_primario, boton_secundario,
                             campo_opciones, campo_tabla_opciones,
                             campo_tabla_texto, campo_texto, tarjeta_seccion)
 from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
@@ -180,16 +180,10 @@ class SeccionRegistroActivos:
             ],
             al_cambiar=self._cambiar_tab, activa=self._tab)
 
-        # Buscador: con miles de activos importados es la forma práctica de
-        # aislar un grupo (p. ej. todas las LAPTOP) y clasificarlo de golpe.
-        # Filtra al pulsar Enter (no en cada tecla: repintar la tabla cuesta).
-        self.tf_buscar = buscador(
-            "Buscar insumo, etiqueta, serie o ubicación… (Enter)",
-            on_submit=self._aplicar_filtro)
+        # Sin buscador global: el filtrado se hace con los filtros por columna
+        # (empresa, sucursal, departamento, insumo, etiqueta, serie). `_filtro`
+        # se conserva vacío porque las consultas SQL lo siguen recibiendo.
         self._filtro = ""
-        self._btn_limpiar = ft.IconButton(
-            icon=ft.Icons.CLOSE, icon_size=18, tooltip="Limpiar búsqueda",
-            visible=False, on_click=self._limpiar_filtro)
 
         # Herramientas sobre la selección (a la derecha de las pestañas).
         self.barra_masiva = ft.Row(
@@ -211,7 +205,7 @@ class SeccionRegistroActivos:
         # --- Filtros por columna (estilo Excel) -------------------------------
         # Categóricos (empresa/sucursal/departamento) como desplegable de valores
         # distintos; texto (insumo/etiqueta/serie) como "contiene". Se combinan
-        # entre sí y con el buscador global; el filtrado lo hace SQLite.
+        # entre sí; el filtrado lo hace SQLite.
         self._filtros_col: dict = {}
         # Rótulo corto para la opción "sin filtro" (así no se corta en el combo).
         self._TODOS = {"empresa": "Todas", "sucursal": "Todas",
@@ -317,8 +311,6 @@ class SeccionRegistroActivos:
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True,
                        run_spacing=8),
-                # Buscador global (la acción de RPA baja a la línea de filtros).
-                ft.Row([self.tf_buscar, self._btn_limpiar], spacing=4, tight=True),
                 # Filtros por columna + la acción de RPA de la pestaña, en la MISMA
                 # línea: filtros a la izquierda, botón de RPA a la derecha.
                 ft.Row([self.barra_filtros, self._barra_rpa],
@@ -387,16 +379,6 @@ class SeccionRegistroActivos:
     def _ids_actuales(self) -> list[int]:
         """Ids de TODO lo que cumple pestaña + filtro (sin traer las filas)."""
         return db.ids_levantamiento(self._estatus_tab(), self._filtro, self._filtros_col)
-
-    def _aplicar_filtro(self, _e=None) -> None:
-        self._filtro = (self.tf_buscar.value or "").strip().lower()
-        self._btn_limpiar.visible = bool(self._filtro)
-        self._pagina = 0
-        self._refrescar()
-
-    def _limpiar_filtro(self, _e=None) -> None:
-        self.tf_buscar.value = ""
-        self._aplicar_filtro()
 
     # ------------------------------------------------ filtros por columna
     def _set_filtro_col(self, columna: str, valor: str) -> None:
