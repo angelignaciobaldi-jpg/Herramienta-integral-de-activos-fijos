@@ -1,4 +1,4 @@
-"""Componentes de interfaz reutilizables (sistema de diseño; ver DISENO.md).
+﻿"""Componentes de interfaz reutilizables (sistema de diseño; ver DISENO.md).
 
 Adaptados del mockup `ejemplos/registro.html`. Esta es la forma ESTÁNDAR de crear
 botones, pestañas, campos y tarjetas de sección en la app: al centralizarlos, un
@@ -48,6 +48,41 @@ GAP_LG = 24
 GUTTER_SCROLL = 14
 
 _FORMA = ft.RoundedRectangleBorder(radius=RADIO)
+
+# Puntero de "esto se pulsa". Se declara EXPLÍCITO por estado en vez de confiar
+# en el de fábrica de Material: así el botón apagado no ofrece una mano que no
+# lleva a nada.
+CURSOR_BOTON = {ft.ControlState.DEFAULT: ft.MouseCursor.CLICK,
+                ft.ControlState.DISABLED: ft.MouseCursor.BASIC}
+
+
+def puntero_mano(caja: ft.Container) -> ft.Container:
+    """Hace que el puntero cambie a la mano sobre una caja pulsable.
+
+    **`ft.Container` NO expone `mouse_cursor`** —solo lo tienen los botones de
+    Material y `GestureDetector`—, así que una caja con `on_click` se queda con
+    la flecha y no se lee como pulsable.
+
+    El `GestureDetector` va DENTRO, envolviendo el contenido, y no por fuera de
+    la caja: un Container pulsable dibuja su PROPIA región de ratón, y cuando
+    hay regiones anidadas Flutter se queda con el cursor de la más interna. Por
+    fuera, la caja lo pisaba en cuanto el puntero entraba de verdad —en el
+    select se alcanzaba a ver el cambio solo en el filo del borde, y sobre los
+    chevrones no se veía nunca—.
+
+    Se MUTA la caja y se devuelve la misma, para no meter un control extra en
+    el árbol: quien la construye la sigue teniendo tal cual, con su `on_click`,
+    su `ink` y su `on_hover` intactos. El envoltorio va sin manejadores, y Flet
+    solo registra los reconocedores de gesto de las devoluciones que no son
+    `None`, así que tampoco intercepta el clic.
+
+    Queda fuera el RELLENO de la caja (2–8px, según el control): ahí el cursor
+    sigue siendo la flecha. Cubrirlo exigiría quitarle el `on_click` al
+    Container y con él la tinta, que se nota más que esa orilla.
+    """
+    caja.content = ft.GestureDetector(content=caja.content,
+                                      mouse_cursor=ft.MouseCursor.CLICK)
+    return caja
 # Elevación nivel 1 del diseño, para tarjetas de sección y el marco de la tabla.
 SOMBRA_N1 = ft.BoxShadow(
     blur_radius=4, offset=ft.Offset(0, 2),
@@ -74,6 +109,33 @@ def boton_primario(texto: str, icono=None, on_click=None,
             shape=_FORMA,
             padding=ft.Padding.symmetric(horizontal=PAD_H, vertical=PAD_V),
             elevation=1,
+            mouse_cursor=CURSOR_BOTON,
+        ),
+    )
+
+
+def boton_primario_icono(icono, tooltip: str, on_click=None, *,
+                         disabled: bool = False) -> ft.Control:
+    """Acción principal reducida a su ícono, con el texto en el TOOLTIP.
+
+    Mide `ALTO_CAMPO_TABLA` de lado para casar con `SelectCompacto` en una barra
+    de filtros. Aquí sí se puede fijar la altura: un botón respeta
+    `width`/`height`, a diferencia de los campos de Material (ver la nota de
+    `_estilo_campo`), que la recalculan por su cuenta.
+
+    El tooltip es OBLIGATORIO: sin texto visible, es lo único que dice qué hace.
+    """
+    return ft.IconButton(
+        icon=icono, tooltip=tooltip, on_click=on_click, disabled=disabled,
+        width=ALTO_CAMPO_TABLA, height=ALTO_CAMPO_TABLA,
+        icon_size=round(ALTO_CAMPO_TABLA * 0.5),
+        style=ft.ButtonStyle(
+            bgcolor=ft.Colors.PRIMARY,
+            color=ft.Colors.ON_PRIMARY,
+            shape=_FORMA,
+            padding=ft.Padding.all(0),
+            elevation=1,
+            mouse_cursor=CURSOR_BOTON,
         ),
     )
 
@@ -89,6 +151,7 @@ def boton_secundario(texto: str, icono=None, on_click=None,
             side=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT),
             shape=_FORMA,
             padding=ft.Padding.symmetric(horizontal=PAD_H, vertical=PAD_V),
+            mouse_cursor=CURSOR_BOTON,
         ),
     )
 
@@ -103,6 +166,7 @@ def boton_herramienta(texto: str, icono=None, on_click=None,
             color=ft.Colors.ERROR if destructivo else ft.Colors.SECONDARY,
             shape=_FORMA,
             padding=ft.Padding.symmetric(horizontal=GAP_MD, vertical=GAP_SM),
+            mouse_cursor=CURSOR_BOTON,
         ),
     )
 
@@ -127,12 +191,12 @@ def icono_accion(icono, tooltip: str, on_click, *, color=None) -> ft.Container:
         Material. Con 28 (20 de ícono + 4+4 de relleno) el campo se estiraba
         4px y quedaba más alto que sus vecinos.
     """
-    return ft.Container(
+    return puntero_mano(ft.Container(
         ft.Icon(icono, size=18, color=color or ft.Colors.PRIMARY_CONTAINER),
         tooltip=tooltip, on_click=on_click, ink=True,
         width=_LADO_ICONO_ACCION, height=_LADO_ICONO_ACCION,
         padding=0, border_radius=RADIO,
-        alignment=ft.Alignment(0, 0))
+        alignment=ft.Alignment(0, 0)))
 
 
 def _bloque_etiquetado(etiqueta: str, campo: ft.Control,
@@ -304,21 +368,33 @@ class CampoFecha:
         self.campo.value = v or ""
 
     def _abrir(self, _e=None) -> None:
-        self.page.show_dialog(ft.DatePicker(
-            value=parse_fecha(self.campo.value),
-            first_date=_FECHA_MIN, last_date=_FECHA_MAX,
-            locale=ft.Locale("es", "MX"),
-            help_text="Selecciona la fecha", cancel_text="Cancelar",
-            confirm_text="Aceptar", on_change=self._elegido))
+        _abrir_calendario(self.page, self.campo.value, self._elegido)
 
-    def _elegido(self, e) -> None:
-        fecha = getattr(e.control, "value", None)
-        if not fecha:
-            return
-        self.campo.value = fmt_fecha(fecha)
+    def _elegido(self, texto: str) -> None:
+        self.campo.value = texto
         _refrescar(self.campo)
         if callable(self._on_change):
-            self._on_change(self.campo.value)
+            self._on_change(texto)
+
+
+def _abrir_calendario(page, valor: str, al_elegir: Callable[[str], None]) -> None:
+    """Abre el DatePicker de Material en español y devuelve la fecha formateada.
+
+    Va aparte de `CampoFecha` para que la configuración del calendario —idioma,
+    rango admitido, textos de los botones— viva en un solo sitio si vuelve a
+    hacer falta otra caja que lo dispare.
+    """
+    def elegido(e) -> None:
+        fecha = getattr(e.control, "value", None)
+        if fecha:
+            al_elegir(fmt_fecha(fecha))
+
+    page.show_dialog(ft.DatePicker(
+        value=parse_fecha(valor),
+        first_date=_FECHA_MIN, last_date=_FECHA_MAX,
+        locale=ft.Locale("es", "MX"),
+        help_text="Selecciona la fecha", cancel_text="Cancelar",
+        confirm_text="Aceptar", on_change=elegido))
 
 
 # --- Campos dentro de una fila de tabla ----------------------------------
@@ -354,20 +430,31 @@ def _caja_tabla(contenido: ft.Control, ancho: int | None) -> ft.Container:
         clip_behavior=ft.ClipBehavior.ANTI_ALIAS)
 
 
-def campo_tabla_texto(*, valor: str = "", on_blur=None,
-                      ancho: int | None = None) -> ft.Container:
-    """Campo de texto de una celda. `on_blur` recibe el TextField en `e.control`."""
+def campo_tabla_texto(*, valor: str = "", on_blur=None, on_submit=None,
+                      ancho: int | None = None,
+                      alineacion=ft.TextAlign.LEFT) -> ft.Container:
+    """Campo de texto de una celda. `on_blur` recibe el TextField en `e.control`.
+
+    `on_submit` es el Enter, para los campos que confirman en vez de esperar a
+    que se pierda el foco (el salto de página del paginador). `alineacion`
+    centra o alinea a la derecha lo que no sea texto corrido: un número dentro
+    de una caja estrecha se lee mejor centrado.
+
+    El campo devuelto es el CONTENIDO de la caja: quien necesite leer `.value`
+    tiene que bajar a `caja.content`.
+    """
     campo = ft.TextField(
-        value=valor, on_blur=on_blur,
+        value=valor, on_blur=on_blur, on_submit=on_submit,
         # `collapsed` quita el decorador de Material —el que imponía su propia
         # altura—, así el alto lo manda la caja y no el control.
         collapsed=True, border=ft.InputBorder.NONE,
         content_padding=ft.Padding.all(0),
         text_size=_TEXTO_TABLA,
-        # Alineado a la IZQUIERDA en horizontal y CENTRADO en vertical: es lo
-        # que hace legible una columna de datos (los valores arrancan todos en
-        # el mismo punto) sin que el texto se pegue al borde superior.
-        text_align=ft.TextAlign.LEFT,
+        # Por omisión alineado a la IZQUIERDA en horizontal: es lo que hace
+        # legible una columna de datos (los valores arrancan todos en el mismo
+        # punto). El CENTRADO vertical no se negocia: sin él el texto se pega al
+        # borde superior de la caja.
+        text_align=alineacion,
         text_vertical_align=ft.VerticalAlignment.CENTER)
     return _caja_tabla(campo, ancho)
 
@@ -397,7 +484,7 @@ def _dialogo_opciones(page, opciones: list[str], titulo: str, actual: str,
         encontrados = resultados
         if encontrados:
             lista.controls = [
-                ft.Container(
+                puntero_mano(ft.Container(
                     ft.Text(o, size=13,
                             weight=ft.FontWeight.BOLD if o == actual else None,
                             color=ft.Colors.PRIMARY if o == actual else None),
@@ -407,7 +494,7 @@ def _dialogo_opciones(page, opciones: list[str], titulo: str, actual: str,
                     padding=ft.Padding.only(left=12, right=12 + GUTTER_SCROLL,
                                             top=8, bottom=8),
                     border_radius=RADIO, ink=True,
-                    on_click=lambda _e, o=o: _elegir(o))
+                    on_click=lambda _e, o=o: _elegir(o)))
                 for o in encontrados]
         else:
             lista.controls = [ft.Container(
@@ -437,6 +524,91 @@ def _dialogo_opciones(page, opciones: list[str], titulo: str, actual: str,
     modal.abrir()
 
 
+class SelectCompacto:
+    """Select de `ALTO_CAMPO_TABLA` px con buscador, en vez de los 56 de Material.
+
+    Nació para las celdas de la tabla —donde ningún campo de Material se deja
+    medir (ver la nota de arriba)— pero sirve igual en cualquier barra donde un
+    campo de alto completo sobra: los filtros del tablero, por ejemplo. Es la
+    ÚNICA forma de tener un select bajo en este proyecto; `dense=True` sobre un
+    `ft.Dropdown` no hace absolutamente nada.
+
+    Expone `.control` y `.value`, el mismo contrato que `CampoEtiquetado` y
+    `CampoFecha`, para poder tratarlo igual desde un formulario.
+    """
+
+    def __init__(self, page, opciones: Iterable[str], *, valor: str = "",
+                 ancho: int | None = None, titulo: str = "Seleccionar",
+                 on_change=None, disabled: bool = False) -> None:
+        self.page = page
+        self.titulo = titulo
+        self._on_change = on_change
+        self._opciones = list(opciones)
+
+        # Alineado a la IZQUIERDA en horizontal; el centrado vertical lo aporta
+        # el Row del disparador.
+        self._etiqueta = ft.Text(valor or "", size=_TEXTO_TABLA, expand=True,
+                                 text_align=ft.TextAlign.LEFT, no_wrap=True,
+                                 overflow=ft.TextOverflow.ELLIPSIS)
+        self.control = _caja_tabla(
+            ft.Row([self._etiqueta,
+                    ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=_ICONO_TABLA,
+                            color=ft.Colors.ON_SURFACE_VARIANT)],
+                   spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ancho)
+        self.control.on_click = self._abrir
+        self.control.ink = True
+        # El cursor se guarda aparte porque el select se apaga y se enciende: es
+        # el `GestureDetector` que `puntero_mano` deja como contenido de la caja.
+        self._cursor = puntero_mano(self.control).content
+        self.disabled = disabled
+
+    # ------------------------------------------------------------ contenido
+    @property
+    def value(self) -> str:
+        return self._etiqueta.value or ""
+
+    @value.setter
+    def value(self, v: str) -> None:
+        self._etiqueta.value = v or ""
+
+    @property
+    def disabled(self) -> bool:
+        return bool(self.control.disabled)
+
+    @disabled.setter
+    def disabled(self, v: bool) -> None:
+        # `disabled` en un Container solo bloquea el evento: no lo apaga a la
+        # vista. La opacidad es lo que comunica que el control no aplica.
+        self.control.disabled = bool(v)
+        self.control.opacity = 0.5 if v else 1.0
+        # `GestureDetector.mouse_cursor` es un valor suelto, sin estados como el
+        # de los botones, así que el apagado se hace a mano: un select bloqueado
+        # que ofrece la mano promete un menú que no va a abrirse.
+        self._cursor.mouse_cursor = (ft.MouseCursor.BASIC if v
+                                     else ft.MouseCursor.CLICK)
+
+    def set_opciones(self, opciones: Iterable[str], valor: str = "") -> None:
+        """Repuebla el menú (filtros en cascada) y fija el valor mostrado."""
+        self._opciones = list(opciones)
+        self.value = valor
+
+    # -------------------------------------------------------------- interno
+    def _abrir(self, _e=None) -> None:
+        if self.page is not None:
+            _dialogo_opciones(self.page, self._opciones, self.titulo,
+                              self.value, self._elegir)
+
+    def _elegir(self, opcion: str) -> None:
+        self.value = opcion
+        _refrescar(self._etiqueta)
+        if callable(self._on_change):
+            # Se imita la forma de un evento de Flet (`e.control.value`) para que
+            # quien lo use no note que por dentro no es un control nativo.
+            self._on_change(SimpleNamespace(control=SimpleNamespace(value=opcion)))
+
+
+
 def campo_tabla_opciones(opciones: Iterable[str], *, valor: str | None = None,
                          on_change=None, ancho: int | None = None,
                          page=None,
@@ -449,33 +621,13 @@ def campo_tabla_opciones(opciones: Iterable[str], *, valor: str | None = None,
 
     `on_change` recibe un evento con `e.control.value`, igual que un campo
     nativo de Flet, para que las pantallas no noten la diferencia.
+
+    Es un atajo sobre `SelectCompacto` que devuelve solo el control: en una celda
+    de tabla el valor se lee por el `on_change` de la fila, no consultando el
+    campo, así que no hace falta conservar el objeto.
     """
-    opciones = list(opciones)
-    # Misma alineación que `campo_tabla_texto`: izquierda en horizontal, y el
-    # centrado vertical lo aporta el Row del disparador.
-    etiqueta = ft.Text(valor or "", size=_TEXTO_TABLA, expand=True,
-                       text_align=ft.TextAlign.LEFT, no_wrap=True,
-                       overflow=ft.TextOverflow.ELLIPSIS)
-
-    def elegir(opcion: str) -> None:
-        etiqueta.value = opcion
-        _refrescar(etiqueta)
-        if callable(on_change):
-            on_change(SimpleNamespace(control=SimpleNamespace(value=opcion)))
-
-    def abrir(_e=None) -> None:
-        if page is not None:
-            _dialogo_opciones(page, opciones, titulo, etiqueta.value or "", elegir)
-
-    caja = _caja_tabla(
-        ft.Row([etiqueta,
-                ft.Icon(ft.Icons.ARROW_DROP_DOWN, size=_ICONO_TABLA,
-                        color=ft.Colors.ON_SURFACE_VARIANT)],
-               spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        ancho)
-    caja.on_click = abrir
-    caja.ink = True
-    return caja
+    return SelectCompacto(page, opciones, valor=valor or "", ancho=ancho,
+                          titulo=titulo, on_change=on_change).control
 
 
 def buscador(hint: str, on_submit=None, width: int | None = 420, *,
@@ -699,7 +851,7 @@ def fila_resultado(clave: str, titulo: str, subtitulo: str = "", *,
     El relleno derecho incluye `GUTTER_SCROLL` porque estos listados llegan al
     filo del contenedor para que su barra de scroll no se monte sobre el texto.
     """
-    return ft.Container(
+    return puntero_mano(ft.Container(
         ft.Row(
             [ft.Container(ft.Text(clave, size=12, weight=ft.FontWeight.BOLD,
                                   color=ft.Colors.PRIMARY_CONTAINER,
@@ -714,7 +866,7 @@ def fila_resultado(clave: str, titulo: str, subtitulo: str = "", *,
             spacing=GAP_SM, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         padding=ft.Padding.only(left=12, right=12 + GUTTER_SCROLL,
                                 top=8, bottom=8),
-        border_radius=RADIO, ink=True, on_click=on_click)
+        border_radius=RADIO, ink=True, on_click=on_click))
 
 
 def lista_resultados(alto: int = _ALTO_LISTA_MENU) -> ft.Column:
@@ -787,7 +939,7 @@ class Pestanas:
             )
             self._items[clave] = {"cont": cont, "ico": ico, "txt": txt,
                                   "base": texto}
-            botones.append(cont)
+            botones.append(puntero_mano(cont))   # muta y devuelve `cont`
 
         # La PISTA es lo que distingue a un control segmentado de unos botones
         # sueltos: agrupa visualmente las opciones y hace de fondo del activo.

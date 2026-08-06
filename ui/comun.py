@@ -25,6 +25,21 @@ GRIS = ft.Colors.ON_SURFACE_VARIANT
 CENTRO = ft.Alignment(0, 0)
 
 
+# --- Eventos -------------------------------------------------------------
+def puntero_encima(e) -> bool:
+    """Si el evento de `on_hover` es de ENTRADA (True) o de salida (False).
+
+    Existe por una trampa que costó cara: en Flet 0.85 `e.data` de `on_hover` es
+    un **booleano** (lo dice la documentación de `Container.on_hover`), pero las
+    versiones viejas mandaban la cadena `"true"`, y ese es el idiom que corre por
+    todos los tutoriales. Comparar contra `"true"` da SIEMPRE falso, así que el
+    manejador se ejecuta, toma la rama de "salió" y no se ve absolutamente nada.
+
+    Se aceptan las dos formas para no atarse a la versión de Flet.
+    """
+    return e.data is True or e.data == "true"
+
+
 # --- Fechas --------------------------------------------------------------
 # Formato ÚNICO de fecha en toda la app (México). Si algún día cambia, se
 # cambia aquí y en CampoFecha.

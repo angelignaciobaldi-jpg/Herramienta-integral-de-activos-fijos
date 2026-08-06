@@ -187,21 +187,35 @@ class AppActivosFijos:
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
-        # Carga inicial de registros guardados (si la pantalla lo soporta).
-        cargar = getattr(self.registro, "cargar_desde_db", None)
-        if callable(cargar):
-            cargar()
+        # Carga inicial de CADA pantalla que lo soporte, no solo de Registro: el
+        # contrato dice que `cargar_desde_db` es opcional y que el shell la llama
+        # si existe (ver CLAUDE.md), pero aquí estaba escrito a mano un único
+        # nombre, así que el tablero arrancaba vacío hasta que alguien pulsaba
+        # «Buscar». Se recorre la misma tupla que el `_on_resize` de arriba.
+        #
+        # Va DESPUÉS de `page.add`: alguna de estas cargas lanza trabajo con
+        # `run_task`, y hasta que la pantalla no está montada no hay a quién
+        # refrescar.
+        for pantalla in (self.dashboard, self.registro, self.config):
+            cargar = getattr(pantalla, "cargar_desde_db", None)
+            if callable(cargar):
+                cargar()
 
     # ------------------------------------------------------ navegación
     def _construir_nav(self) -> ft.Control:
         self._nav_activa = 0
         self._nav_items: list[dict] = []
         definiciones = [
-            ("Dashboard activos fijos", ft.Icons.DASHBOARD),
+            ("Dashboard", ft.Icons.DASHBOARD),
             ("Registro de activos", ft.Icons.INVENTORY_2),
             ("Generador de códigos QR", ft.Icons.QR_CODE_2),
             ("Cartas responsivas", ft.Icons.DESCRIPTION),
         ]
+        # Import perezoso, como el resto de `ui` en este archivo (ver la nota de
+        # arriba sobre por qué solo `flet` y `core.rutas` van al tope).
+        from ui.componentes import puntero_mano
+        from ui.comun import puntero_encima
+
         controles = []
         for idx, (texto, icono) in enumerate(definiciones):
             ico = ft.Icon(icono, size=18)
@@ -214,13 +228,13 @@ class AppActivosFijos:
                 padding=ft.Padding.symmetric(horizontal=16, vertical=12),
                 border_radius=8,
                 on_click=lambda _e, i=idx: self._seleccionar_nav(i),
-                on_hover=lambda e, i=idx: self._hover_nav(i, e.data == "true"),
+                on_hover=lambda e, i=idx: self._hover_nav(i, puntero_encima(e)),
                 animate=ft.Animation(160, ft.AnimationCurve.EASE_OUT),
             )
             self._nav_items.append(
                 {"container": cont, "icono": ico, "texto": txt, "hover": False})
             self._estilo_nav(idx)
-            controles.append(cont)
+            controles.append(puntero_mano(cont))   # muta y devuelve `cont`
         fila = ft.Row(
             controles, scroll=ft.ScrollMode.AUTO, spacing=6,
             alignment=ft.MainAxisAlignment.CENTER,
@@ -512,8 +526,11 @@ async def main(page: ft.Page) -> None:
     try:
         from ui import tema
 
-        page.theme = tema.construir_tema(False, _barra)
-        page.dark_theme = tema.construir_tema(True, _barra)
+        # Inter se registra ANTES de construir los temas: si el .ttf no está en
+        # los assets devuelve None y ambos temas caen a la fuente del sistema.
+        _fuente = tema.registrar_fuente(page)
+        page.theme = tema.construir_tema(False, _barra, _fuente)
+        page.dark_theme = tema.construir_tema(True, _barra, _fuente)
     except Exception:  # noqa: BLE001 — el tema no debe impedir el arranque
         page.theme = ft.Theme(scrollbar_theme=_barra)
         page.dark_theme = ft.Theme(scrollbar_theme=_barra)

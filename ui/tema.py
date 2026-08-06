@@ -18,12 +18,44 @@ los fusionó con `surface`: `background`/`on-background` y `surface-variant`.
 
 from __future__ import annotations
 
+import os
+
 import flet as ft
 
-# Inter NO está en el repo (no hay .ttf/.otf). Al agregarla y registrarla con
-# `page.fonts = {"Inter": "..."}`, poner "Inter" aquí y todo el tema la adopta.
-# Con None, Flet usa la tipografía del sistema (Segoe UI en Windows).
-FUENTE: str | None = None
+from core import rutas
+
+# --- Tipografía Inter -----------------------------------------------------
+# Inter es la fuente del diseño (ver DISENO.md). Su licencia es la SIL Open Font
+# License, así que se puede redistribuir dentro del instalable.
+#
+# El .ttf todavía no está en el repo: se descarga de
+# https://github.com/rsms/inter/releases y se deja en `Fuentes/`, carpeta que
+# `construir.bat` empaqueta igual que `Imagenes/`. CONVIENE versionarlo (son
+# ~800 KB una sola vez): si solo vive en una máquina, el instalable que produzca
+# el CI sale con otra tipografía que el que se compila en local.
+FAMILIA = "Inter"
+_CARPETA_FUENTES = "Fuentes"
+# Se usa la VARIABLE: un solo archivo cubre de 400 a 900, que es todo el rango
+# que pide el TextTheme. Con instancias estáticas habría que registrar una
+# familia por peso ("Inter", "Inter Bold"…) y fijarla en cada estilo a mano.
+_ARCHIVO = "Inter-VariableFont_opsz,wght.ttf"
+
+
+def registrar_fuente(page) -> str | None:
+    """Registra Inter en la página si el archivo está en los assets.
+
+    Devuelve la familia para el tema, o None para que Flet caiga a la tipografía
+    del sistema (Segoe UI en Windows). Es best-effort a propósito: la app debe
+    arrancar aunque falte el archivo, y las MÉTRICAS del diseño (tamaños, alto de
+    línea, interletraje) ya están aplicadas en `TIPOGRAFIA`, así que sin Inter
+    cambia la forma de las letras, no la retícula.
+    """
+    if not os.path.exists(os.path.join(rutas.BUNDLE, _CARPETA_FUENTES, _ARCHIVO)):
+        return None
+    # La ruta que recibe Flet es RELATIVA a `assets_dir` (ver `ft.run` al final
+    # de app.py) y siempre con '/', no con el separador de Windows.
+    page.fonts = {FAMILIA: f"{_CARPETA_FUENTES}/{_ARCHIVO}"}
+    return FAMILIA
 
 # Colores de la barra de título nativa (DWM). Se mantienen a juego con
 # `surface`/`on-surface` de cada esquema para que la ventana se vea de una pieza.
@@ -163,15 +195,53 @@ CODIGO = ft.TextStyle(size=13, weight=ft.FontWeight.W_400, height=1.385,
                       font_family="monospace")
 
 
-def construir_tema(oscuro: bool, scrollbar_theme=None) -> ft.Theme:
+# --- Colores semánticos fuera del esquema --------------------------------
+# Material 3 no tiene un rol para "dinero": sus roles son de JERARQUÍA (primary,
+# surface, error…), no de dominio. Este verde vive aquí, como el resto del color,
+# para que ninguna pantalla escriba un tono a mano.
+#
+# El MISMO valor sirve en claro y en oscuro porque solo viste elementos no
+# textuales —banda de acento e ícono—, donde el umbral es 3:1 y no 4.5:1. Medido
+# contra `surface_container_lowest` de cada esquema da 4.12:1 en claro y 4.69:1
+# en oscuro, así que ninguno de los dos se queda corto.
+VERDE_DINERO = ft.Colors.GREEN_700
+# El fondo de la pastilla se DERIVA con transparencia en vez de fijar un verde
+# claro: así se apoya sobre la superficie de cada tema y no impone un tono pálido
+# que en oscuro sería un parche luminoso.
+VERDE_DINERO_FONDO = ft.Colors.with_opacity(0.15, ft.Colors.GREEN_700)
+
+# Acentos de los dos grupos del detalle de inversión. Tampoco hay rol de
+# Material para «vigente» y «dado de baja»: los suyos son de jerarquía, y usar
+# `primary`/`outline` dejaba el segundo bloque en gris, que se lee como
+# deshabilitado y no como una categoría.
+#
+# El verde es el mismo de la tarjeta que abre el modal, así que el detalle se
+# reconoce como suyo. El ámbar contrasta con él sin ser `error`: un activo dado
+# de baja no es un fallo, es otra categoría.
+AMBAR_BAJA = ft.Colors.AMBER_800
+
+
+def tenue(color: str, opacidad: float = 0.12) -> str:
+    """Fondo derivado de un acento, por transparencia.
+
+    Se DERIVA en vez de fijar un tono pálido —igual que `VERDE_DINERO_FONDO`—
+    para que se apoye sobre la superficie de cada tema: un pastel fijo sería un
+    parche luminoso en oscuro.
+    """
+    return ft.Colors.with_opacity(opacidad, color)
+
+
+def construir_tema(oscuro: bool, scrollbar_theme=None,
+                   fuente: str | None = None) -> ft.Theme:
     """Tema completo (color + tipografía) para el modo pedido.
 
-    `scrollbar_theme` se recibe en vez de fijarse aquí porque lo define el shell
-    y debe ser el MISMO objeto en el tema claro y en el oscuro.
+    `scrollbar_theme` y `fuente` se reciben en vez de fijarse aquí porque los
+    resuelve el shell y deben ser LOS MISMOS en el tema claro y en el oscuro.
+    `fuente` sale de `registrar_fuente()`; con None manda la del sistema.
     """
     return ft.Theme(
         color_scheme=ESQUEMA_OSCURO if oscuro else ESQUEMA_CLARO,
         text_theme=TIPOGRAFIA,
-        font_family=FUENTE,
+        font_family=fuente,
         scrollbar_theme=scrollbar_theme,
     )
