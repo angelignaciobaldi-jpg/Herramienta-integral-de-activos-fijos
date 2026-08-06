@@ -64,6 +64,138 @@ class ProveedorMock(ProveedorActivos):
         return resultado
 
 
+def _norm(valor) -> str:
+    """Normaliza un identificador (etiqueta o serie) para comparar sin ruido."""
+    return str(valor or "").strip().upper()
+
+
+class SinCacheActivos(Exception):
+    """No hay activos del SIPP descargados (cacheados) para esa empresa."""
+
+
+class ProveedorSipp(ProveedorActivos):
+    """Búsqueda REAL contra los activos YA descargados del SIPP (caché
+    `activos_sipp`) de una empresa.
+
+    Un activo del levantamiento se considera *dado de alta* si su ETIQUETA o su
+    NÚMERO DE SERIE coincide con los de algún activo cacheado (match por
+    cualquiera de los dos). El caché se llena desde el módulo de QR
+    ("Descargar activos del SIPP") o el propio botón de búsqueda.
+    """
+
+    def __init__(self, id_empresa: int):
+        self.id_empresa = id_empresa
+
+    def hay_cache(self) -> bool:
+        from . import db
+        return bool(db.listar_activos_sipp(self.id_empresa))
+
+    def _indice_etiquetas(self) -> dict[str, dict]:
+        """{etiqueta normalizada -> activo} SOLO por etiqueta (para el match parcial;
+        la serie se excluye para no confundir la comparación difusa)."""
+        from . import db
+        idx: dict[str, dict] = {}
+        for a in db.listar_activos_sipp(self.id_empresa):
+            clave = _norm(a.get("etiqueta"))
+            if clave:
+                idx.setdefault(clave, a)
+        return idx
+
+    def coincidencias_parciales(self, identificadores: list[str],
+                                umbral: float = 0.85) -> dict[str, ResultadoBusqueda]:
+        """Para cada identificador SIN match exacto, busca la etiqueta del SIPP más
+        parecida (similitud de texto ≥ `umbral`): capta errores de dedo o un dígito
+        faltante (p. ej. un 0). Devuelve {ident -> ResultadoBusqueda} con datos que
+        incluyen parcial=True, etiqueta_sipp y similitud."""
+        import difflib
+
+        idx = self._indice_etiquetas()
+        claves = list(idx.keys())
+        resultado: dict[str, ResultadoBusqueda] = {}
+        sm = difflib.SequenceMatcher()
+        for ident in identificadores:
+            n = _norm(ident)
+            if not n or n in idx:   # vacío o ya es exacto
+                continue
+            sm.set_seq2(n)
+            mejor, mejor_sim = None, umbral
+            for k in claves:
+                # Prefiltro barato: un typo/0 faltante cambia poco la longitud, y
+                # quick_ratio descarta rápido antes del ratio() costoso.
+                if abs(len(k) - len(n)) > 2:
+                    continue
+                sm.set_seq1(k)
+                if sm.quick_ratio() < mejor_sim:
+                    continue
+                r = sm.ratio()
+                if r >= mejor_sim:
+                    mejor, mejor_sim = k, r
+            if mejor is not None:
+                activo = idx[mejor]
+                etq = (activo.get("etiqueta") or "").strip()
+                resultado[ident] = ResultadoBusqueda(
+                    dado_de_alta=True, id_activo_sipp=etq,
+                    datos=dict(activo, origen="sipp", parcial=True,
+                               etiqueta_sipp=etq, similitud=round(mejor_sim, 2)))
+        return resultado
+
+    def _indice(self) -> dict[str, dict]:
+        """{identificador normalizado -> activo cacheado} con TODAS las etiquetas y
+        series de los activos de la empresa. El activo trae sus campos reales del
+        SIPP (etiqueta, insumo, serie, ubicación, empleado, sucursal, departamento)
+        para poder consultarlos cuando está dado de alta."""
+        from . import db
+        idx: dict[str, dict] = {}
+        for a in db.listar_activos_sipp(self.id_empresa):
+            for campo in (a.get("etiqueta"), a.get("serie")):
+                clave = _norm(campo)
+                if clave:
+                    idx.setdefault(clave, a)
+        return idx
+
+    def buscar_por_etiqueta(self, etiquetas: list[str]) -> dict[str, ResultadoBusqueda]:
+        """Busca por ETIQUETA EXACTA en el listado de activos del SIPP (caché).
+
+        Criterio del alta: la etiqueta es el identificador. Si la etiqueta está en el
+        listado, el activo YA está dado de alta; si no, NO lo está (se dará de alta).
+        Sin respaldo por serie ni coincidencia parcial."""
+        if not self.hay_cache():
+            raise SinCacheActivos(
+                "No hay activos del SIPP descargados para esta empresa. "
+                "Descárgalos con «Actualizar información del SIPP».")
+        idx = self._indice_etiquetas()
+        resultado: dict[str, ResultadoBusqueda] = {}
+        for etq in etiquetas:
+            activo = idx.get(_norm(etq))
+            if activo:
+                e = (activo.get("etiqueta") or "").strip()
+                resultado[etq] = ResultadoBusqueda(
+                    dado_de_alta=True, id_activo_sipp=str(e),
+                    datos=dict(activo, origen="sipp"))
+            else:
+                resultado[etq] = ResultadoBusqueda(dado_de_alta=False)
+        return resultado
+
+    def buscar_por_serie(self, series: list[str]) -> dict[str, ResultadoBusqueda]:
+        idx = self._indice()
+        if not idx:
+            raise SinCacheActivos(
+                "No hay activos del SIPP descargados para esta empresa. "
+                "Descárgalos primero (módulo «Generador de códigos QR»)."
+            )
+        resultado: dict[str, ResultadoBusqueda] = {}
+        for serie in series:
+            activo = idx.get(_norm(serie))
+            if activo:
+                ident = (activo.get("etiqueta") or activo.get("serie") or "").strip()
+                resultado[serie] = ResultadoBusqueda(
+                    dado_de_alta=True, id_activo_sipp=str(ident),
+                    datos=dict(activo, origen="sipp"))
+            else:
+                resultado[serie] = ResultadoBusqueda(dado_de_alta=False)
+        return resultado
+
+
 class ProveedorAPI(ProveedorActivos):
     """(Fase 2) Consulta el listado de activos vía los microservicios (core/api.py).
 

@@ -62,12 +62,17 @@ jobs:
       #    ejecución del RPA en la PC del usuario. Imagenes sí va (versionada).
       - name: Compilar con flet pack
         shell: pwsh
-        run: >
-          flet pack app.py -n "ActivosFijos" -D
-          --add-data "Imagenes:Imagenes"
-          --hidden-import openpyxl
-          --pyinstaller-build-args=--collect-all=playwright
-          -y
+        run: |
+          $datos = @("--add-data", "Imagenes:Imagenes")
+          # La tipografía Inter es OPCIONAL y se detecta en vez de fijarse: si el
+          # .ttf está versionado se empaqueta, y si no, la app cae a la fuente del
+          # sistema (ui/tema.py -> registrar_fuente). Con --add-data fijo, un repo
+          # sin la carpeta tumbaría el build; así, agregarla no exige tocar el CI.
+          if (Test-Path "Fuentes") { $datos += @("--add-data", "Fuentes:Fuentes") }
+          flet pack app.py -n "ActivosFijos" -D $datos `
+            --hidden-import openpyxl `
+            --pyinstaller-build-args=--collect-all=playwright `
+            -y
 
       # 2. Instalar Inno Setup y compilar el instalador (instalador.iss).
       - name: Instalar Inno Setup

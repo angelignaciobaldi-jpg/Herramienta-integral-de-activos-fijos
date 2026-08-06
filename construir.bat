@@ -17,11 +17,16 @@ cd /d "%~dp0"
 echo Empaquetando con flet pack ...
 set DATAARGS=
 if exist "Imagenes\" set DATAARGS=%DATAARGS% --add-data "Imagenes:Imagenes"
+rem  Tipografia Inter (opcional): si la carpeta no esta, la app usa la fuente
+rem  del sistema. Ver ui\tema.py -> registrar_fuente().
+if exist "Fuentes\" set DATAARGS=%DATAARGS% --add-data "Fuentes:Fuentes"
 
 flet pack app.py -n "ActivosFijos" -D ^
   --icon "Imagenes\icon.ico" ^
   %DATAARGS% ^
   --hidden-import openpyxl ^
+  --hidden-import segno ^
+  --hidden-import PIL ^
   --pyinstaller-build-args="--collect-all=playwright" ^
   -y
 if errorlevel 1 (

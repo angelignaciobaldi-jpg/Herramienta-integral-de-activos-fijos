@@ -6,6 +6,7 @@ se pueda trabajar en colaboración sin pisarse:
 
     ui/dashboard.py              -> "Dashboard activos fijos"
     ui/registro_activos.py       -> "Registro de activos"
+    ui/generador_qr.py           -> "Generador de códigos QR"
     ui/configuracion.py          -> modal de Configuración (credenciales SIPP)
     ui/comun.py                  -> constantes y utilidades compartidas
 
@@ -27,11 +28,8 @@ import flet as ft
 # ni, sobre todo, que corra el auto-updater (que podría traer la corrección).
 from core import rutas
 
-# Colores de la barra de título nativa (DWM) según el tema.
-_BARRA_FONDO_CLARO = "#FEF7FF"
-_BARRA_TEXTO_CLARO = "#1D1B20"
-_BARRA_FONDO_OSCURO = "#141218"
-_BARRA_TEXTO_OSCURO = "#E6E0E9"
+# La paleta, la tipografía y los colores de la barra de título nativa (DWM) viven
+# en ui/tema.py (sistema de diseño; ver DISENO.md), no aquí.
 
 TITULO_APP = "Herramienta Integral de Activos Fijos"
 NOMBRE_CORTO = "Herramientas Activos Fijos"
@@ -118,19 +116,25 @@ class AppActivosFijos:
         # Import perezoso de las pantallas: si una estuviera rota, el error se
         # contiene en _arrancar_app (que lo muestra en pantalla) en vez de tumbar
         # todo el proceso.
+        from ui.cartas_responsivas import SeccionCartasResponsivas
         from ui.configuracion import SeccionConfiguracion
         from ui.dashboard import SeccionDashboard
+        from ui.generador_qr import SeccionGeneradorQR
         from ui.registro_activos import SeccionRegistroActivos
 
         self.config = SeccionConfiguracion(self)
         self.dashboard = SeccionDashboard(self)
         self.registro = SeccionRegistroActivos(self)
+        self.generador_qr = SeccionGeneradorQR(self)
+        self.cartas = SeccionCartasResponsivas(self)
 
         # Área de contenido: todas las pantallas viven aquí; solo se muestra la
         # activa (se alterna 'visible'), en vez de un TabBarView de Material.
         self._secciones = [
             self.dashboard.contenido,
             self.registro.contenido,
+            self.generador_qr.contenido,
+            self.cartas.contenido,
         ]
         for i, seccion in enumerate(self._secciones):
             seccion.visible = i == 0
@@ -178,23 +182,40 @@ class AppActivosFijos:
         self.page.controls.clear()
         self.page.add(encabezado, self._area, pie)
         # `page.on_resize` es un slot ÚNICO; se despacha a una lista de listeners.
-        for pantalla in (self.dashboard, self.registro, self.config):
+        for pantalla in (self.dashboard, self.registro, self.generador_qr,
+                         self.cartas, self.config):
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
-        # Carga inicial de registros guardados (si la pantalla lo soporta).
-        cargar = getattr(self.registro, "cargar_desde_db", None)
-        if callable(cargar):
-            cargar()
+        # Carga inicial de CADA pantalla que lo soporte, no solo de Registro: el
+        # contrato dice que `cargar_desde_db` es opcional y que el shell la llama
+        # si existe (ver CLAUDE.md), pero aquí estaba escrito a mano un único
+        # nombre, así que el tablero arrancaba vacío hasta que alguien pulsaba
+        # «Buscar». Se recorre la misma tupla que el `_on_resize` de arriba.
+        #
+        # Va DESPUÉS de `page.add`: alguna de estas cargas lanza trabajo con
+        # `run_task`, y hasta que la pantalla no está montada no hay a quién
+        # refrescar.
+        for pantalla in (self.dashboard, self.registro, self.config):
+            cargar = getattr(pantalla, "cargar_desde_db", None)
+            if callable(cargar):
+                cargar()
 
     # ------------------------------------------------------ navegación
     def _construir_nav(self) -> ft.Control:
         self._nav_activa = 0
         self._nav_items: list[dict] = []
         definiciones = [
-            ("Dashboard activos fijos", ft.Icons.DASHBOARD),
+            ("Dashboard", ft.Icons.DASHBOARD),
             ("Registro de activos", ft.Icons.INVENTORY_2),
+            ("Generador de códigos QR", ft.Icons.QR_CODE_2),
+            ("Cartas responsivas", ft.Icons.DESCRIPTION),
         ]
+        # Import perezoso, como el resto de `ui` en este archivo (ver la nota de
+        # arriba sobre por qué solo `flet` y `core.rutas` van al tope).
+        from ui.componentes import puntero_mano
+        from ui.comun import puntero_encima
+
         controles = []
         for idx, (texto, icono) in enumerate(definiciones):
             ico = ft.Icon(icono, size=18)
@@ -207,13 +228,13 @@ class AppActivosFijos:
                 padding=ft.Padding.symmetric(horizontal=16, vertical=12),
                 border_radius=8,
                 on_click=lambda _e, i=idx: self._seleccionar_nav(i),
-                on_hover=lambda e, i=idx: self._hover_nav(i, e.data == "true"),
+                on_hover=lambda e, i=idx: self._hover_nav(i, puntero_encima(e)),
                 animate=ft.Animation(160, ft.AnimationCurve.EASE_OUT),
             )
             self._nav_items.append(
                 {"container": cont, "icono": ico, "texto": txt, "hover": False})
             self._estilo_nav(idx)
-            controles.append(cont)
+            controles.append(puntero_mano(cont))   # muta y devuelve `cont`
         fila = ft.Row(
             controles, scroll=ft.ScrollMode.AUTO, spacing=6,
             alignment=ft.MainAxisAlignment.CENTER,
@@ -259,9 +280,10 @@ class AppActivosFijos:
     def _pintar_barra_titulo(self, oscuro: bool) -> None:
         try:
             from core import win_titlebar
+            from ui import tema
 
-            fondo = _BARRA_FONDO_OSCURO if oscuro else _BARRA_FONDO_CLARO
-            texto = _BARRA_TEXTO_OSCURO if oscuro else _BARRA_TEXTO_CLARO
+            fondo = tema.BARRA_FONDO_OSCURO if oscuro else tema.BARRA_FONDO_CLARO
+            texto = tema.BARRA_TEXTO_OSCURO if oscuro else tema.BARRA_TEXTO_CLARO
             win_titlebar.pintar_barra(
                 self.page.title, fondo, texto=texto, borde=fondo, oscuro=oscuro)
         except Exception:  # noqa: BLE001 — el color de la barra no es crítico
@@ -488,13 +510,30 @@ async def main(page: ft.Page) -> None:
         current_locale=ft.Locale("es", "MX"),
     )
     page.window.icon = "Imagenes/icon.ico"
+    # Ancho mínimo = media pantalla en 1920 (el caso angosto real al acoplar la
+    # ventana). Por debajo, un tablero de alta densidad deja de ser legible y no
+    # tiene caso reacomodarlo; ver DISENO.md.
+    page.window.min_width = 960
+    page.window.min_height = 600
     page.padding = ft.Padding.only(left=18, right=18, top=18, bottom=10)
     page.theme_mode = (
         ft.ThemeMode.DARK if _tema_oscuro_guardado() else ft.ThemeMode.LIGHT)
     _barra = ft.ScrollbarTheme(
         thumb_visibility=True, track_visibility=True, thickness=12, interactive=True)
-    page.theme = ft.Theme(scrollbar_theme=_barra)
-    page.dark_theme = ft.Theme(scrollbar_theme=_barra)
+    # Paleta y tipografía del sistema de diseño (ui/tema.py). Best-effort: si el
+    # módulo fallara, la app arranca con el Material por defecto en vez de no
+    # arrancar — el tema no es crítico para operar.
+    try:
+        from ui import tema
+
+        # Inter se registra ANTES de construir los temas: si el .ttf no está en
+        # los assets devuelve None y ambos temas caen a la fuente del sistema.
+        _fuente = tema.registrar_fuente(page)
+        page.theme = tema.construir_tema(False, _barra, _fuente)
+        page.dark_theme = tema.construir_tema(True, _barra, _fuente)
+    except Exception:  # noqa: BLE001 — el tema no debe impedir el arranque
+        page.theme = ft.Theme(scrollbar_theme=_barra)
+        page.dark_theme = ft.Theme(scrollbar_theme=_barra)
     _pantalla_cargando(page, NOMBRE_CORTO, "Iniciando…")
     await asyncio.sleep(0.05)
     _configurar_taskbar(page)

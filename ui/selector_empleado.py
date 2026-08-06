@@ -11,84 +11,79 @@ import flet as ft
 
 from core import db
 from ui.comun import GRIS, NARANJA, VERDE
+from ui.componentes import Modal, buscador, fila_resultado, lista_resultados
 
 _ANCHO = 620
+_LIMITE = 100
 
 
 class DialogoSelectorEmpleado:
-    """Diálogo de búsqueda/selección de un empleado del catálogo cacheado."""
+    """Diálogo de búsqueda/selección de un empleado del catálogo cacheado.
+
+    Mismo estilo que el selector de insumo y que el menú de opciones de la
+    tabla: `Modal`, filtrado en vivo, fila pulsable y Enter para el primero.
+    """
 
     def __init__(self, app, al_elegir):
         """`al_elegir(id_empleado, nombre)` se llama cuando el usuario elige uno."""
         self.app = app
         self.page = app.page
         self.al_elegir = al_elegir
+        self._resultados: list = []
         self._construir()
 
     def _construir(self) -> None:
-        self.tf = ft.TextField(
-            hint_text="Buscar por nombre o id de empleado… (Enter)",
-            dense=True, prefix_icon=ft.Icons.SEARCH, autofocus=True,
-            on_submit=self._buscar, expand=True)
-        self.lista = ft.Column(spacing=4, scroll=ft.ScrollMode.AUTO, tight=True)
+        self.tf = buscador(
+            "Buscar por nombre o id de empleado… (Enter elige el primero)",
+            on_submit=self._elegir_primero, expand=True, autofocus=True)
+        self.tf.on_change = self._buscar
+        self.lista = lista_resultados()
         self.estado = ft.Text("", size=12, color=GRIS)
-        self.dialogo = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Buscar empleado (resguardo)", size=18,
-                          weight=ft.FontWeight.BOLD),
-            content=ft.Container(
-                ft.Column([self.tf, self.estado, ft.Container(self.lista, height=320)],
-                          spacing=10, tight=True),
-                width=_ANCHO),
-            actions=[ft.TextButton("Cerrar", on_click=lambda _e: self.page.pop_dialog())],
-        )
+
+        self.modal = Modal(self.page, "Buscar empleado (resguardo)", ancho=_ANCHO)
+        self.modal.cuerpo.spacing = 12
+        self.modal.cuerpo.controls = [self.tf, self.estado, self.lista]
 
     def abrir(self, sugerido: str = "") -> None:
         self.tf.value = sugerido or ""
         if not db.buscar_empleados("", limite=1):
+            self._resultados = []
             self.estado.value = ("El catálogo de empleados está vacío. Usa «Actualizar "
-                                 "catálogos» para descargarlo del SIPP.")
+                                 "información del SIPP» para descargarlo.")
             self.estado.color = NARANJA
             self.lista.controls = []
         else:
             self._buscar()
-        self.page.show_dialog(self.dialogo)
+        self.modal.abrir()
 
     def _buscar(self, _e=None) -> None:
         texto = (self.tf.value or "").strip()
-        resultados = db.buscar_empleados(texto, limite=100)
-        self.estado.value = (f"{len(resultados)} resultado(s)"
-                             + (" (mostrando 100)" if len(resultados) == 100 else ""))
+        self._resultados = db.buscar_empleados(texto, limite=_LIMITE)
+        n = len(self._resultados)
+        total = db.contar_empleados(texto)
+        # El tope evita pintar miles de filas; si hay más, se escribe para acotar
+        # (el filtro corre sobre TODO el catálogo en la base).
+        if total > n:
+            self.estado.value = (f"Mostrando {n} de {total:,}. Escribe un nombre o id "
+                                 f"para acotar la búsqueda.")
+        else:
+            self.estado.value = f"{total:,} resultado(s)"
         self.estado.color = GRIS
-        self.lista.controls = [self._fila(e) for e in resultados]
-        self._safe_update()
+        self.lista.controls = [self._fila(e) for e in self._resultados]
+        self.modal.refrescar()
 
     def _fila(self, emp: "db.Empleado") -> ft.Control:
-        return ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(ft.Text(str(emp.id_empleado), size=12,
-                                         weight=ft.FontWeight.BOLD), width=64),
-                    ft.Column(
-                        [ft.Text(emp.nombre, size=13, no_wrap=True),
-                         ft.Text(emp.puesto or "—", size=11, color=GRIS, no_wrap=True)],
-                        spacing=0, expand=True, tight=True),
-                    ft.FilledTonalButton("Elegir",
-                                         on_click=lambda _e, x=emp: self._elegir(x)),
-                ],
-                vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
-            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-            border=ft.Border(bottom=ft.BorderSide(
-                1, ft.Colors.with_opacity(0.4, ft.Colors.OUTLINE_VARIANT))))
+        return fila_resultado(
+            str(emp.id_empleado), emp.nombre, emp.puesto or "",
+            on_click=lambda _e, x=emp: self._elegir(x))
+
+    def _elegir_primero(self, _e=None) -> None:
+        """Enter: elige el primer resultado. Sin resultados no hace nada."""
+        if self._resultados:
+            self._elegir(self._resultados[0])
 
     def _elegir(self, emp: "db.Empleado") -> None:
-        self.page.pop_dialog()
+        self.modal.cerrar()
         if callable(self.al_elegir):
             self.al_elegir(emp.id_empleado, emp.nombre)
         self.app.avisar(f"Empleado elegido: {emp.nombre}", VERDE)
-
-    def _safe_update(self) -> None:
-        try:
-            self.dialogo.update()
-        except (RuntimeError, AssertionError, AttributeError):
-            pass

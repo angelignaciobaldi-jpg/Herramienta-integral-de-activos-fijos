@@ -117,20 +117,39 @@ _JS_ELEGIR_OPCION = r"""(args) => {
     const norm = s => (s || '')
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
         .replace(/\s+/g, ' ').trim().toLowerCase();
-    const sel = document.querySelector('select[ng-model="' + ngModel + '"]');
-    if (!sel) return {ok: false, motivo: 'select-no-encontrado'};
+    // El portal REPITE el ng-model en paneles ocultos (agregar/editar) y muchos
+    // combos son "chosen": su <select> real está OCULTO (offsetParent null), por lo
+    // que no se puede filtrar por visible. Se aplica el valor a TODOS los <select>
+    // que coincidan (el activo se sincroniza; los inactivos son inofensivos), y se
+    // sincroniza Angular y el widget chosen en cada uno.
+    const sels = Array.from(
+        document.querySelectorAll('select[ng-model="' + ngModel + '"]'));
+    if (!sels.length) return {ok: false, motivo: 'select-no-encontrado'};
     const objetivo = norm(texto);
-    const opts = Array.from(sel.options).filter(o => o.value !== '' && o.value !== '0');
-    let opt = opts.find(o => norm(o.textContent) === objetivo)
-           || opts.find(o => norm(o.textContent).startsWith(objetivo))
-           || opts.find(o => norm(o.textContent).includes(objetivo));
-    if (!opt) return {ok: false, motivo: 'opcion-no-encontrada',
-                      disponibles: opts.map(o => o.textContent.trim())};
-    sel.value = opt.value;
     const jq = window.jQuery || window.$;
-    if (jq) { try { jq(sel).val(opt.value).trigger('change').trigger('chosen:updated'); } catch (e) {} }
-    sel.dispatchEvent(new Event('change', {bubbles: true}));
-    return {ok: true, elegido: opt.textContent.trim()};
+    let aplicado = false, elegido = '', disponibles = [];
+    for (const sel of sels) {
+        // OJO: NO excluir value '0' — hay opciones válidas con 0 (p. ej. Situación
+        // "Activo Fijo" = 0). Solo se descarta el placeholder ('' o "Seleccionar").
+        const opts = Array.from(sel.options).filter(
+            o => o.value !== '' && norm(o.textContent) !== 'seleccionar'
+                 && norm(o.textContent) !== 'seleccione');
+        const opt = opts.find(o => norm(o.textContent) === objetivo)
+                 || opts.find(o => norm(o.textContent).startsWith(objetivo))
+                 || opts.find(o => norm(o.textContent).includes(objetivo));
+        if (!opt) { disponibles = opts.map(o => o.textContent.trim()); continue; }
+        sel.value = opt.value;
+        // El evento 'change' nativo del <select> sincroniza el ng-model de Angular;
+        // el trigger de jQuery + chosen:updated refresca el widget "chosen".
+        sel.dispatchEvent(new Event('change', {bubbles: true}));
+        if (jq) {
+            try { jq(sel).val(opt.value).trigger('change').trigger('chosen:updated'); }
+            catch (e) {}
+        }
+        aplicado = true; elegido = opt.textContent.trim();
+    }
+    return aplicado ? {ok: true, elegido}
+                    : {ok: false, motivo: 'opcion-no-encontrada', disponibles};
 }"""
 
 
@@ -179,10 +198,11 @@ class SesionSipp:
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
     # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    # Ambiente de PRUEBAS (stage): se opera aquí mientras se desarrolla el módulo.
-    BASE_URL = "https://stage.sipp.petroil.dev"
-    # BASE_URL = "https://dev.sipp.petroil.dev"   # desarrollo
-    # BASE_URL = "https://sipp.petroil.com.mx"    # productivo
+    # Ambiente de PRUEBAS (test): se opera aquí mientras se desarrolla el módulo.
+    BASE_URL = "https://test.sipp.petroil.dev"
+    # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
+    # BASE_URL = "https://dev.sipp.petroil.dev"    # desarrollo
+    # BASE_URL = "https://sipp.petroil.com.mx"     # productivo
     URL_LOGIN = BASE_URL + "/login.html"
     URL_CONFIG_SESION = BASE_URL + "/index.cfm#/configuracionsession"
     # Rutas SPA del módulo de Activos Fijos (confirmadas en el DOM real).
@@ -322,8 +342,10 @@ class SesionSipp:
         try:
             # esperar_opcion=True en ambas: las empresas cargan por AJAX (el select
             # arranca vacío) y las sucursales se recargan al elegir la empresa.
-            await self._elegir_opcion_chosen("Empresa", empresa, esperar_opcion=True)
-            await self._elegir_opcion_chosen("Sucursal", sucursal, esperar_opcion=True)
+            await self._elegir_chosen("Empresa", empresa, esperar_opcion=True)
+            # Al elegir empresa se recargan las sucursales (AJAX); dar un respiro.
+            await page.wait_for_timeout(700)
+            await self._elegir_chosen("Sucursal", sucursal, esperar_opcion=True)
         except ErrorSipp:
             await self._capturar_diagnostico("seleccion_empresa_sucursal")
             raise
@@ -378,6 +400,60 @@ class SesionSipp:
                 "No se cargaron sucursales para la empresa '%s'." % empresa)
         await self.seleccionar_empresa_sucursal(empresa, sucursal)
         return empresa, sucursal
+
+    async def _elegir_chosen(
+        self, etiqueta: str, texto: str, esperar_opcion: bool = False,
+    ) -> None:
+        """Elige `texto` en el select de `etiqueta`. Primero opera el widget
+        "chosen" por la UI (abrir, escribir y CLIC en la opción), que es lo que
+        realmente dispara la selección en el portal; si no hay chosen visible, cae
+        al respaldo por <select> nativo (JS)."""
+        try:
+            await self._elegir_opcion_chosen_ui(etiqueta, texto, esperar_opcion)
+            return
+        except ErrorSipp:
+            # Respaldo: operar el <select> nativo por su ng-model.
+            await self._elegir_opcion_chosen(etiqueta, texto, esperar_opcion)
+
+    async def _elegir_opcion_chosen_ui(
+        self, etiqueta: str, texto: str, esperar_opcion: bool = False,
+    ) -> None:
+        """Elige `texto` operando el widget "chosen" como lo haría una persona:
+        abre el desplegable del select (por su ng-model), escribe en el buscador y
+        HACE CLIC en la opción que coincide. Así se disparan los eventos de chosen
+        y de AngularJS (ng-change), a diferencia de fijar solo el <select> nativo."""
+        page = self._exigir_pagina()
+        ng_model = self._NG_MODEL[etiqueta]
+        # Contenedor chosen asociado al select (hermano inmediato posterior).
+        cont = page.locator(
+            f'xpath=//select[@ng-model="{ng_model}"]/following-sibling::div'
+            f'[contains(@class,"chosen-container")][1]').first
+        try:
+            await cont.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            raise ErrorSipp(
+                "No apareció el selector (chosen) de %s." % etiqueta) from exc
+        await cont.scroll_into_view_if_needed()
+        await cont.click()  # abre el desplegable
+        # Escribe en el buscador del chosen para filtrar (si lo tiene).
+        buscador = cont.locator("input").first
+        try:
+            await buscador.fill(texto, timeout=3_000)
+        except Exception:  # noqa: BLE001 — algún chosen no trae buscador
+            pass
+        # Espera y hace CLIC en la opción que contiene el texto.
+        opcion = cont.locator(
+            ".chosen-results li.active-result",
+            has_text=re.compile(re.escape(texto), re.I)).first
+        try:
+            await opcion.wait_for(
+                state="visible",
+                timeout=self.TIMEOUT_ELEMENTO if esperar_opcion else 2_500)
+        except PlaywrightTimeoutError as exc:
+            raise ErrorSipp(
+                "No apareció la opción '%s' en el selector de %s." % (texto, etiqueta)
+            ) from exc
+        await opcion.click()
 
     async def _elegir_opcion_chosen(
         self, etiqueta: str, texto: str, esperar_opcion: bool = False,
@@ -482,17 +558,28 @@ class SesionSipp:
 
     async def set_input(self, ng_model: str, valor: str) -> None:
         """Escribe `valor` en un input por su ng-model. Se filtra por ':visible'
-        porque el portal repite ng-models en paneles ocultos (ng-hide)."""
+        porque el portal repite ng-models en paneles ocultos (ng-hide).
+
+        Si el campo NO está presente/visible para este tipo de activo, se omite de
+        inmediato (chequeo corto) en vez de esperar el timeout completo: así el RPA
+        avanza «conforme encuentra los campos» y no se atora en los no aplicables."""
         page = self._exigir_pagina()
         campo = page.locator(f'[ng-model="{ng_model}"]:visible').first
         try:
-            await campo.fill(valor, timeout=3_000)
+            await campo.wait_for(state="visible", timeout=1_500)
+        except PlaywrightTimeoutError:
+            return  # campo ausente/oculto para este tipo: se omite y se sigue
+        try:
+            await campo.fill(valor, timeout=2_500)
         except Exception:  # noqa: BLE001 — respaldo: fijar por JS y avisar a Angular
-            await campo.evaluate(
-                "(el, v) => { el.value = v;"
-                " el.dispatchEvent(new Event('input', {bubbles:true}));"
-                " el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                valor)
+            try:
+                await campo.evaluate(
+                    "(el, v) => { el.value = v;"
+                    " el.dispatchEvent(new Event('input', {bubbles:true}));"
+                    " el.dispatchEvent(new Event('change', {bubbles:true})); }",
+                    valor, timeout=2_500)
+            except Exception:  # noqa: BLE001 — no editable (deshabilitado): se omite
+                pass
 
     async def set_fecha(self, ng_model: str, valor: str) -> None:
         """Escribe una fecha (DD/MM/AAAA) en un input con máscara. Se usa `fill`,
@@ -537,32 +624,46 @@ class SesionSipp:
                 "No se cargó el catálogo de Activos Fijos (no apareció el filtro "
                 "de No. de serie del listado).") from exc
 
-    async def buscar_en_listado(self, valor: str, por_etiqueta: bool = False) -> int:
-        """Filtra el listado del catálogo por No. de serie o por ETIQUETA (número
-        de inventario) y devuelve cuántas filas resultaron (0 = no está dado de
-        alta). En los inventarios reales la mayoría de los activos no tiene serie,
-        así que la etiqueta es el identificador habitual."""
-        campo = ("js_filtroListado.de_Etiqueta" if por_etiqueta
-                 else "js_filtroListado.de_SerieActivo")
+    async def _limpiar_ambito_listado(self) -> None:
+        """Vacía empresa y sucursal del filtro del listado para que la búsqueda
+        sea global (solo por etiqueta/serie). Best-effort: si Angular no está o el
+        scope cambió, no rompe el flujo."""
         page = self._exigir_pagina()
-        await self.ir_a_catalogo_activos()
-        await self.set_input(campo, valor)
-        boton = await self._primer_visible(
-            [
-                page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
-                page.locator("button.btn-buscar25p"),
-            ],
-            "botón de buscar del listado de activos")
-        await self._click_seguro(boton)
-        await page.wait_for_timeout(2_500)  # la grid recarga por AJAX
-        return await self._contar_filas_grid()
+        try:
+            await page.evaluate(r"""() => {
+              const el = document.querySelector("[ng-model^='js_filtroListado']");
+              const sc = el && window.angular ? angular.element(el).scope() : null;
+              if (!sc || !sc.js_filtroListado) return;
+              sc.$apply(() => {
+                sc.js_filtroListado.id_Empresa = '';
+                sc.js_filtroListado.id_SucursalAsignado = '';
+              });
+            }""")
+        except Exception:  # noqa: BLE001
+            pass
 
-    async def buscar_serie_en_listado(self, no_serie: str) -> int:
-        """Filtra el listado del catálogo por No. de serie y devuelve cuántas filas
-        resultaron (0 = el activo NO está dado de alta)."""
+    async def buscar_en_listado(self, etiqueta: str = "", serie: str = "") -> int:
+        """Filtra el listado del catálogo por ETIQUETA (ancla principal) o, si no
+        hay, por No. de serie; devuelve cuántas filas resultaron (0 = el activo NO
+        está dado de alta). La etiqueta es más confiable: casi siempre existe,
+        mientras que muchos activos no traen serie.
+
+        Busca **solo por etiqueta/serie**: antes de filtrar limpia empresa y
+        sucursal del `js_filtroListado`. Si no se limpian, el listado queda
+        acotado a la empresa/sucursal de la sesión (p. ej. Aske/Corporativo) y no
+        encuentra activos de otras empresas —era la causa de que un activo real de
+        otra empresa saliera como 'no dado de alta'."""
         page = self._exigir_pagina()
         await self.ir_a_catalogo_activos()
-        await self.set_input("js_filtroListado.de_SerieActivo", no_serie)
+        etiqueta = (etiqueta or "").strip()
+        serie = (serie or "").strip()
+        if not etiqueta and not serie:
+            return 0
+        await self._limpiar_ambito_listado()
+        if etiqueta:
+            await self.set_input("js_filtroListado.de_Etiqueta", etiqueta)
+        elif serie:
+            await self.set_input("js_filtroListado.de_SerieActivo", serie)
         boton = await self._primer_visible(
             [
                 page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
@@ -574,11 +675,19 @@ class SesionSipp:
         return await self._contar_filas_grid()
 
     async def _contar_filas_grid(self) -> int:
-        """Cuenta las filas renderizadas del ngGrid visible."""
+        """Cuántos activos trajo el listado. El grid NO renderiza `.ngRow` (los
+        datos viven en el array `arr_gridActivosFijos` del scope de Angular, que se
+        llena por AJAX); contar el DOM daba siempre 0. Se lee el array del scope,
+        con `.ngRow` como respaldo."""
         page = self._exigir_pagina()
         try:
-            return await page.evaluate(
-                "() => document.querySelectorAll('.ngRow').length")
+            return await page.evaluate(r"""() => {
+              const el = document.querySelector("[ng-model='js_filtroListado.de_SerieActivo']");
+              const sc = el && window.angular ? angular.element(el).scope() : null;
+              if (sc && Array.isArray(sc.arr_gridActivosFijos))
+                  return sc.arr_gridActivosFijos.length;
+              return document.querySelectorAll('.ngRow').length;
+            }""")
         except Exception:  # noqa: BLE001
             return 0
 
@@ -602,8 +711,9 @@ class SesionSipp:
         await self._click_seguro(page.locator("[ng-click='listarInsumos()']").first)
         await page.wait_for_timeout(2_500)  # la grid del modal recarga por AJAX
         # Cada fila del resultado trae un botón 'agregarInsumo(row)' que lo elige y
-        # cierra el modal. Buscando por id exacto, la primera es la correcta.
-        boton = page.locator("[ng-click='agregarInsumo(row)']").first
+        # cierra el modal (a veces como 'grid.appScope.agregarInsumo(row)', por eso
+        # match por contiene). Buscando por id exacto, la primera es la correcta.
+        boton = page.locator("[ng-click*='agregarInsumo(row)']").first
         try:
             await boton.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
         except PlaywrightTimeoutError as exc:
@@ -614,10 +724,15 @@ class SesionSipp:
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
-    async def seleccionar_empleado(self, id_empleado) -> None:
-        """Elige el empleado de resguardo por su ID exacto en el modal 'Buscar
-        Empleado' (Asignación del Activo): abre el modal, teclea el id, busca y
-        pulsa el botón 'agregarEmpleado(row)' de la fila."""
+    async def seleccionar_empleado(self, id_empleado, nombre: str = "") -> None:
+        """Elige el empleado de resguardo en el modal 'Buscar Empleado' (Asignación
+        del Activo): abre el modal y busca por ID si se tiene (exacto) o, si no, por
+        NOMBRE; luego pulsa el botón de la fila. Así el modal se abre y busca al
+        empleado aunque no se haya resuelto su id."""
+        id_empleado = str(id_empleado or "").strip()
+        nombre = (nombre or "").strip()
+        if not id_empleado and not nombre:
+            return  # nada que buscar
         page = self._exigir_pagina()
         abrir = await self._primer_visible(
             [page.locator("[ng-click*=\"abrirModal('empleados', 2\"]"),
@@ -631,24 +746,33 @@ class SesionSipp:
         except PlaywrightTimeoutError as exc:
             await self._capturar_diagnostico("modal_empleados")
             raise ErrorSipp("No se abrió el modal 'Buscar Empleado'.") from exc
-        await self.set_input("js_filtroModalEmpleado.id_Empleado", str(id_empleado))
+        # Buscar por id (exacto) si se tiene; si no, por nombre.
+        if id_empleado:
+            await self.set_input("js_filtroModalEmpleado.id_Empleado", id_empleado)
+            criterio = f"id {id_empleado}"
+        else:
+            await self.set_input("js_filtroModalEmpleado.nb_NombreEmpleado", nombre)
+            criterio = f"nombre «{nombre}»"
         await self._click_seguro(
             page.locator("[ng-click=\"listarDatosGrid('listadoEmpleados')\"]").first)
         await page.wait_for_timeout(2_500)
+        # El botón de la fila puede venir como 'grid.appScope.agregarEmpleado(row)'.
         boton = page.locator("[ng-click*='agregarEmpleado(row)']").first
         try:
             await boton.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
         except PlaywrightTimeoutError as exc:
             await self._capturar_diagnostico("empleado_no_encontrado")
             raise ErrorSipp(
-                f"No apareció el empleado con id {id_empleado} en el catálogo del "
-                "SIPP. ¿El catálogo local está desactualizado?") from exc
+                f"No apareció el empleado ({criterio}) en el catálogo del SIPP.") from exc
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
     async def alta_activo(self, tipo_nombre: str, campos: list,
                           detalles: "dict | None" = None,
-                          insumo_id=None, empleado_id=None) -> None:
+                          insumo_id=None, empleado_id=None,
+                          serie: str = "", etiqueta_actual: str = "",
+                          empresa: str = "", sucursal: str = "",
+                          empleado_nombre: str = "", imagenes: "list | None" = None) -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -658,6 +782,9 @@ class SesionSipp:
             detalles: características del insumo {etiqueta -> valor} (camposDetalle).
             insumo_id: Cve Insumo del SIPP; se selecciona por el modal 'Buscar
                 Insumo' (el nombre del insumo es de solo lectura, se elige así).
+            serie/etiqueta_actual: para buscar la factura en la bandeja de compras
+                (solo si la serie es válida: existe y != etiqueta). empresa/sucursal:
+                las del activo, para los datos de compra.
 
         Abre el formulario, elige el tipo, selecciona el insumo por id (lo que
         dispara la carga de las características), llena todo y pulsa Guardar.
@@ -681,28 +808,96 @@ class SesionSipp:
             await self.seleccionar_insumo(insumo_id)
             await page.wait_for_timeout(800)
 
-        # El empleado de resguardo se elige por ID en su propio modal.
-        if empleado_id:
-            await self.seleccionar_empleado(empleado_id)
+        # El empleado de resguardo se elige en su modal: por ID si se tiene, o por
+        # NOMBRE. Así el modal se abre y busca aunque no se haya resuelto el id.
+        if empleado_id or empleado_nombre:
+            await self.seleccionar_empleado(empleado_id, empleado_nombre)
             await page.wait_for_timeout(500)
 
         for ng_model, valor, control in campos:
             if not valor or not ng_model:
                 continue
-            if control == "select":
-                try:
-                    await self.set_combo(ng_model, valor)
-                except ErrorSipp:
-                    # Algunos "select" del portal son en realidad campos de texto
-                    # con búsqueda; se intenta escribirlos.
+            # Un campo que no se pueda aplicar (ausente/oculto/no editable para ese
+            # tipo, p. ej. la Situación en algunos tipos) NO debe abortar el alta: se
+            # omite y se sigue con los demás.
+            try:
+                if control == "select":
+                    # El CENTRO de costo depende del GRUPO (cascada AJAX): su opción
+                    # solo existe tras elegir el grupo, así que se espera a que aparezca.
+                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
+                    try:
+                        await self.set_combo(ng_model, valor, esperar=es_centro)
+                    except ErrorSipp:
+                        # Algunos "select" del portal son en realidad campos de texto
+                        # con búsqueda; se intenta escribirlos.
+                        await self.set_input(ng_model, valor)
+                    if "GrupoCentroCosto" in ng_model:
+                        # Dar tiempo a que la cascada cargue los centros del grupo
+                        # antes de intentar elegir el centro.
+                        await page.wait_for_timeout(1200)
+                elif control == "date":
+                    await self.set_fecha(ng_model, valor)
+                else:
                     await self.set_input(ng_model, valor)
-            elif control == "date":
-                await self.set_fecha(ng_model, valor)
-            else:
-                await self.set_input(ng_model, valor)
+            except Exception:  # noqa: BLE001 — campo no aplicable: se omite, no aborta
+                continue
 
         if detalles:
             await self.llenar_campos_detalle(detalles)
+
+        # Factura + precio desde la bandeja de compras (best-effort): nunca aborta
+        # el alta; solo actúa si la serie es válida y existe la entrada de compra.
+        try:
+            await self._adjuntar_compra(serie, etiqueta_actual, empresa, sucursal)
+        except Exception:  # noqa: BLE001 — no crítico: se omite sin tumbar el alta
+            pass
+
+        # RE-APLICAR los campos de la Asignación que dependen de cascada/auto-relleno
+        # (grupo -> centro -> departamento): elegir el empleado o la empresa/sucursal
+        # de resguardo puede recargarlos o limpiarlos, así que se fijan AL FINAL, en
+        # orden de dependencia, para que persistan al guardar.
+        for clave in ("filtrosAgregar.id_GrupoCentroCosto",
+                      "filtrosAgregar.id_CentroCosto",
+                      "filtrosAgregar.id_Departamento"):
+            valor = next((v for ng, v, _c in campos if ng == clave and v), "")
+            if not valor:
+                continue
+            try:
+                es_centro = clave.endswith("id_CentroCosto")
+                await self.set_combo(clave, valor, esperar=es_centro)
+                if clave.endswith("id_GrupoCentroCosto"):
+                    await page.wait_for_timeout(1000)  # deja cargar los centros
+            except Exception:  # noqa: BLE001 — no aplica: se omite
+                pass
+
+        # Imágenes/soporte del insumo (Fotografía, máx 3): se suben al input de
+        # archivo del alta (ng-change="subirFotografia(this)"). Best-effort.
+        rutas_img = [p for p in (imagenes or []) if p and os.path.exists(p)][:3]
+        if rutas_img:
+            try:
+                await page.set_input_files(
+                    "input[ng-change='subirFotografia(this)']", rutas_img)
+                await page.wait_for_timeout(1000)  # ng-change subirFotografia procesa
+            except Exception:  # noqa: BLE001 — no crítico: se omite
+                pass
+
+        # La ETIQUETA/folio es un consecutivo GLOBAL del SIPP (getEtiqueta ignora
+        # empresa y tipo): devuelve el "siguiente" disponible y avanza al guardar
+        # cada activo. Se genera con el botón del portal ANTES de guardar; el código
+        # generado se devuelve para registrarlo en la herramienta.
+        etiqueta = await self.generar_etiqueta()
+
+        # El No. de serie es OBLIGATORIO en el SIPP. Si el activo NO trae serie, se
+        # usa la ETIQUETA como número de serie (la generada por el SIPP; como
+        # respaldo, la del levantamiento). Se hace tras generar la etiqueta.
+        serie_final = ((serie or "").strip() or (etiqueta or "").strip()
+                       or (etiqueta_actual or "").strip())
+        if serie_final:
+            try:
+                await self.set_input("filtrosAgregar.nu_Serie", serie_final)
+                await page.wait_for_timeout(200)
+            except Exception:  # noqa: BLE001 — no crítico
+                pass
 
         guardar = await self._primer_visible(
             [
@@ -712,21 +907,118 @@ class SesionSipp:
             "botón Guardar del alta de activo")
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
+        return etiqueta
 
-    async def modificar_activo(self, no_serie: str, campos: list,
+    async def _activar_datos_compra(self) -> None:
+        """Marca el checkbox 'Datos de compra' (filtrosAgregar.sn_DatosCompra) para
+        habilitar Costo/Factura/Archivo (están ng-disabled hasta que se activa)."""
+        page = self._exigir_pagina()
+        await page.evaluate(
+            "() => { const el = document.querySelector("
+            "\"[ng-model='filtrosAgregar.sn_DatosCompra']\");"
+            " if (el && !el.checked) { const s = angular.element(el).scope();"
+            " s.$apply(() => { s.filtrosAgregar.sn_DatosCompra = 1;"
+            " if (typeof s.resetCamposCompra === 'function') s.resetCamposCompra(); }); } }")
+        await page.wait_for_timeout(600)
+
+    async def _adjuntar_compra(self, serie: str, etiqueta_actual: str,
+                               empresa: str, sucursal: str) -> None:
+        """Busca la entrada de compra por serie y, si la halla, activa 'Datos de
+        compra', pone el precio (CFDI ValorUnitario) en Costo, el folio en Factura y
+        adjunta el PDF. Solo para serie válida (existe y != etiqueta)."""
+        from core import compras_sipp as compras
+        from core.empresas import ID_POR_EMPRESA
+
+        if not compras.serie_valida(serie, etiqueta_actual):
+            return
+        id_empresa = ID_POR_EMPRESA.get((empresa or "").strip())
+        entrada = await compras.buscar_entrada_por_serie(self, serie, id_empresa)
+        if entrada is None:
+            return
+
+        info = await compras.datos_factura(self, entrada)  # {precio, folio}
+        page = self._exigir_pagina()
+        # Habilita la sección; de paso, ya visibles, empresa/sucursal de compra no
+        # cuelgan (antes colgaban por estar ocultas). Se ponen las del propio activo.
+        await self._activar_datos_compra()
+        for ng_model, valor, esperar in (
+                ("filtrosAgregar.id_EmpresaAgregar", empresa, True),
+                ("filtrosAgregar.id_SucursalAgregar", sucursal, True)):
+            if valor:
+                try:
+                    await self.set_combo(ng_model, valor, esperar=esperar)
+                    await page.wait_for_timeout(400)
+                except Exception:  # noqa: BLE001 — no aplica: se omite
+                    continue
+        if info.get("precio") is not None:
+            try:
+                await self.set_input("filtrosAgregar.im_Costo", f"{info['precio']:.2f}")
+            except Exception:  # noqa: BLE001
+                pass
+        if info.get("folio"):
+            try:
+                await self.set_input("filtrosAgregar.nb_Factura", info["folio"])
+            except Exception:  # noqa: BLE001
+                pass
+        if entrada.tiene_factura:
+            try:
+                carpeta = os.path.join(rutas.DATOS, "facturas_alta")
+                ruta = await compras.descargar_factura(self, entrada, carpeta)
+                if ruta:
+                    await page.set_input_files("#ar_ArchivoSoporteFactura", str(ruta))
+                    await page.wait_for_timeout(600)  # ng-change subirFactura(this)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _leer_etiqueta(self) -> str:
+        page = self._exigir_pagina()
+        val = await page.evaluate(
+            "() => { const el = document.querySelector("
+            "\"[ng-model='filtrosAgregar.nu_Etiqueta']\");"
+            " return el ? (el.value || '') : ''; }")
+        return (val or "").strip()
+
+    async def generar_etiqueta(self) -> str:
+        """Pulsa 'Generar Etiqueta' (generarEtiqueta()) y devuelve el código NUEVO
+        que el SIPP asigna en filtrosAgregar.nu_Etiqueta (read-only).
+
+        Se captura el valor previo y se espera uno NO vacío y DISTINTO, para no
+        devolver una etiqueta rancia (evita que se repita entre activos)."""
+        page = self._exigir_pagina()
+        antes = await self._leer_etiqueta()
+        try:
+            boton = await self._primer_visible(
+                [page.locator("[ng-click*='generarEtiqueta']"),
+                 page.get_by_role("button", name=re.compile(r"generar\s+etiqueta", re.I))],
+                "botón Generar Etiqueta")
+            await self._click_seguro(boton)
+        except ErrorSipp:
+            return ""   # sin botón (algún tipo no la usa): no aborta el alta
+        # La etiqueta se asigna por AJAX; se espera a que aparezca una NUEVA.
+        fin = asyncio.get_event_loop().time() + self.TIMEOUT_ELEMENTO / 1000
+        while asyncio.get_event_loop().time() < fin:
+            etiqueta = await self._leer_etiqueta()
+            if etiqueta and etiqueta != antes:
+                return etiqueta
+            await page.wait_for_timeout(300)
+        # Si no cambió (el botón no regeneró), se devuelve lo que haya (mejor que nada).
+        return await self._leer_etiqueta()
+
+    async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
                                detalles: "dict | None" = None) -> list:
-        """Busca un activo por No. de serie, abre su edición, aplica los campos y
-        guarda. Devuelve la lista de campos que NO se pudieron aplicar (el
-        formulario de edición no expone exactamente los mismos que el alta, así que
-        un campo ausente no aborta el resto).
+        """Busca un activo por ETIQUETA (o serie si no hay), abre su edición, aplica
+        los campos y guarda. Devuelve la lista de campos que NO se pudieron aplicar
+        (el formulario de edición no expone exactamente los mismos que el alta, así
+        que un campo ausente no aborta el resto).
 
         `campos`: [(ng_model, valor, control)] ya en su forma de EDICIÓN
         (filtrosEditar.* / FH_*_EDITAR)."""
         page = self._exigir_pagina()
-        filas = await self.buscar_serie_en_listado(no_serie)
+        filas = await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         if filas == 0:
+            ident = (etiqueta or "").strip() or (serie or "").strip()
             raise ErrorSipp(
-                f"No se encontró en el listado un activo con la serie '{no_serie}'.")
+                f"No se encontró en el listado un activo con etiqueta/serie '{ident}'.")
 
         # Abrir la edición de la fila encontrada. El portal usa un botón/ícono de
         # acción por fila; se prueban varios localizadores y, si ninguno aparece,
@@ -755,10 +1047,15 @@ class SesionSipp:
                 continue
             try:
                 if control == "select":
+                    # El centro de costo depende del grupo (cascada AJAX): se espera
+                    # a que su opción cargue tras elegir el grupo.
+                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
                     try:
-                        await self.set_combo(ng_model, valor)
+                        await self.set_combo(ng_model, valor, esperar=es_centro)
                     except ErrorSipp:
                         await self.set_input(ng_model, valor)
+                    if "GrupoCentroCosto" in ng_model:
+                        await page.wait_for_timeout(1200)
                 elif control == "date":
                     await self.set_fecha(ng_model, valor)
                 else:
