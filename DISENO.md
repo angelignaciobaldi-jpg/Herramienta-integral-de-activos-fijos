@@ -363,10 +363,13 @@ el proyecto. Así quedó resuelto:
 
 ## Pendientes de implementar
 
-- **Fuente Inter.** Agregar el `.ttf` al repo, registrarlo con
-  `page.fonts = {"Inter": "..."}`, poner `FUENTE = "Inter"` en
-  [ui/tema.py](ui/tema.py) e incluirlo en el empaquetado (`--add-data` en
-  `construir.bat` y en `.github/workflows/compilar.yml`, como ya se hace con
-  `Imagenes`).
+- **Fuente Inter.** Solo falta **el archivo**: descargar
+  `Inter-VariableFont_opsz,wght.ttf` de
+  [rsms/inter](https://github.com/rsms/inter/releases), dejarlo en `Fuentes/` y
+  versionarlo. Todo lo demás ya está: `registrar_fuente()` en
+  [ui/tema.py](ui/tema.py) lo detecta y lo registra, y tanto `construir.bat` como
+  `.github/workflows/compilar.yml` lo empaquetan **si la carpeta existe**. Sin el
+  archivo, la app usa la tipografía del sistema (Segoe UI) con las métricas del
+  diseño ya aplicadas.
 - **Elevación y sombras.** Los tres niveles están especificados pero no aplicados;
   hoy las tarjetas usan el `ft.Card` por defecto.
