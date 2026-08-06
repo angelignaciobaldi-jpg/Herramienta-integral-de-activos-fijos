@@ -245,12 +245,11 @@ class SeccionRegistroActivos:
         self._btn_limpiar_filtros = boton_herramienta(
             "Limpiar filtros", ft.Icons.FILTER_ALT_OFF, self._limpiar_filtros_col)
         self.barra_filtros = ft.Row(
-            [ft.Icon(ft.Icons.FILTER_LIST, size=18, color=GRIS),
-             self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
+            [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
              self._btn_limpiar_filtros],
-            spacing=10, run_spacing=10, wrap=True,
-            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10, run_spacing=10, wrap=True, expand=True,
+            alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         # Barra contextual de RPA (según la pestaña activa).
@@ -318,15 +317,13 @@ class SeccionRegistroActivos:
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True,
                        run_spacing=8),
-                # Buscador a la izquierda, acción de RPA de la pestaña a la derecha.
-                ft.Row([ft.Row([self.tf_buscar, self._btn_limpiar], spacing=4,
-                               tight=True),
-                        self._barra_rpa],
+                # Buscador global (la acción de RPA baja a la línea de filtros).
+                ft.Row([self.tf_buscar, self._btn_limpiar], spacing=4, tight=True),
+                # Filtros por columna + la acción de RPA de la pestaña, en la MISMA
+                # línea: filtros a la izquierda, botón de RPA a la derecha.
+                ft.Row([self.barra_filtros, self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                # Filtros por columna (estilo Excel): mi feature, se combina con
-                # el buscador global y con las pestañas.
-                self.barra_filtros,
                 # Antes iban superpuestos en un Stack con `expand`; como se
                 # alternan por `visible`, apilarlos basta y evita la altura sin
                 # acotar que un Stack expandido metería en la columna con scroll.
