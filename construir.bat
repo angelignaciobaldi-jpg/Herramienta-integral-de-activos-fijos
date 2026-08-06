@@ -22,6 +22,8 @@ flet pack app.py -n "ActivosFijos" -D ^
   --icon "Imagenes\icon.ico" ^
   %DATAARGS% ^
   --hidden-import openpyxl ^
+  --hidden-import segno ^
+  --hidden-import PIL ^
   --pyinstaller-build-args="--collect-all=playwright" ^
   -y
 if errorlevel 1 (

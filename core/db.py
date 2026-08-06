@@ -77,6 +77,7 @@ _SQL_CREAR_LEVANTAMIENTO = """
         datos_json     TEXT,
         factura        TEXT,
         id_activo_sipp TEXT,
+        datos_sipp     TEXT,
         modificado     INTEGER NOT NULL DEFAULT 0,
         clave_unica    TEXT    NOT NULL UNIQUE,
         creado_en      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
@@ -200,6 +201,68 @@ def inicializar() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS ix_empleados_nombre "
                     "ON empleados_sipp (nombre)")
 
+        # Caché de los ACTIVOS del SIPP por empresa (para generar sus QR/etiquetas).
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activos_sipp (
+                id_empresa     INTEGER NOT NULL,
+                empresa_nombre TEXT,
+                etiqueta       TEXT    NOT NULL,
+                insumo         TEXT,
+                serie          TEXT,
+                ubicacion      TEXT,
+                empleado       TEXT,
+                sucursal       TEXT,
+                departamento   TEXT,
+                id_tipo        INTEGER,
+                tipo           TEXT,
+                extra          TEXT,
+                actualizado_en TEXT,
+                PRIMARY KEY (id_empresa, etiqueta)
+            )
+            """
+        )
+        # Migración: las bases creadas antes de estas columnas no las tienen (la
+        # tabla ya existía y CREATE IF NOT EXISTS no las agrega).
+        cols_sipp = {fila["name"] for fila in con.execute("PRAGMA table_info(activos_sipp)")}
+        for col, tipo_sql in (("sucursal", "TEXT"), ("departamento", "TEXT"),
+                              ("id_tipo", "INTEGER"), ("tipo", "TEXT"),
+                              ("extra", "TEXT")):
+            if col not in cols_sipp:
+                con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} {tipo_sql}")
+
+        # Catálogos del SIPP para el alta/modificación (por empresa). Departamento
+        # es por empresa; grupo y centro de costo son por SUCURSAL (el grupo guarda
+        # su sucursal normalizada para casar con la del activo), y el centro depende
+        # del grupo.
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS departamentos_sipp (
+                id_empresa     INTEGER NOT NULL,
+                id_departamento INTEGER NOT NULL,
+                nb_departamento TEXT,
+                PRIMARY KEY (id_empresa, id_departamento))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS grupos_cc_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_grupo      INTEGER NOT NULL,
+                nb_grupo      TEXT,
+                id_sucursal   INTEGER,
+                sucursal_norm TEXT,
+                PRIMARY KEY (id_empresa, id_grupo))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS centros_cc_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_grupo      INTEGER NOT NULL,
+                id_centro     INTEGER NOT NULL,
+                nb_centro     TEXT,
+                PRIMARY KEY (id_empresa, id_grupo, id_centro))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS sucursales_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_sucursal   INTEGER NOT NULL,
+                nb_sucursal   TEXT,
+                PRIMARY KEY (id_empresa, id_sucursal))""")
+
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
             # Esquema viejo: la clave única era (no_serie, nombre_insumo), que no
@@ -214,6 +277,10 @@ def inicializar() -> None:
                     con.execute(
                         f"ALTER TABLE levantamiento ADD COLUMN {col} "
                         f"{tipos_lev.get(col, 'TEXT')}")
+        # Índice por estatus: acelera el conteo por pestaña y el filtrado (la tabla
+        # puede tener miles de registros y se consulta en cada cambio de pestaña).
+        con.execute("CREATE INDEX IF NOT EXISTS ix_lev_estatus "
+                    "ON levantamiento(estatus_registro)")
 
 
 class InventarioDuplicado(Exception):
@@ -285,6 +352,7 @@ class Levantamiento:
     modificado: int
     clave_unica: str
     creado_en: str
+    datos_sipp: str | None = None
 
     def identificador(self) -> str:
         """Con qué se busca este activo en el SIPP: la etiqueta (número de
@@ -301,13 +369,25 @@ class Levantamiento:
         except (ValueError, TypeError):
             return {}
 
+    def info_sipp(self) -> dict:
+        """Datos REALES del activo en el SIPP (los que trae el catálogo), para
+        consultarlos cuando el activo está dado de alta. {} si no hay."""
+        if not self.datos_sipp:
+            return {}
+        try:
+            valor = json.loads(self.datos_sipp)
+            return valor if isinstance(valor, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
 
 # Columnas del levantamiento (fuente única para migraciones incrementales).
 _COLS_LEV = [
     "empresa", "sucursal", "departamento",
     "nombre_insumo", "etiqueta", "no_serie", "responsable", "ubicacion",
     "ruta_imagen", "estatus_registro",
-    "id_tipo_activo", "datos_json", "factura", "id_activo_sipp", "modificado",
+    "id_tipo_activo", "datos_json", "factura", "id_activo_sipp", "datos_sipp",
+    "modificado",
 ]
 
 
@@ -343,7 +423,9 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
     única se ignoran (son el mismo activo). Devuelve (agregados, duplicados).
 
     Cada dict acepta: nombre_insumo (obligatorio), etiqueta, no_serie,
-    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen.
+    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen y —para
+    la carga masiva con todos los campos del alta— id_tipo_activo (int) y datos
+    (dict que se serializa a datos_json, lo que consume el RPA de alta).
     """
     if not registros:
         return 0, 0
@@ -352,10 +434,13 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
         insumo = r.get("nombre_insumo", "")
         etiqueta = (r.get("etiqueta") or "").strip()
         serie = r.get("no_serie", "") or ""
+        datos = r.get("datos")
+        datos_json = json.dumps(datos, ensure_ascii=False) if datos else None
         filas.append((
             r.get("empresa", ""), r.get("sucursal", ""), r.get("departamento", ""),
             insumo, etiqueta or None, serie, r.get("responsable", ""),
             r.get("ubicacion", ""), r.get("ruta_imagen"),
+            r.get("id_tipo_activo"), datos_json,
             clave_levantamiento(insumo, etiqueta, serie),
         ))
     with _conectar() as con:
@@ -363,8 +448,9 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
         con.executemany(
             """INSERT OR IGNORE INTO levantamiento
                (empresa, sucursal, departamento, nombre_insumo, etiqueta,
-                no_serie, responsable, ubicacion, ruta_imagen, clave_unica)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                no_serie, responsable, ubicacion, ruta_imagen,
+                id_tipo_activo, datos_json, clave_unica)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             filas)
         despues = con.execute("SELECT COUNT(*) FROM levantamiento").fetchone()[0]
     agregados = despues - antes
@@ -409,25 +495,39 @@ def listar_levantamiento_por_estatus(estatus: str) -> list[Levantamiento]:
 
 
 def actualizar_estatus_levantamiento(id_lev: int, estatus: str,
-                                     id_activo_sipp: str | None = None) -> None:
+                                     id_activo_sipp: str | None = None,
+                                     datos_sipp: dict | None = None) -> None:
     """Fija el estatus (pendiente/dado_de_alta/no_dado_de_alta) y, si aplica, el
-    id del activo en el SIPP."""
+    id y los datos del activo en el SIPP. `datos_sipp` se guarda como JSON (o se
+    limpia con {} / None) para poder consultarlo después."""
+    dj = json.dumps(datos_sipp, ensure_ascii=False) if datos_sipp else None
     with _conectar() as con:
         con.execute(
-            "UPDATE levantamiento SET estatus_registro = ?, id_activo_sipp = ? WHERE id = ?",
-            (estatus, id_activo_sipp, id_lev),
+            "UPDATE levantamiento SET estatus_registro = ?, id_activo_sipp = ?, "
+            "datos_sipp = ? WHERE id = ?",
+            (estatus, id_activo_sipp, dj, id_lev),
         )
+
+
+def fijar_etiqueta_levantamiento(id_lev: int, etiqueta: str) -> None:
+    """Fija la ETIQUETA de un registro (p. ej. al adoptar la del SIPP tras una
+    coincidencia parcial). No toca clave_unica (evita colisiones del UNIQUE)."""
+    with _conectar() as con:
+        con.execute("UPDATE levantamiento SET etiqueta = ? WHERE id = ?",
+                    (etiqueta or None, id_lev))
 
 
 def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = None,
                                    datos: dict | None = None, factura: str | None = None,
                                    modificado: bool | None = None,
-                                   no_serie: str | None = None) -> None:
+                                   no_serie: str | None = None,
+                                   nombre_insumo: str | None = None) -> None:
     """Actualiza los campos de captura del alta (tipo, datos_json, factura), la
-    marca de modificado y/o el No. de serie. Solo toca los argumentos que se pasen.
+    marca de modificado, el No. de serie y/o el nombre del insumo. Solo toca los
+    argumentos que se pasen.
 
-    `no_serie` se refleja en la COLUMNA del registro (no solo en datos_json), que
-    es la que se muestra en la tabla y con la que se busca en el SIPP/bandeja."""
+    `no_serie` y `nombre_insumo` se reflejan en la COLUMNA del registro (no solo en
+    datos_json): son las que se muestran en la tabla y con las que se busca."""
     sets, valores = [], []
     if id_tipo_activo is not None:
         sets.append("id_tipo_activo = ?"); valores.append(id_tipo_activo)
@@ -439,6 +539,8 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
         sets.append("modificado = ?"); valores.append(1 if modificado else 0)
     if no_serie is not None:
         sets.append("no_serie = ?"); valores.append(no_serie)
+    if nombre_insumo is not None:
+        sets.append("nombre_insumo = ?"); valores.append(nombre_insumo)
     if not sets:
         return
     valores.append(id_lev)
@@ -446,8 +548,21 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
         con.execute(f"UPDATE levantamiento SET {', '.join(sets)} WHERE id = ?", valores)
 
 
-def _filtro_sql(estatus: str | None, filtro: str) -> tuple[str, list]:
-    """Arma el WHERE compartido por las consultas paginadas del levantamiento."""
+# Filtros por columna (estilo Excel). Categóricos = coincidencia EXACTA (para los
+# desplegables de valores distintos); de texto = CONTIENE. Lista blanca: solo estas
+# columnas son filtrables (evita inyección al construir el SQL con el nombre).
+_FILTRO_EXACTO = ("empresa", "sucursal", "departamento")
+_FILTRO_CONTIENE = ("nombre_insumo", "etiqueta", "no_serie", "ubicacion")
+COLUMNAS_FILTRABLES = _FILTRO_EXACTO + _FILTRO_CONTIENE
+
+
+def _filtro_sql(estatus: str | None, filtro: str,
+                filtros: dict | None = None) -> tuple[str, list]:
+    """Arma el WHERE compartido por las consultas paginadas del levantamiento.
+
+    `filtro` es la búsqueda global (varios campos). `filtros` son los filtros por
+    columna: {columna: valor} — exacto para las categóricas, contiene para texto.
+    """
     cond, params = [], []
     if estatus:
         cond.append("estatus_registro = ?")
@@ -458,18 +573,41 @@ def _filtro_sql(estatus: str | None, filtro: str) -> tuple[str, list]:
                     " OR LOWER(IFNULL(no_serie,'')) LIKE ?"
                     " OR LOWER(IFNULL(ubicacion,'')) LIKE ?)")
         params += [like] * 4
+    for col, val in (filtros or {}).items():
+        val = str(val or "").strip()
+        if not val or col not in COLUMNAS_FILTRABLES:
+            continue
+        if col in _FILTRO_EXACTO:
+            cond.append(f"IFNULL({col},'') = ?")
+            params.append(val)
+        else:
+            cond.append(f"LOWER(IFNULL({col},'')) LIKE ?")
+            params.append(f"%{val.lower()}%")
     return (" WHERE " + " AND ".join(cond)) if cond else "", params
+
+
+def valores_distintos_levantamiento(columna: str) -> list[str]:
+    """Valores distintos (no vacíos) de una columna filtrable, para poblar los
+    desplegables de filtro. Devuelve [] si la columna no es filtrable."""
+    if columna not in COLUMNAS_FILTRABLES:
+        return []
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT DISTINCT {columna} AS v FROM levantamiento "
+            f"WHERE IFNULL({columna},'') <> '' ORDER BY {columna}").fetchall()
+    return [f["v"] for f in filas]
 
 
 _ORDEN_LEV = " ORDER BY creado_en DESC, id DESC"
 
 
 def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
-                                limite: int = 25, offset: int = 0) -> list[Levantamiento]:
+                                limite: int = 25, offset: int = 0,
+                                filtros: dict | None = None) -> list[Levantamiento]:
     """Devuelve SOLO la página pedida. Con inventarios de miles de activos,
     materializar la tabla completa para mostrar 25 filas es el mayor costo de la
     pantalla; aquí el filtrado y el recorte los hace SQLite."""
-    where, params = _filtro_sql(estatus, filtro)
+    where, params = _filtro_sql(estatus, filtro, filtros)
     with _conectar() as con:
         filas = con.execute(
             f"SELECT * FROM levantamiento{where}{_ORDEN_LEV} LIMIT ? OFFSET ?",
@@ -477,18 +615,20 @@ def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
     return [Levantamiento(**dict(f)) for f in filas]
 
 
-def contar_levantamiento(estatus: str | None = None, filtro: str = "") -> int:
+def contar_levantamiento(estatus: str | None = None, filtro: str = "",
+                         filtros: dict | None = None) -> int:
     """Cuántos registros cumplen el filtro (para la paginación)."""
-    where, params = _filtro_sql(estatus, filtro)
+    where, params = _filtro_sql(estatus, filtro, filtros)
     with _conectar() as con:
         return con.execute(
             f"SELECT COUNT(*) FROM levantamiento{where}", params).fetchone()[0]
 
 
-def ids_levantamiento(estatus: str | None = None, filtro: str = "") -> list[int]:
+def ids_levantamiento(estatus: str | None = None, filtro: str = "",
+                      filtros: dict | None = None) -> list[int]:
     """Ids de todos los registros que cumplen el filtro (para 'Seleccionar todos'
     sin traer las filas completas)."""
-    where, params = _filtro_sql(estatus, filtro)
+    where, params = _filtro_sql(estatus, filtro, filtros)
     with _conectar() as con:
         return [f[0] for f in con.execute(
             f"SELECT id FROM levantamiento{where}", params).fetchall()]
@@ -585,12 +725,38 @@ def buscar_insumos(texto: str = "", empresa_id: int | None = None,
         else:
             cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
     where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    # El mismo insumo (Cve) puede estar cacheado para varias empresas; el catálogo
+    # es prácticamente global, así que se DEDUPLICA por id_insumo para no mostrarlo
+    # repetido en el selector.
     with _conectar() as con:
         filas = con.execute(
             f"SELECT id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia, "
             f"subfamilia, activo_fijo, seriado FROM insumos_sipp{where} "
-            f"ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
+            f"GROUP BY id_insumo ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
     return [Insumo(**dict(f)) for f in filas]
+
+
+def contar_insumos(texto: str = "", empresa_id: int | None = None,
+                   solo_activo_fijo: bool = False) -> int:
+    """Cuántos insumos DISTINTOS coinciden con el filtro (para saber cuántos hay más
+    allá del tope que se pinta en el selector)."""
+    cond, params = [], []
+    if empresa_id is not None:
+        cond.append("empresa_id = ?"); params.append(empresa_id)
+    if solo_activo_fijo:
+        cond.append("activo_fijo = 1")
+    texto = (texto or "").strip()
+    if texto:
+        if texto.isdigit():
+            cond.append("(CAST(id_insumo AS TEXT) LIKE ? OR LOWER(nombre) LIKE ?)")
+            params += [f"{texto}%", f"%{texto.lower()}%"]
+        else:
+            cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        return con.execute(
+            f"SELECT COUNT(DISTINCT id_insumo) FROM insumos_sipp{where}", params
+        ).fetchone()[0]
 
 
 def estado_catalogo_insumos() -> list[dict]:
@@ -644,6 +810,22 @@ def buscar_empleados(texto: str = "", limite: int = 50) -> list[Empleado]:
     return [Empleado(**dict(f)) for f in filas]
 
 
+def contar_empleados(texto: str = "") -> int:
+    """Cuántos empleados coinciden con el filtro (para el total del selector)."""
+    cond, params = [], []
+    texto = (texto or "").strip()
+    if texto:
+        if texto.isdigit():
+            cond.append("(CAST(id_empleado AS TEXT) LIKE ? OR LOWER(nombre) LIKE ?)")
+            params += [f"{texto}%", f"%{texto.lower()}%"]
+        else:
+            cond.append("LOWER(nombre) LIKE ?"); params.append(f"%{texto.lower()}%")
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        return con.execute(
+            f"SELECT COUNT(*) FROM empleados_sipp{where}", params).fetchone()[0]
+
+
 def estado_catalogo_empleados() -> dict:
     """Cuántos empleados hay cacheados y cuándo se bajaron."""
     with _conectar() as con:
@@ -651,6 +833,215 @@ def estado_catalogo_empleados() -> dict:
             "SELECT COUNT(*) AS n, MAX(actualizado_en) AS cuando "
             "FROM empleados_sipp").fetchone()
     return dict(fila)
+
+
+# --------------------------------------------------- activos del SIPP (por empresa)
+def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
+                            registros: list[dict], actualizado_en: str) -> int:
+    """Reemplaza los activos cacheados de una empresa. Cada dict: etiqueta
+    (obligatorio), insumo, serie, ubicacion, empleado. Devuelve cuántos se
+    guardaron (con etiqueta no vacía)."""
+    filas = [r for r in registros if (r.get("etiqueta") or "").strip()]
+    with _conectar() as con:
+        con.execute("DELETE FROM activos_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            """INSERT OR REPLACE INTO activos_sipp
+               (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
+                empleado, sucursal, departamento, id_tipo, tipo, extra, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
+              r.get("serie"), r.get("ubicacion"), r.get("empleado"),
+              r.get("sucursal"), r.get("departamento"),
+              r.get("id_tipo"), r.get("tipo"),
+              json.dumps(r.get("extra"), ensure_ascii=False) if r.get("extra") else None,
+              actualizado_en)
+             for r in filas])
+    return len(filas)
+
+
+def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[dict]:
+    """Activos cacheados de una empresa (para generar sus QR/etiquetas y consultar
+    el detalle). Si se pasa `sucursal`, filtra por ella. Los campos EXTRA (guardados
+    como JSON) se fusionan en el dict de cada activo."""
+    cond, params = ["id_empresa = ?"], [id_empresa]
+    if sucursal:
+        cond.append("IFNULL(sucursal,'') = ?"); params.append(sucursal)
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado, "
+            "sucursal, departamento, id_tipo, tipo, extra FROM activos_sipp "
+            f"WHERE {' AND '.join(cond)} ORDER BY etiqueta", params).fetchall()
+    activos = []
+    for f in filas:
+        base = {"empresa": f["empresa_nombre"], "etiqueta": f["etiqueta"],
+                "insumo": f["insumo"], "serie": f["serie"],
+                "ubicacion": f["ubicacion"], "empleado": f["empleado"],
+                "sucursal": f["sucursal"], "departamento": f["departamento"],
+                "id_tipo": f["id_tipo"], "tipo": f["tipo"]}
+        if f["extra"]:
+            try:
+                extra = json.loads(f["extra"])
+                if isinstance(extra, dict):
+                    base.update(extra)
+            except (ValueError, TypeError):
+                pass
+        activos.append(base)
+    return activos
+
+
+def sucursales_activos_sipp(id_empresa: int) -> list[str]:
+    """Sucursales distintas presentes en los activos cacheados de una empresa."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT DISTINCT sucursal FROM activos_sipp "
+            "WHERE id_empresa = ? AND IFNULL(sucursal,'') <> '' ORDER BY sucursal",
+            (id_empresa,)).fetchall()
+    return [f["sucursal"] for f in filas]
+
+
+def estado_activos_sipp() -> list[dict]:
+    """Por empresa cacheada: id, nombre, cuántos activos y cuándo se bajaron."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id_empresa, empresa_nombre, COUNT(*) AS n, MAX(actualizado_en) AS cuando "
+            "FROM activos_sipp GROUP BY id_empresa, empresa_nombre "
+            "ORDER BY empresa_nombre").fetchall()
+    return [dict(f) for f in filas]
+
+
+# --------------------------------------- catálogos de alta (depto / centro costo)
+def _norm_suc(texto) -> str:
+    """Normaliza un nombre de sucursal para casar el del activo con el del catálogo
+    (mayúsculas, sin acentos ni espacios sobrantes)."""
+    t = str(texto or "").strip().upper()
+    for a, b in (("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("Ñ", "N")):
+        t = t.replace(a, b)
+    return " ".join(t.split())
+
+
+def reemplazar_sucursales_sipp(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza las sucursales cacheadas de una empresa. Cada dict:
+    id_sucursal, nb_sucursal."""
+    with _conectar() as con:
+        con.execute("DELETE FROM sucursales_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO sucursales_sipp "
+            "(id_empresa, id_sucursal, nb_sucursal) VALUES (?, ?, ?)",
+            [(id_empresa, r["id_sucursal"], r.get("nb_sucursal"))
+             for r in registros if r.get("id_sucursal") is not None])
+    return len(registros)
+
+
+def listar_sucursales_sipp(id_empresa: int) -> list[str]:
+    """Nombres de sucursal de una empresa (para el desplegable del levantamiento)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT nb_sucursal FROM sucursales_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_sucursal,'') <> '' "
+            "ORDER BY nb_sucursal", (id_empresa,)).fetchall()
+    return [f["nb_sucursal"] for f in filas]
+
+
+def reemplazar_departamentos(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza los departamentos cacheados de una empresa. Cada dict:
+    id_departamento, nb_departamento."""
+    with _conectar() as con:
+        con.execute("DELETE FROM departamentos_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO departamentos_sipp "
+            "(id_empresa, id_departamento, nb_departamento) VALUES (?, ?, ?)",
+            [(id_empresa, r["id_departamento"], r.get("nb_departamento"))
+             for r in registros if r.get("id_departamento") is not None])
+    return len(registros)
+
+
+def listar_departamentos(id_empresa: int) -> list[str]:
+    """Nombres de departamento de una empresa (para el desplegable del alta)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT nb_departamento FROM departamentos_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_departamento,'') <> '' "
+            "ORDER BY nb_departamento", (id_empresa,)).fetchall()
+    return [f["nb_departamento"] for f in filas]
+
+
+def listar_departamentos_todos() -> list[str]:
+    """Nombres de departamento DISTINTOS de todas las empresas cacheadas (para el
+    desplegable de asignación múltiple, donde la selección puede ser de varias)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT DISTINCT nb_departamento FROM departamentos_sipp "
+            "WHERE IFNULL(nb_departamento,'') <> '' ORDER BY nb_departamento").fetchall()
+    return [f["nb_departamento"] for f in filas]
+
+
+def actualizar_departamento_lote(ids: list[int], departamento: str) -> int:
+    """Asigna el mismo departamento (columna del registro) a muchos registros de una
+    vez. Devuelve cuántos se actualizaron. Los ids se procesan por bloques (SQLite
+    limita los parámetros por sentencia)."""
+    if not ids:
+        return 0
+    TAM, n = 500, 0
+    with _conectar() as con:
+        for i in range(0, len(ids), TAM):
+            lote = ids[i:i + TAM]
+            marcadores = ",".join("?" * len(lote))
+            cur = con.execute(
+                f"UPDATE levantamiento SET departamento = ? WHERE id IN ({marcadores})",
+                [departamento, *lote])
+            n += cur.rowcount
+    return n
+
+
+def reemplazar_grupos_cc(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza los grupos de centro de costo de una empresa. Cada dict:
+    id_grupo, nb_grupo, id_sucursal, sucursal (nombre; se normaliza)."""
+    with _conectar() as con:
+        con.execute("DELETE FROM grupos_cc_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO grupos_cc_sipp "
+            "(id_empresa, id_grupo, nb_grupo, id_sucursal, sucursal_norm) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(id_empresa, r["id_grupo"], r.get("nb_grupo"), r.get("id_sucursal"),
+              _norm_suc(r.get("sucursal")))
+             for r in registros if r.get("id_grupo") is not None])
+    return len(registros)
+
+
+def listar_grupos_cc(id_empresa: int, sucursal: str) -> list[dict]:
+    """Grupos de centro de costo de una empresa para la sucursal dada (por nombre,
+    normalizado). Devuelve [{id_grupo, nb_grupo}]."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id_grupo, nb_grupo FROM grupos_cc_sipp "
+            "WHERE id_empresa = ? AND sucursal_norm = ? "
+            "AND IFNULL(nb_grupo,'') <> '' ORDER BY nb_grupo",
+            (id_empresa, _norm_suc(sucursal))).fetchall()
+    return [{"id_grupo": f["id_grupo"], "nb_grupo": f["nb_grupo"]} for f in filas]
+
+
+def reemplazar_centros_cc(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza los centros de costo de una empresa. Cada dict:
+    id_grupo, id_centro, nb_centro."""
+    with _conectar() as con:
+        con.execute("DELETE FROM centros_cc_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO centros_cc_sipp "
+            "(id_empresa, id_grupo, id_centro, nb_centro) VALUES (?, ?, ?, ?)",
+            [(id_empresa, r["id_grupo"], r["id_centro"], r.get("nb_centro"))
+             for r in registros
+             if r.get("id_grupo") is not None and r.get("id_centro") is not None])
+    return len(registros)
+
+
+def listar_centros_cc(id_empresa: int, id_grupo: int) -> list[str]:
+    """Nombres de centro de costo de un grupo (para el desplegable dependiente)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT nb_centro FROM centros_cc_sipp "
+            "WHERE id_empresa = ? AND id_grupo = ? AND IFNULL(nb_centro,'') <> '' "
+            "ORDER BY nb_centro", (id_empresa, id_grupo)).fetchall()
+    return [f["nb_centro"] for f in filas]
 
 
 def eliminar_levantamientos(ids: list[int]) -> None:

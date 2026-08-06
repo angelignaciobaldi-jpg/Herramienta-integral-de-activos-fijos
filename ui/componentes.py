@@ -232,7 +232,8 @@ def campo_texto(etiqueta: str | None = None, *, valor: str = "",
 def campo_opciones(etiqueta: str | None, opciones: Iterable[str], *,
                    valor: str | None = None, width: int | None = None,
                    hint: str | None = None, on_change=None,
-                   flotante: bool = False) -> tuple[ft.Control, ft.Dropdown]:
+                   flotante: bool = False,
+                   editable: bool = True) -> tuple[ft.Control, ft.Dropdown]:
     """Selector. Devuelve `(bloque, campo)`; `flotante` como en `campo_texto`.
 
     Usa `ft.Dropdown` (Material 3), que por dentro es un campo de texto con un
@@ -240,10 +241,15 @@ def campo_opciones(etiqueta: str | None, opciones: Iterable[str], *,
     `DropdownM2` calculaba la suya aparte y nunca alineaba. El parámetro sigue
     llamándose `on_change` aunque el control exponga `on_select`, para no
     obligar a las pantallas a cambiar.
+
+    `editable=True` (por defecto) permite ESCRIBIR para filtrar las opciones
+    (agiliza catálogos largos como empresas/sucursales); pásalo False para un
+    selector cerrado.
     """
     campo = _estilo_campo(ft.Dropdown(
         value=valor, width=width, hint_text=hint,
         label=etiqueta if flotante else None,
+        editable=editable, enable_filter=editable,
         # Sin `expanded_insets`, un DropdownMenu de Material se dimensiona al
         # ANCHO DE SU OPCIÓN MÁS LARGA, no al del contenedor: por eso quedaba
         # más angosto que su celda por mucho STRETCH que llevara el padre.
@@ -536,7 +542,7 @@ class Modal:
         # El subtítulo va en MAYÚSCULAS con interletraje amplio: identifica el
         # registro que se está editando sin competir con el título.
         self._txt_subtitulo = ft.Text(
-            subtitulo.upper(), theme_style=ft.TextThemeStyle.LABEL_LARGE,
+            (subtitulo or "").upper(), theme_style=ft.TextThemeStyle.LABEL_LARGE,
             color=ft.Colors.ON_SURFACE_VARIANT, visible=bool(subtitulo))
 
         encabezado = ft.Container(
@@ -561,8 +567,10 @@ class Modal:
             spacing=GAP_LG + GAP_SM, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self._scroll = ft.Column(
+            # Reserva para la barra de scroll (12px) MÁS una holgura, para que los
+            # campos de la columna derecha no queden pegados a la barra.
             [ft.Container(self.cuerpo,
-                          padding=ft.Padding.only(right=GUTTER_SCROLL))],
+                          padding=ft.Padding.only(right=GUTTER_SCROLL + GAP_MD))],
             scroll=ft.ScrollMode.AUTO, height=alto_cuerpo, spacing=0,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         cuerpo_env = ft.Container(
@@ -644,7 +652,22 @@ class Modal:
         self.page.run_task(self._aparecer)
 
     def cerrar(self) -> None:
-        self.page.run_task(self._cerrar)
+        # Cierre SÍNCRONO e inmediato. `pop_dialog()` (Flet 0.86) retira SIEMPRE el
+        # diálogo de ARRIBA, no uno concreto; por eso se retira hacia abajo hasta
+        # sacar EL de este modal, descartando lo que haya quedado apilado encima
+        # (p. ej. un DatePicker o un sub-selector que no se auto-retiró, o un
+        # SnackBar). Sin esto quedaba un barrier gris pegado bloqueando la app.
+        self._soltar_teclado()
+        self.tarjeta.opacity = 0
+        try:
+            for _ in range(10):
+                d = self.page.pop_dialog()
+                if d is None or d is self.dialogo:
+                    break
+        except Exception:  # noqa: BLE001 — cierre tolerante (ya cerrado, etc.)
+            pass
+        if callable(self._al_cerrar):
+            self._al_cerrar()
 
     async def _aparecer(self) -> None:
         # Un respiro para que el cliente pinte el primer fotograma en opacidad
@@ -652,15 +675,6 @@ class Modal:
         await asyncio.sleep(0.02)
         self.tarjeta.opacity = 1
         _refrescar(self.tarjeta)
-
-    async def _cerrar(self, _e=None) -> None:
-        self._soltar_teclado()
-        self.tarjeta.opacity = 0
-        _refrescar(self.tarjeta)
-        await asyncio.sleep(_FADE_MS / 1000)
-        self.page.pop_dialog()
-        if callable(self._al_cerrar):
-            self._al_cerrar()
 
     def _soltar_teclado(self) -> None:
         self.page.on_keyboard_event = self._tecla_previa

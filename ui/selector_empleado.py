@@ -49,7 +49,7 @@ class DialogoSelectorEmpleado:
         if not db.buscar_empleados("", limite=1):
             self._resultados = []
             self.estado.value = ("El catálogo de empleados está vacío. Usa «Actualizar "
-                                 "catálogos» para descargarlo del SIPP.")
+                                 "información del SIPP» para descargarlo.")
             self.estado.color = NARANJA
             self.lista.controls = []
         else:
@@ -60,8 +60,14 @@ class DialogoSelectorEmpleado:
         texto = (self.tf.value or "").strip()
         self._resultados = db.buscar_empleados(texto, limite=_LIMITE)
         n = len(self._resultados)
-        self.estado.value = (f"{n} resultado(s)"
-                             + (f" (mostrando {_LIMITE})" if n == _LIMITE else ""))
+        total = db.contar_empleados(texto)
+        # El tope evita pintar miles de filas; si hay más, se escribe para acotar
+        # (el filtro corre sobre TODO el catálogo en la base).
+        if total > n:
+            self.estado.value = (f"Mostrando {n} de {total:,}. Escribe un nombre o id "
+                                 f"para acotar la búsqueda.")
+        else:
+            self.estado.value = f"{total:,} resultado(s)"
         self.estado.color = GRIS
         self.lista.controls = [self._fila(e) for e in self._resultados]
         self.modal.refrescar()

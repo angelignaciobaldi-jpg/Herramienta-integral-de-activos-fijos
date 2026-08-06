@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"c:/Users/PROCESOS 3/OneDrive - ADMINISTRACION DE SERVICIOS ASKE/Escritorio/Personal/Norte Operativo/Herramienta activos fijos\" *)",
+      "Read(//c/Users/PROCESOS 3/OneDrive - ADMINISTRACION DE SERVICIOS ASKE/Escritorio/Personal/Norte Operativo/Herramienta activos fijos/**)",
+      "Bash(py -3.14 -c \"import sys,importlib.util as u; print\\(sys.version.split\\(\\)[0], sys.executable\\); print\\('flet:', bool\\(u.find_spec\\('flet'\\)\\), '| segno:', bool\\(u.find_spec\\('segno'\\)\\), '| PIL:', bool\\(u.find_spec\\('PIL'\\)\\), '| playwright:', bool\\(u.find_spec\\('playwright'\\)\\)\\)\")",
+      "Bash(py -3.14 -m pip install \"segno>=1.6\")",
+      "Bash(py -3.14 -c \"import segno, PIL; print\\('segno', segno.__version__, '| Pillow', PIL.__version__\\)\")",
+      "Bash(python -m py_compile ui/generador_qr.py)",
+      "Bash(python -m py_compile core/importador_excel.py)",
+      "Bash(python -m py_compile ui/carga_masiva.py core/importador_excel.py)",
+      "Bash(python -m py_compile core/importador_excel.py ui/carga_masiva.py)",
+      "Bash(python -m py_compile ui/registro_activos.py)",
+      "Bash(python -m py_compile core/sync_sipp.py)",
+      "Bash(python -m py_compile ui/actualizar_sipp.py core/sync_sipp.py ui/registro_activos.py ui/generador_qr.py)",
+      "Bash(python -m py_compile ui/actualizar_sipp.py ui/registro_activos.py ui/generador_qr.py)",
+      "Bash(python -m py_compile core/activos_sipp.py core/db.py core/tipos_activo.py ui/registro_activos.py)",
+      "Bash(python -m py_compile ui/captura_activo.py ui/registro_activos.py)",
+      "Bash(awk '/def _iniciar_registro_sipp/,/^    def [a-z]/' ui/registro_activos.py)",
+      "Bash(awk '/def _modificar_en_sipp/,/^    def [a-z]/' ui/registro_activos.py)",
+      "Bash(python -m py_compile ui/selector_empleado.py ui/selector_insumo.py)",
+      "Bash(python -m py_compile ui/selector_empleado.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c \"import sys; sys.path.insert\\(0,'.'\\); from core.empresas import NOMBRES_EMPRESAS; print\\([n for n in NOMBRES_EMPRESAS if 'ASKE' in n.upper\\(\\) or 'ASE' in n.upper\\(\\)]\\)\")",
+      "Bash(awk '/_JS_ELEGIR_OPCION = /,/^\"\"\"|^'\"'\"''\"'\"''\"'\"'/' core/rpa_sipp.py)",
+      "Bash(python -m py_compile ui/captura_activo.py)"
+    ]
+  }
+}
