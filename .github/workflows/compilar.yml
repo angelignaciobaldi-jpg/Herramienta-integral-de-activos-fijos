@@ -104,22 +104,14 @@ jobs:
       # 4. Publicar el instalador como asset del Release (nombre exacto que busca
       #    el AutoUpdater: Instalador_ActivosFijos.exe).
       #
-      #    Solo cuando el disparo VIENE de un Release: en una ejecución manual no
-      #    hay ninguno al que adjuntarlo, y la acción fallaría al final de un
-      #    build de media hora.
+      #    UN solo paso para los dos disparos. El tag sale del release cuando lo
+      #    hay, y de la entrada del formulario cuando se lanzó a mano: así el
+      #    botón adjunta al release YA PUBLICADO en vez de dejar el ejecutable
+      #    como artefacto suelto, que obligaba a bajarlo y subirlo a mano.
       - name: Subir Instalador al Release de GitHub
-        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
           files: Output/Instalador_ActivosFijos.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # En las manuales el instalable se deja como artefacto de la ejecución, que
-      # es de donde se descarga para probarlo sin publicar nada.
-      - name: Guardar Instalador como artefacto (ejecución manual)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: Instalador_ActivosFijos
-          path: Output/Instalador_ActivosFijos.exe
