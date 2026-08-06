@@ -146,11 +146,15 @@ class SeccionCartasResponsivas:
 
     # ---------------------------------------------------- panel MASIVA
     def _construir_masiva(self) -> ft.Control:
+        # Todos flotantes (etiqueta dentro) para que alineen; reparten el ancho por
+        # igual con `expand`.
         self.m_blq_empresa, self.m_dd_empresa = campo_opciones(
-            "Empresa", list(NOMBRES_EMPRESAS), width=320,
+            "Empresa", list(NOMBRES_EMPRESAS), flotante=True,
             on_change=lambda _e: self._m_reset())
         self.m_cf_desde = CampoFecha(self.page, "Desde (registro)", flotante=True)
         self.m_cf_hasta = CampoFecha(self.page, "Hasta (registro)", flotante=True)
+        for c in (self.m_dd_empresa, self.m_cf_desde.control, self.m_cf_hasta.control):
+            c.expand = True
         self.m_progreso = ft.ProgressRing(width=22, height=22, stroke_width=3,
                                           visible=False)
         # Búsqueda por BOTÓN/Enter (no en cada tecla): repintar 120 secciones por
@@ -170,8 +174,8 @@ class SeccionCartasResponsivas:
                         "colaborador con al menos uno marcado se incluye.", size=13,
                         color=GRIS),
                 ft.Divider(),
-                ft.Row([self.m_blq_empresa, self.m_cf_desde.control,
-                        self.m_cf_hasta.control, self.m_progreso], spacing=12, wrap=True,
+                ft.Row([self.m_dd_empresa, self.m_cf_desde.control,
+                        self.m_cf_hasta.control, self.m_progreso], spacing=12,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([boton_primario("Cargar colaboradores", ft.Icons.GROUPS,
                                        self._cargar_colaboradores),
