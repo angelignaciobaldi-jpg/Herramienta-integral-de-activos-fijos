@@ -624,41 +624,46 @@ class SesionSipp:
                 "No se cargó el catálogo de Activos Fijos (no apareció el filtro "
                 "de No. de serie del listado).") from exc
 
-    async def buscar_en_listado(self, valor: str, por_etiqueta: bool = False) -> int:
-        """Filtra el listado del catálogo por No. de serie o por ETIQUETA (número
-        de inventario) y devuelve cuántas filas resultaron (0 = no está dado de
-        alta). En los inventarios reales la mayoría de los activos no tiene serie,
-        así que la etiqueta es el identificador habitual."""
-        campo = ("js_filtroListado.de_Etiqueta" if por_etiqueta
-                 else "js_filtroListado.de_SerieActivo")
+    async def _limpiar_ambito_listado(self) -> None:
+        """Vacía empresa y sucursal del filtro del listado para que la búsqueda
+        sea global (solo por etiqueta/serie). Best-effort: si Angular no está o el
+        scope cambió, no rompe el flujo."""
         page = self._exigir_pagina()
-        await self.ir_a_catalogo_activos()
-        await self.set_input(campo, valor)
-        boton = await self._primer_visible(
-            [
-                page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
-                page.locator("button.btn-buscar25p"),
-            ],
-            "botón de buscar del listado de activos")
-        await self._click_seguro(boton)
-        await page.wait_for_timeout(2_500)  # la grid recarga por AJAX
-        return await self._contar_filas_grid()
+        try:
+            await page.evaluate(r"""() => {
+              const el = document.querySelector("[ng-model^='js_filtroListado']");
+              const sc = el && window.angular ? angular.element(el).scope() : null;
+              if (!sc || !sc.js_filtroListado) return;
+              sc.$apply(() => {
+                sc.js_filtroListado.id_Empresa = '';
+                sc.js_filtroListado.id_SucursalAsignado = '';
+              });
+            }""")
+        except Exception:  # noqa: BLE001
+            pass
 
     async def buscar_en_listado(self, etiqueta: str = "", serie: str = "") -> int:
         """Filtra el listado del catálogo por ETIQUETA (ancla principal) o, si no
         hay, por No. de serie; devuelve cuántas filas resultaron (0 = el activo NO
         está dado de alta). La etiqueta es más confiable: casi siempre existe,
-        mientras que muchos activos no traen serie."""
+        mientras que muchos activos no traen serie.
+
+        Busca **solo por etiqueta/serie**: antes de filtrar limpia empresa y
+        sucursal del `js_filtroListado`. Si no se limpian, el listado queda
+        acotado a la empresa/sucursal de la sesión (p. ej. Aske/Corporativo) y no
+        encuentra activos de otras empresas —era la causa de que un activo real de
+        otra empresa saliera como 'no dado de alta'."""
         page = self._exigir_pagina()
         await self.ir_a_catalogo_activos()
         etiqueta = (etiqueta or "").strip()
         serie = (serie or "").strip()
+        if not etiqueta and not serie:
+            return 0
+        await self._limpiar_ambito_listado()
         if etiqueta:
             await self.set_input("js_filtroListado.de_Etiqueta", etiqueta)
         elif serie:
             await self.set_input("js_filtroListado.de_SerieActivo", serie)
-        else:
-            return 0
         boton = await self._primer_visible(
             [
                 page.locator("[ng-click*=\"listarDatosGrid('listadoActivosFijos')\"]"),
