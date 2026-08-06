@@ -199,6 +199,9 @@ class SeccionRegistroActivos:
                 boton_herramienta("Asignar tipo", ft.Icons.CATEGORY,
                                   self._abrir_asignar_tipo,
                                   tooltip="Asigna el tipo de activo a los seleccionados"),
+                boton_herramienta("Asignar departamento", ft.Icons.APARTMENT,
+                                  self._abrir_asignar_departamento,
+                                  tooltip="Asigna el departamento a los seleccionados"),
                 boton_herramienta("Eliminar seleccionados", ft.Icons.DELETE_OUTLINE,
                                   self._eliminar_seleccionados, destructivo=True),
             ],
@@ -811,6 +814,43 @@ class SeccionRegistroActivos:
                 actions_alignment=ft.MainAxisAlignment.END,
             )
         )
+
+    def _abrir_asignar_departamento(self, _e=None) -> None:
+        """Asigna un departamento (del catálogo del SIPP) a los registros
+        seleccionados. El desplegable trae los departamentos importados del SIPP."""
+        ids = list(self._seleccionados)
+        if not ids:
+            self.app.avisar("Selecciona primero los activos.", NARANJA)
+            return
+        deptos = db.listar_departamentos_todos()
+        if not deptos:
+            self.app.avisar("No hay departamentos descargados del SIPP. Usa "
+                            "«Actualizar información del SIPP».", NARANJA)
+            return
+        bloque_dep, dd = campo_opciones(
+            "Departamento", deptos, width=380, hint="Elige un departamento")
+
+        def aplicar(_e=None) -> None:
+            nombre = (dd.value or "").strip()
+            if not nombre:
+                self.app.avisar("Elige un departamento.", ROJO)
+                return
+            n = db.actualizar_departamento_lote(ids, nombre)
+            self.page.pop_dialog()
+            self._refrescar()
+            self.app.avisar(f"{n} activo(s) con departamento «{nombre}».", VERDE)
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Asignar departamento"),
+            content=ft.Container(
+                ft.Column([ft.Text(f"Se aplicará a {len(ids)} activo(s) seleccionado(s).",
+                                   size=13), bloque_dep], spacing=12, tight=True),
+                width=420),
+            actions=[boton_herramienta("Cancelar",
+                                       on_click=lambda _e: self.page.pop_dialog()),
+                     boton_primario("Asignar", ft.Icons.CHECK, aplicar)],
+            actions_alignment=ft.MainAxisAlignment.END))
 
     # ------------------------------------------------------ acciones por fila
     def _ver_imagen(self, ruta: "str | None") -> None:

@@ -965,6 +965,34 @@ def listar_departamentos(id_empresa: int) -> list[str]:
     return [f["nb_departamento"] for f in filas]
 
 
+def listar_departamentos_todos() -> list[str]:
+    """Nombres de departamento DISTINTOS de todas las empresas cacheadas (para el
+    desplegable de asignación múltiple, donde la selección puede ser de varias)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT DISTINCT nb_departamento FROM departamentos_sipp "
+            "WHERE IFNULL(nb_departamento,'') <> '' ORDER BY nb_departamento").fetchall()
+    return [f["nb_departamento"] for f in filas]
+
+
+def actualizar_departamento_lote(ids: list[int], departamento: str) -> int:
+    """Asigna el mismo departamento (columna del registro) a muchos registros de una
+    vez. Devuelve cuántos se actualizaron. Los ids se procesan por bloques (SQLite
+    limita los parámetros por sentencia)."""
+    if not ids:
+        return 0
+    TAM, n = 500, 0
+    with _conectar() as con:
+        for i in range(0, len(ids), TAM):
+            lote = ids[i:i + TAM]
+            marcadores = ",".join("?" * len(lote))
+            cur = con.execute(
+                f"UPDATE levantamiento SET departamento = ? WHERE id IN ({marcadores})",
+                [departamento, *lote])
+            n += cur.rowcount
+    return n
+
+
 def reemplazar_grupos_cc(id_empresa: int, registros: list[dict]) -> int:
     """Reemplaza los grupos de centro de costo de una empresa. Cada dict:
     id_grupo, nb_grupo, id_sucursal, sucursal (nombre; se normaliza)."""
