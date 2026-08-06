@@ -27,7 +27,7 @@ import os
 
 import flet as ft
 
-from core import archivos, compras_sipp, credenciales, db, rutas
+from core import archivos, comparacion_sipp, compras_sipp, credenciales, db, rutas
 from core.empresas import ID_POR_EMPRESA
 from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
@@ -561,6 +561,15 @@ class SeccionRegistroActivos:
                 icon=ft.Icons.INFO_OUTLINE, icon_size=20, icon_color=VERDE,
                 tooltip="Ver información registrada en el SIPP",
                 on_click=lambda _e, reg=r: self._ver_info_sipp(reg)))
+            # Comparar SIPP vs Excel: en ámbar si hay diferencias, en verde si
+            # coinciden. Solo aplica a activos dados de alta (hay ambos lados).
+            n_dif = len(comparacion_sipp.campos_distintos(r))
+            controles_accion.append(ft.IconButton(
+                icon=ft.Icons.COMPARE_ARROWS, icon_size=20,
+                icon_color=NARANJA if n_dif else VERDE,
+                tooltip=(f"Comparar SIPP vs Excel ({n_dif} diferencia(s))" if n_dif
+                         else "Comparar SIPP vs Excel (coinciden)"),
+                on_click=lambda _e, reg=r: self._comparar_sipp(reg)))
         # Buscar factura en el sistema: solo si el activo tiene un No. de serie
         # válido (existe y no coincide con la etiqueta).
         if compras_sipp.serie_valida(r.no_serie, r.etiqueta):
@@ -890,6 +899,169 @@ class SeccionRegistroActivos:
         modal = Modal(self.page, "Información registrada en el SIPP", ancho=520)
         modal.set_acciones([boton_secundario("Cerrar", on_click=lambda _e: modal.cerrar())])
         modal.cuerpo.controls = filas
+        modal.abrir()
+
+    def _comparar_sipp(self, reg: "db.Levantamiento") -> None:
+        """Compara, campo por campo, los datos del SIPP contra los del Excel del
+        activo dado de alta. El usuario elige en cada diferencia qué valor prevalece:
+
+        - **SIPP** (conservar el SIPP): se copia el valor del SIPP al levantamiento
+          local. No toca el SIPP.
+        - **Excel** (sobrescribir el SIPP): el valor del Excel se marca para
+          enviarse al SIPP con «Realizar modificación en SIPP» (RPA). Insumo y
+          empleado no se empujan como texto (se eligen por modal en el SIPP)."""
+        info = reg.info_sipp()
+        if not info:
+            self.app.avisar("Este registro no tiene datos del SIPP. Corre "
+                            "«Buscar en SIPP» de nuevo.", NARANJA)
+            return
+        difs = comparacion_sipp.comparar(reg)
+        distintos = [d for d in difs if d.difiere]
+        if not distintos:
+            self.app.avisar("Sin diferencias: los datos del SIPP y del Excel "
+                            "coinciden.", VERDE)
+            return
+
+        # Elección por campo. Por defecto gana el lado que TIENE valor cuando el
+        # otro está vacío; ante conflicto real (ambos con valor) gana el Excel (el
+        # dato recién capturado), que el usuario revisa y puede cambiar.
+        eleccion: dict[str, str] = {}
+        for d in distintos:
+            if not d.excel_crudo:
+                eleccion[d.campo.clave] = "sipp"
+            else:
+                eleccion[d.campo.clave] = "excel"
+
+        celdas: dict[str, tuple] = {}   # clave -> (celda_sipp, celda_excel)
+        _BORDES = 8
+
+        def _celda(texto: str, activa: bool, lado: str) -> ft.Container:
+            return ft.Container(
+                ft.Text(texto, size=13, selectable=False,
+                        color=ft.Colors.ON_SURFACE if activa else GRIS),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                border_radius=_BORDES, expand=True,
+                bgcolor=(ft.Colors.with_opacity(0.12, ft.Colors.PRIMARY)
+                         if activa else None),
+                border=ft.Border.all(
+                    2 if activa else 1,
+                    ft.Colors.PRIMARY if activa
+                    else ft.Colors.with_opacity(0.4, ft.Colors.OUTLINE)),
+                data=lado)
+
+        def _repintar() -> None:
+            for clave, (c_sipp, c_excel) in celdas.items():
+                sel = eleccion[clave]
+                for cel, lado in ((c_sipp, "sipp"), (c_excel, "excel")):
+                    activa = sel == lado
+                    cel.bgcolor = (ft.Colors.with_opacity(0.12, ft.Colors.PRIMARY)
+                                   if activa else None)
+                    cel.border = ft.Border.all(
+                        2 if activa else 1,
+                        ft.Colors.PRIMARY if activa
+                        else ft.Colors.with_opacity(0.4, ft.Colors.OUTLINE))
+                    cel.content.color = (ft.Colors.ON_SURFACE if activa else GRIS)
+            modal.refrescar()
+
+        def _elegir(clave: str, lado: str) -> None:
+            eleccion[clave] = lado
+            _repintar()
+
+        def _fila_dif(d) -> ft.Control:
+            c_sipp = _celda(d.sipp, eleccion[d.campo.clave] == "sipp", "sipp")
+            c_excel = _celda(d.excel, eleccion[d.campo.clave] == "excel", "excel")
+            celdas[d.campo.clave] = (c_sipp, c_excel)
+            c_sipp.on_click = lambda _e, k=d.campo.clave: _elegir(k, "sipp")
+            c_excel.on_click = lambda _e, k=d.campo.clave: _elegir(k, "excel")
+            nota = "" if d.campo.empujable else "  (solo local)"
+            return ft.Row([
+                ft.Text(d.campo.etiqueta + nota, size=13,
+                        weight=ft.FontWeight.W_600, width=170, color=GRIS),
+                c_sipp, c_excel,
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8)
+
+        def _fila_igual(d) -> ft.Control:
+            return ft.Row([
+                ft.Text(d.campo.etiqueta, size=13, width=170, color=GRIS),
+                ft.Text(d.sipp, size=13, color=GRIS, expand=True),
+                ft.Icon(ft.Icons.CHECK, size=16, color=VERDE),
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8)
+
+        encabezado = ft.Row([
+            ft.Text("Campo", size=12, weight=ft.FontWeight.W_700, width=170,
+                    color=GRIS),
+            ft.Text("SIPP", size=12, weight=ft.FontWeight.W_700, expand=True,
+                    color=GRIS),
+            ft.Text("Excel", size=12, weight=ft.FontWeight.W_700, expand=True,
+                    color=GRIS),
+        ], spacing=8)
+
+        iguales = [d for d in difs if not d.difiere]
+        cuerpo = [
+            ft.Text("Elige, en cada diferencia, qué valor prevalece. «SIPP» copia "
+                    "el dato al levantamiento local; «Excel» lo marca para enviarse "
+                    "al SIPP con «Realizar modificación en SIPP».",
+                    size=12, color=GRIS),
+            ft.Row([
+                boton_herramienta("Conservar todo del SIPP",
+                                  on_click=lambda _e: [eleccion.update(
+                                      {d.campo.clave: "sipp" for d in distintos}),
+                                      _repintar()]),
+                boton_herramienta("Usar todo del Excel",
+                                  on_click=lambda _e: [eleccion.update(
+                                      {d.campo.clave: "excel" for d in distintos}),
+                                      _repintar()]),
+            ], spacing=8),
+            ft.Divider(),
+            encabezado,
+        ]
+        cuerpo += [_fila_dif(d) for d in distintos]
+        if iguales:
+            cuerpo.append(ft.Divider())
+            cuerpo.append(ft.Text(f"Campos que coinciden ({len(iguales)})", size=12,
+                                  weight=ft.FontWeight.W_600, color=GRIS))
+            cuerpo += [_fila_igual(d) for d in iguales]
+
+        modal = Modal(self.page, "Comparar SIPP vs Excel",
+                      subtitulo=reg.nombre_insumo, ancho=680)
+        modal.cuerpo.controls = cuerpo
+
+        def aplicar(_e=None) -> None:
+            datos = dict(reg.datos())
+            n_push = 0
+            no_empujables: list[str] = []
+            for d in distintos:
+                c = d.campo
+                if eleccion[c.clave] == "sipp":
+                    datos[c.clave] = d.sipp_crudo   # traer el dato del SIPP (local)
+                else:                                # gana el Excel
+                    datos[c.clave] = d.excel_crudo
+                    if c.empujable and c.ng_model:
+                        n_push += 1
+                    else:
+                        no_empujables.append(c.etiqueta)
+            # Si hay algo que empujar al SIPP, se marca modificado para que el RPA
+            # de modificación lo reenvíe. Si solo se conservó el SIPP, no hace falta.
+            db.actualizar_datos_levantamiento(
+                reg.id, datos=datos, modificado=True if n_push else None)
+            modal.cerrar()
+            self._refrescar()
+            if n_push:
+                msg = (f"Reconciliado. {n_push} cambio(s) se enviarán al SIPP con "
+                       "«Realizar modificación en SIPP».")
+            else:
+                msg = "Levantamiento actualizado con los datos del SIPP."
+            self.app.avisar(msg, VERDE, duracion=7000)
+            if no_empujables:
+                self.app.avisar(
+                    "Estos campos no se envían automáticamente al SIPP (se eligen "
+                    f"a mano allá): {', '.join(no_empujables)}.", NARANJA,
+                    duracion=8000)
+
+        modal.set_acciones([
+            boton_secundario("Cancelar", on_click=lambda _e: modal.cerrar()),
+            boton_primario("Aplicar", ft.Icons.CHECK, aplicar),
+        ])
         modal.abrir()
 
     def _resolver_parcial(self, reg: "db.Levantamiento") -> None:
