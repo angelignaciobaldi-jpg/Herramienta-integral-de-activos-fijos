@@ -308,6 +308,20 @@ class DialogoCapturaActivo:
         # Ubicación del levantamiento + tipo encabezan el cuerpo; debajo va la
         # zona dinámica, que se repinta al cambiar el tipo.
         self._area_campos = ft.Column(spacing=28, tight=True)
+        # Imágenes/soporte del insumo (se suben al SIPP con el RPA al dar de alta).
+        self._imagenes_insumo: list[str] = []
+        self._area_imagenes = ft.Column(spacing=4, tight=True)
+        seccion_imagenes = seccion_formulario(
+            "Imágenes del insumo (PDF, JPG o PNG · máx 3)", ft.Icons.PHOTO_LIBRARY,
+            [ft.Column(
+                [ft.Row([boton_secundario("Agregar imágenes",
+                                          ft.Icons.ADD_PHOTO_ALTERNATE,
+                                          self._agregar_imagenes)]),
+                 self._area_imagenes,
+                 ft.Text("Se subirán al SIPP junto con el activo al darlo de alta.",
+                         size=11, color=GRIS)],
+                spacing=8, tight=True)],
+            columnas=1)
         self.modal.cuerpo.controls = [
             seccion_formulario(
                 "Ubicación del levantamiento", ft.Icons.PLACE,
@@ -319,6 +333,7 @@ class DialogoCapturaActivo:
             seccion_formulario("Tipo de activo", ft.Icons.CATEGORY,
                                [self.dd_tipo], columnas=1),
             self._area_campos,
+            seccion_imagenes,
         ]
 
     # ------------------------------------------------------- apertura
@@ -332,6 +347,8 @@ class DialogoCapturaActivo:
         self.campo_sucursal.value = registro.sucursal or ""
         self.campo_departamento.value = registro.departamento or ""
         self.tf_etiqueta.value = registro.etiqueta or ""
+        self._imagenes_insumo = list(registro.datos().get("imagenes_insumo") or [])
+        self._pintar_imagenes()
         self._render_campos()
         self.modal.abrir()
 
@@ -642,6 +659,58 @@ class DialogoCapturaActivo:
         self.app.avisar("Datos de la factura traídos" + (": " + ", ".join(detalle)
                         if detalle else "") + ".", VERDE, duracion=7000)
 
+    # ----------------------------------------------- imágenes del insumo
+    async def _agregar_imagenes(self, _e=None) -> None:
+        import os
+        import shutil
+
+        from core import rutas
+        if len(self._imagenes_insumo) >= 3:
+            self.app.avisar("Máximo 3 imágenes por activo.", NARANJA)
+            return
+        archivos = await self.app.picker.pick_files(
+            dialog_title="Selecciona imágenes del insumo (PDF, JPG o PNG)",
+            allowed_extensions=["pdf", "jpg", "jpeg", "png"], allow_multiple=True)
+        if not archivos:
+            return
+        # Se copian a DATOS para que sigan disponibles al correr el RPA aunque el
+        # usuario mueva los originales.
+        carpeta = os.path.join(rutas.DATOS, "imagenes_insumo")
+        os.makedirs(carpeta, exist_ok=True)
+        for a in archivos:
+            if len(self._imagenes_insumo) >= 3:
+                self.app.avisar("Solo se toman las primeras 3 imágenes.", NARANJA)
+                break
+            destino = os.path.join(carpeta, os.path.basename(a.path))
+            try:
+                if os.path.abspath(a.path) != os.path.abspath(destino):
+                    shutil.copy2(a.path, destino)
+            except Exception:  # noqa: BLE001 — si no se pudo copiar, se usa el original
+                destino = a.path
+            if destino not in self._imagenes_insumo:
+                self._imagenes_insumo.append(destino)
+        self._pintar_imagenes()
+
+    def _pintar_imagenes(self) -> None:
+        import os
+        if not self._imagenes_insumo:
+            self._area_imagenes.controls = [
+                ft.Text("Sin imágenes.", size=11, color=GRIS)]
+        else:
+            self._area_imagenes.controls = [
+                ft.Row([ft.Icon(ft.Icons.INSERT_DRIVE_FILE, size=16, color=GRIS),
+                        ft.Text(os.path.basename(p), size=12, expand=True, no_wrap=False),
+                        icono_accion(ft.Icons.CLOSE, "Quitar",
+                                     lambda _e, p=p: self._quitar_imagen(p))],
+                       spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                for p in self._imagenes_insumo]
+        self._safe_update()
+
+    def _quitar_imagen(self, p: str) -> None:
+        if p in self._imagenes_insumo:
+            self._imagenes_insumo.remove(p)
+        self._pintar_imagenes()
+
     # ---------------------------------------------------------- guardar
     def _guardar(self, _e=None) -> None:
         if self._registro is None:
@@ -689,6 +758,9 @@ class DialogoCapturaActivo:
         # El nombre del insumo elegido en "Identificación" se refleja en la COLUMNA
         # del registro (la que se ve en el listado): es el insumo REAL del SIPP.
         insumo_cap = (valores.get("nb_NombreInsumo") or "").strip()
+        # Imágenes del insumo (rutas): se guardan en datos_json para que el RPA las
+        # suba al alta.
+        valores["imagenes_insumo"] = list(self._imagenes_insumo)
         db.actualizar_datos_levantamiento(
             self._registro.id, id_tipo_activo=tipo, datos=valores,
             modificado=True if ya_de_alta else None,

@@ -1359,7 +1359,8 @@ class SeccionRegistroActivos:
                             serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
                             empresa=r.empresa or "", sucursal=r.sucursal or "",
                             empleado_nombre=(r.datos().get("nb_Empleado")
-                                             or r.responsable or ""))
+                                             or r.responsable or ""),
+                            imagenes=r.datos().get("imagenes_insumo") or [])
                         db.actualizar_estatus_levantamiento(
                             r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
                         if etiqueta_gen:

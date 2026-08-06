@@ -767,7 +767,7 @@ class SesionSipp:
                           insumo_id=None, empleado_id=None,
                           serie: str = "", etiqueta_actual: str = "",
                           empresa: str = "", sucursal: str = "",
-                          empleado_nombre: str = "") -> None:
+                          empleado_nombre: str = "", imagenes: "list | None" = None) -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -863,6 +863,17 @@ class SesionSipp:
                 if clave.endswith("id_GrupoCentroCosto"):
                     await page.wait_for_timeout(1000)  # deja cargar los centros
             except Exception:  # noqa: BLE001 — no aplica: se omite
+                pass
+
+        # Imágenes/soporte del insumo (Fotografía, máx 3): se suben al input de
+        # archivo del alta (ng-change="subirFotografia(this)"). Best-effort.
+        rutas_img = [p for p in (imagenes or []) if p and os.path.exists(p)][:3]
+        if rutas_img:
+            try:
+                await page.set_input_files(
+                    "input[ng-change='subirFotografia(this)']", rutas_img)
+                await page.wait_for_timeout(1000)  # ng-change subirFotografia procesa
+            except Exception:  # noqa: BLE001 — no crítico: se omite
                 pass
 
         # La ETIQUETA/folio es un consecutivo GLOBAL del SIPP (getEtiqueta ignora
