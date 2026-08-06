@@ -55,11 +55,18 @@ def desanidar(respuesta: dict, clave: str) -> dict:
     return primero(json.loads(crudo))
 
 
+# Cabecera con la que el servicio espera el token. NO es `Authorization: Bearer`:
+# va en una cabecera propia y con el token DESNUDO, sin prefijo de esquema. Se
+# deja como constante para que se vea que es una decisión del servidor y no un
+# descuido que alguien "corrija" de vuelta al estándar (con Bearer responde 401).
+CABECERA_TOKEN = "x-auth-token"
+
+
 def _headers() -> dict[str, str]:
     cabeceras = {"Accept": "application/json", "Content-Type": "application/json"}
     tok = ajustes_api.token()
     if tok:
-        cabeceras["Authorization"] = f"Bearer {tok}"
+        cabeceras[CABECERA_TOKEN] = tok
     return cabeceras
 
 
