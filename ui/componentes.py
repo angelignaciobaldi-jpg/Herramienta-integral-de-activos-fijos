@@ -659,10 +659,25 @@ def tarjeta_seccion(contenido: ft.Control, *, padding: int = GAP_LG) -> ft.Conta
 _FADE_MS = 140
 # Reparto del alto de un modal. El cuerpo es lo ÚNICO que se recorta: encabezado
 # y pie deben verse siempre, porque el pie es donde viven Guardar y Cancelar.
-_INSET_MODAL = 24            # margen del AlertDialog contra el borde de la ventana
+INSET_MODAL = 24             # margen del AlertDialog contra el borde de la ventana
 _ALTO_CROMO_MODAL = 220      # encabezado + pie
 _MARGEN_MODAL = 48           # respiro extra, para no depender de la estimación
 _ALTO_CUERPO_MIN = 180       # por debajo de esto el formulario ya no se usa
+
+
+def ancho_util_modal(page) -> int:
+    """Ancho MÁXIMO que puede tener un modal sin salirse de la ventana.
+
+    Pedir más no lo ensancha: el `AlertDialog` lo recorta contra el borde, y lo
+    que queda fuera no se alcanza con ningún scroll —el recorte ocurre por
+    encima de cualquier área desplazable del contenido—. Vive aquí, junto al
+    `INSET_MODAL` que descuenta, para que quien calcule un ancho no tenga que
+    saberse el margen del diálogo.
+
+    Cero si la ventana todavía no se ha medido; quien llame decide su respaldo.
+    """
+    ventana = getattr(page, "width", None) or 0
+    return max(0, round(ventana) - 2 * INSET_MODAL)
 
 
 class Modal:
@@ -756,7 +771,7 @@ class Modal:
             content_padding=ft.Padding.all(0), content=self.tarjeta,
             # Explícito: el cálculo de alto lo descuenta, y el de Material
             # (40x24) no está garantizado entre versiones.
-            inset_padding=ft.Padding.all(_INSET_MODAL),
+            inset_padding=ft.Padding.all(INSET_MODAL),
             barrier_color=ft.Colors.with_opacity(0.4, ft.Colors.BLACK),
             on_dismiss=lambda _e: self._soltar_teclado())
         self._tecla_previa = None
@@ -788,7 +803,7 @@ class Modal:
         alto_pagina = getattr(self.page, "height", None) or 800
         # Todo lo que NO es cuerpo se descuenta explícitamente, en vez de
         # aproximarlo con un porcentaje del alto de la ventana.
-        disponible = (alto_pagina - 2 * _INSET_MODAL - _ALTO_CROMO_MODAL
+        disponible = (alto_pagina - 2 * INSET_MODAL - _ALTO_CROMO_MODAL
                       - _MARGEN_MODAL)
         self._scroll.height = max(_ALTO_CUERPO_MIN,
                                   min(self._alto_cuerpo, disponible))
@@ -834,6 +849,23 @@ class Modal:
     def _al_teclear(self, e) -> None:
         if e.key == "Escape":
             self.cerrar()
+
+    def reajustar(self, ancho: int | None = None) -> None:
+        """Vuelve a encajar el modal en la ventana. Idempotente.
+
+        Alto y ancho se fijan en PÍXELES —al abrir y al construir—, así que un
+        redimensionado de la ventana los deja con la medida de antes: el modal
+        queda más grande que su hueco y el `AlertDialog` lo recorta, dejando
+        fuera contenido inalcanzable.
+
+        No se resuelve solo porque `page.on_resize` es un slot único que
+        multiplexa el shell; quien tenga un modal abierto lo llama desde su
+        `_on_resize` (ver el contrato de pantalla en CLAUDE.md).
+        """
+        if ancho:
+            self.tarjeta.width = ancho
+        self._ajustar_alto()
+        self.refrescar()
 
     def refrescar(self) -> None:
         _refrescar(self.tarjeta)
