@@ -27,7 +27,7 @@ from core import paginado as paginado_api
 from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from core.tipos_activo import TIPOS_ACTIVO
 from ui.componentes import (GAP_LG, GAP_MD, GAP_SM, GUTTER_SCROLL, RADIO, Modal,
-                            SelectCompacto, boton_herramienta,
+                            SelectCompacto, ancho_util_modal, boton_herramienta,
                             boton_primario_icono, boton_secundario,
                             campo_tabla_texto, tarjeta_seccion)
 from ui.comun import CENTRO, GRIS, NARANJA, ROJO
@@ -125,13 +125,13 @@ _SIN_INFO = "No hay información para mostrar"
 # tres columnas y a pantalla casi completa quedaba desangelado; el de actividad
 # son nueve y necesita cuanto haya. Con una sola fracción para todos, ensanchar
 # uno ensanchaba el otro.
-#
-# El tope es el ancho de la ventana menos 48 —el `Modal` deja 24 de inset por
-# lado—, y el 95% de 960 son justo 912, así que ni el más ancho se pasa.
 _FRACCION_MODAL_ESTRECHO = 0.75
 _FRACCION_MODAL_ANCHO = 0.95
 # Respaldo para cuando todavía no se ha medido la ventana (arranque, pruebas).
-_ANCHO_MODAL_MIN = 900
+# NO es un piso: por debajo de él el modal sigue encogiendo con la ventana, que
+# es lo que deja sitio a la barra horizontal de la tabla. Forzarlo como mínimo
+# hacía que el modal se saliera y lo recortara el diálogo.
+_ANCHO_MODAL_RESPALDO = 900
 _ALTO_CUERPO_MODAL = 420
 # Esqueleto mientras el modal trae su contenido: dibuja su MISMA disposición
 # —dos bloques de resumen arriba y la tabla debajo— en vez de una pila de
@@ -146,13 +146,15 @@ _FORMA_ESQ_INVERSION = ((2, _ALTO_ESQ_RESUMEN), (1, _ALTO_ESQ_TABLA))
 _FORMA_ESQ_LISTADO = ((1, _ALTO_ESQ_TABLA + _ALTO_ESQ_RESUMEN),)
 
 # Encabezado del detalle de inversión: los dos grupos que separa el SP.
-_GRUPOS_INVERSION = (("Activos", True), ("Inactivos", False))
+_GRUPOS_INVERSION = (("Habilitados", True), ("Inhabilitados", False))
 # Acentos de cada grupo. Viven en ui/tema.py, que es la fuente única del color.
 _ACENTO_VIGENTE = tema.VERDE_DINERO
 _ACENTO_BAJA = tema.AMBAR_BAJA
-# Del ancho útil, el contenido ocupa casi todo, con un hilo de aire contra los
-# bordes.
-_FRACCION_CONTENIDO = 0.99
+# Hilo de aire entre el contenido y los filos del cuerpo del modal. Es un PADDING
+# y no una fracción del ancho: la fracción obligaba a fijar un ancho en píxeles a
+# cada bloque, y ese número se quedaba viejo en cuanto la ventana cambiaba de
+# tamaño. Con relleno, los bloques son fluidos y siguen al modal solos.
+_AIRE_CONTENIDO = 4
 # Respiro a la derecha de las columnas numéricas, para que el importe no acabe
 # pegado al filo de la tabla.
 _PAD_DER_TABLA = 12
@@ -319,30 +321,37 @@ def _formatear_importe(imp: Importe, valor: float) -> str:
 
 
 def _ancho_modal(page, fraccion: float = _FRACCION_MODAL_ESTRECHO) -> int:
-    """Ancho de un modal: la fracción de la ventana que pida.
+    """Ancho de un modal: la fracción de la ventana que pida, SIN salirse de ella.
+
+    El tope no es cosmético. Pasarse del ancho útil no ensancha el modal: el
+    `AlertDialog` lo recorta contra el borde de la ventana, y ese recorte ocurre
+    por encima de cualquier scroll del contenido, así que lo que queda fuera es
+    inalcanzable —columnas cortadas sin barra con la que llegar a ellas—.
 
     Con la ventana sin medir —al arrancar, o en una prueba sin página— cae al
-    respaldo: un modal de ancho cero no se vería, y uno del ancho de la pantalla
-    entera se saldría.
+    respaldo: un modal de ancho cero no se vería.
     """
+    util = ancho_util_modal(page)
+    if util <= 0:
+        return _ANCHO_MODAL_RESPALDO
     ventana = getattr(page, "width", None) or 0
-    return max(_ANCHO_MODAL_MIN, round(ventana * fraccion))
+    return max(1, min(round(ventana * fraccion), util))
 
 
 def _ancho_contenido(modal: Modal) -> int:
-    """Ancho al que se acota TODO el contenido del modal.
+    """Ancho al que llega el contenido del modal, para quien necesite un número.
 
-    Se deduce del modal en vez de arrastrarse por parámetro: así el ancho vive
-    en un solo sitio —el que se le pasó al construirlo— y ningún bloque puede
-    quedarse con una medida vieja.
+    Solo lo usan las medidas de ARRANQUE —el ancho inicial de una tabla, el de
+    las barras del esqueleto—, que se corrigen solas al medirse. El contenido ya
+    montado NO se dimensiona con esto: es fluido (ver `_acotado`) y sigue al
+    modal sin que nadie le pase un ancho.
 
     Del ancho del modal se descuentan los rellenos que él mismo pone —izquierda
-    `GAP_LG`, derecha `GAP_SM`— y el canalón que reserva para la barra de
-    scroll.
+    `GAP_LG`, derecha `GAP_SM`—, el canalón de su barra de scroll y el aire
+    lateral del propio acotado.
     """
-    ancho = getattr(modal.tarjeta, "width", None) or _ANCHO_MODAL_MIN
-    util = ancho - GAP_LG - GAP_SM - GUTTER_SCROLL
-    return round(util * _FRACCION_CONTENIDO)
+    ancho = getattr(modal.tarjeta, "width", None) or _ANCHO_MODAL_RESPALDO
+    return max(1, ancho - GAP_LG - GAP_SM - GUTTER_SCROLL - 2 * _AIRE_CONTENIDO)
 
 
 def _mensaje_modal(texto: str, icono, *, color: str | None = None) -> ft.Control:
@@ -470,18 +479,26 @@ def _tabla_inversion(page, datos, ancho: int) -> ft.Control:
     return tabla.control
 
 
-def _acotado(contenido: ft.Control, ancho: int) -> ft.Control:
-    """Centra un bloque del modal en el ancho de contenido.
+def _acotado(contenido: ft.Control) -> ft.Control:
+    """Bloque del modal con su aire lateral, a ancho FLUIDO.
 
     Se usa para TODOS los bloques, no solo para la tabla: con la tabla acotada y
     las tarjetas a ancho completo, sus filos quedaban desalineados por unos
     píxeles, que es de lo que más se nota en una ventana estrecha.
+
+    No fija ancho a propósito. `Modal.cuerpo` es un `Column` con `STRETCH`, así
+    que este contenedor recibe el ancho vigente del modal y se lo pasa a su
+    contenido; cuando el modal cambia de tamaño, el bloque le sigue. Con un
+    ancho en píxeles —como estaba— el bloque conservaba el que se calculó al
+    abrir: la tabla nunca se enteraba de que la ventana había encogido, sus
+    columnas no se recomputaban y su scroll horizontal no llegaba a aparecer.
     """
-    return ft.Row([ft.Container(contenido, width=ancho)],
-                  alignment=ft.MainAxisAlignment.CENTER)
+    return ft.Container(contenido,
+                        padding=ft.Padding.symmetric(
+                            horizontal=_AIRE_CONTENIDO))
 
 
-def _esqueleto_modal(forma: tuple, ancho: int) -> tuple[list, tuple]:
+def _esqueleto_modal(forma: tuple) -> tuple[list, tuple]:
     """Esqueleto con la MISMA disposición que el contenido que va a relevarlo.
 
     `forma` es `((columnas, alto), ...)`, un bloque por elemento. Devuelve
@@ -501,7 +518,7 @@ def _esqueleto_modal(forma: tuple, ancho: int) -> tuple[list, tuple]:
         grupos.append(grupo)
     # Acotados igual que el contenido real, para que las barras caigan justo
     # donde va a caer lo que las sustituye.
-    return [_acotado(g.control, ancho) for g in grupos], tuple(grupos)
+    return [_acotado(g.control) for g in grupos], tuple(grupos)
 
 
 def _detener(grupos: tuple) -> None:
@@ -514,10 +531,10 @@ def _cuerpo_inversion(page, datos, ancho: int) -> list:
     """Contenido completo del modal: cabecera de totales y tabla de detalle."""
     return [
         _acotado(ft.Row(
-            [_resumen_inversion("Activos", datos.vigentes, _ACENTO_VIGENTE),
-             _resumen_inversion("Inactivos", datos.bajas, _ACENTO_BAJA)],
-            spacing=GAP_MD), ancho),
-        _acotado(_tabla_inversion(page, datos, ancho), ancho),
+            [_resumen_inversion("habilitados", datos.vigentes, _ACENTO_VIGENTE),
+             _resumen_inversion("inhabilitados", datos.bajas, _ACENTO_BAJA)],
+            spacing=GAP_MD)),
+        _acotado(_tabla_inversion(page, datos, ancho)),
     ]
 
 
@@ -544,7 +561,7 @@ def _tabla_columnas_actividad() -> list:
         ColumnaTabla("Etiqueta", 9, ancho_min_px=70),
         ColumnaTabla("Serie", 11, ancho_min_px=80),
         ColumnaTabla("Activo", 15, alineacion=IZQ, ancho_min_px=100),
-        ColumnaTabla("Observaciones", 11, alineacion=IZQ, ancho_min_px=80),
+        ColumnaTabla("Observaciones", 10, alineacion=IZQ, ancho_min_px=80),
         ColumnaTabla("Precio", 7, alineacion=DER, ancho_min_px=60,
                      padding_der=_PAD_DER_TABLA),
     ]
@@ -584,7 +601,7 @@ def _tabla_columnas_listado() -> list:
         ColumnaTabla("Fecha", 9, ancho_min_px=68),
         ColumnaTabla("Etiqueta", 10, ancho_min_px=70),
         ColumnaTabla("Serie", 12, ancho_min_px=80),
-        ColumnaTabla("Activo", 19, alineacion=IZQ, ancho_min_px=100),
+        ColumnaTabla("Activo", 18, alineacion=IZQ, ancho_min_px=100),
         ColumnaTabla("Precio", 10, alineacion=DER, ancho_min_px=60,
                      padding_der=_PAD_DER_TABLA),
     ]
@@ -720,8 +737,7 @@ class _PaginadorTabla:
         ancho = _ancho_contenido(self.modal)
         self.modal.cuerpo.controls = (
             [_mensaje_modal(_SIN_INFO, ft.Icons.INBOX)] if datos.vacia
-            else [_acotado(self._tabla(self.seccion.page, datos, ancho),
-                           ancho)])
+            else [_acotado(self._tabla(self.seccion.page, datos, ancho))])
         self._rango.value = f"{datos.desde:,}–{datos.hasta:,} de {datos.total:,}"
         self._de_paginas.value = f"de {datos.paginas:,}"
         self._restaurar_pagina()
@@ -836,14 +852,20 @@ class SeccionDashboard:
         self._ids_sucursal: dict[str, int] = {}
         # Sucursales ya consultadas, por empresa.
         self._cache_sucursales: dict[int, list] = {}
+        # Modal de detalle a la vista, con la fracción de ventana que pidió. Se
+        # guarda porque su ancho es un número en píxeles que hay que rehacer
+        # cuando la ventana cambia de tamaño (ver `_on_resize`). Solo puede
+        # haber uno: se abren desde las tarjetas, que quedan detrás del diálogo.
+        self._modal_abierto: Modal | None = None
+        self._fraccion_abierta = _FRACCION_MODAL_ESTRECHO
         self._construir()
 
     def _construir(self) -> None:
         # --- Tarjetas -----------------------------------------------------
         self.tar_total = TarjetaTotalActivos(
             _SIN_DATO, _SIN_DATO, ft.Icons.INVENTORY_2,
-            titulo_bajas="Inactivos",
-            titulo_panel="Por tipo (solo activos)",
+            titulo_bajas="inhabilitados",
+            titulo_panel="Por tipo (solo habilitados)",
             # Las dos cifras abren el MISMO modal, pero por manejadores
             # distintos: cada una se guarda contra su propio conteo, para que un
             # tablero con activos y cero inactivos deje entrar por la primera.
@@ -862,7 +884,7 @@ class SeccionDashboard:
             color_acento=tema.VERDE_DINERO)
 
         self.tar_ranking = TarjetaRanking(
-            "Top empresas (movimientos)", ft.Icons.LEADERBOARD,
+            "Top empresas (activos)", ft.Icons.LEADERBOARD,
             vacio=_SIN_ACTIVOS)
 
         self.tar_actividad = TarjetaActividad(
@@ -1290,16 +1312,22 @@ class SeccionDashboard:
             return
         modal = Modal(self.page, titulo,
                       ancho=_ancho_modal(self.page, fraccion),
-                      alto_cuerpo=_ALTO_CUERPO_MODAL)
+                      alto_cuerpo=_ALTO_CUERPO_MODAL,
+                      al_cerrar=self._soltar_modal)
         # Las acciones se ponen DESPUÉS de construir: el manejador de «Cerrar»
         # necesita el modal, que todavía no existía al pasar el constructor.
         modal.set_acciones([boton_secundario(
             "Cerrar", on_click=lambda _e: modal.cerrar())])
+        self._modal_abierto, self._fraccion_abierta = modal, fraccion
         # Se abre YA, con el esqueleto puesto: esperar a la respuesta con la
         # ventana quieta deja al usuario sin saber si el clic se registró.
         grupos = self._mostrar_esqueleto(modal, forma)
         modal.abrir()
         self.page.run_task(cargar, modal, grupos)
+
+    def _soltar_modal(self, *_a) -> None:
+        """Olvida el modal cerrado, para no reajustar uno que ya no se ve."""
+        self._modal_abierto = None
 
     def _mostrar_esqueleto(self, modal: Modal, forma: tuple) -> tuple:
         """Pone el esqueleto en el cuerpo del modal y lo echa a andar.
@@ -1307,7 +1335,7 @@ class SeccionDashboard:
         Devuelve los grupos, que quien cargue tendrá que detener. Se usa tanto
         al abrir como al cambiar de página, que es la misma espera.
         """
-        controles, grupos = _esqueleto_modal(forma, _ancho_contenido(modal))
+        controles, grupos = _esqueleto_modal(forma)
         modal.cuerpo.controls = controles
         modal.refrescar()
         try:
@@ -1396,7 +1424,7 @@ class SeccionDashboard:
         modal.refrescar()
 
     def _detalle_activos(self, _e=None) -> None:
-        self._abrir_detalle("Activos vigentes",
+        self._abrir_detalle("Activos habilitados",
                             bool(self._datos and self._datos.activos),
                             self._cargar_activos, _FORMA_ESQ_LISTADO,
                             _FRACCION_MODAL_ANCHO)
@@ -1405,7 +1433,7 @@ class SeccionDashboard:
         # Título propio, no el mismo que el de arriba: son dos mitades distintas
         # del inventario y el encabezado es lo único que las distingue una vez
         # abierto el modal.
-        self._abrir_detalle("Activos dados de baja",
+        self._abrir_detalle("Activos inhabilitados",
                             bool(self._datos and self._datos.inactivos),
                             self._cargar_inactivos, _FORMA_ESQ_LISTADO,
                             _FRACCION_MODAL_ANCHO)
@@ -1444,7 +1472,18 @@ class SeccionDashboard:
         await self._aplicar_filtros()
 
     def _on_resize(self, _e=None) -> None:
-        """La rejilla y las tarjetas se remiden solas con `on_size_change`."""
+        """La rejilla y las tarjetas se remiden solas con `on_size_change`.
+
+        El modal de detalle NO: su ancho y su alto son píxeles calculados al
+        abrirlo, así que al encoger la ventana se quedaba más grande que ella y
+        el diálogo lo recortaba por la derecha. Con el ancho al día, su
+        contenido —que es fluido— se reacomoda solo, y la tabla recupera su
+        barra horizontal en cuanto sus columnas dejan de caber.
+        """
+        modal = self._modal_abierto
+        if modal is None:
+            return
+        modal.reajustar(_ancho_modal(self.page, self._fraccion_abierta))
 
     def _safe_update(self) -> None:
         try:
