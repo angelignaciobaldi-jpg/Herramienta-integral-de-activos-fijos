@@ -29,10 +29,15 @@ Ritmo vertical de 4px: alturas y márgenes divisibles entre 4.
 
 ```python
 boton_primario(texto, icono=None, on_click=None, tooltip=None, disabled=False)
+boton_primario_icono(icono, tooltip, on_click=None, *, disabled=False)
 boton_secundario(texto, icono=None, on_click=None, tooltip=None, disabled=False)
 boton_herramienta(texto, icono=None, on_click=None, tooltip=None, destructivo=False)
 icono_accion(icono, tooltip, on_click, *, color=None)   # 24x24, para el suffix de un campo
 ```
+
+`boton_primario_icono` es la acción principal reducida a su ícono, del lado de
+`ALTO_CAMPO_TABLA` para casar con los campos compactos en una barra de filtros.
+Su `tooltip` es obligatorio: sin texto visible, es lo único que dice qué hace.
 
 **Un solo `boton_primario` por bloque de acciones**; el resto, secundarios.
 `boton_herramienta` es la acción menor sobre una selección; `destructivo=True` la
@@ -41,6 +46,41 @@ pinta en `ERROR`.
 `icono_accion` mide 24×24 exactos porque esa es la caja de contenido de un campo
 Material. **Nunca metas un `ft.IconButton` en un `suffix`**: impone un mínimo
 táctil de 48px y estira el campo.
+
+### El puntero de mano
+
+```python
+puntero_mano(caja)        # muta la caja y la devuelve
+CURSOR_BOTON              # mapa por estado, para el `style` de un botón
+```
+
+**`ft.Container` no expone `mouse_cursor`** —solo lo tienen los botones de
+Material y `GestureDetector`—, así que una caja con `on_click` se queda con la
+flecha y no se lee como pulsable.
+
+`puntero_mano` mete un `GestureDetector` **dentro** de la caja, envolviendo su
+contenido, y devuelve la misma caja. Va sin manejadores, y como Flet solo
+registra los reconocedores de las devoluciones que no son `None`, el clic sigue
+llegando al Container con su `ink` y su `on_hover` intactos:
+
+```python
+caja = ft.Container(..., on_click=..., ink=True)
+fila.controls.append(puntero_mano(caja))    # sigue siendo `caja`
+```
+
+**Por fuera no funciona.** Un Container pulsable dibuja su PROPIA región de
+ratón, y con regiones anidadas Flutter se queda con el cursor de la más interna:
+envolviendo la caja, ella misma lo pisaba en cuanto el puntero entraba de verdad.
+El precio de meterlo dentro es el RELLENO de la caja (2–8px), donde el cursor
+sigue siendo la flecha; cubrirlo exigiría quitarle el `on_click` al Container y
+con él la tinta.
+
+Como el árbol no gana controles, `expand`, `width` y `tooltip` se quedan donde
+estaban. Los componentes de este módulo ya lo traen; **si armas una caja pulsable
+nueva, pásala por aquí**.
+
+En los botones el cursor va por `style`, con `CURSOR_BOTON`: es un mapa por
+estado para que el botón apagado no ofrezca una mano que no lleva a nada.
 
 ## Campos
 
@@ -95,13 +135,29 @@ campos de un mismo grupo es el `width`.**
 En `ft.Dropdown`, `bgcolor` es el fondo del **menú desplegable**, no del campo;
 el relleno del campo es `fill_color`.
 
-## Campos dentro de una fila de tabla
+## Campos compactos (tablas y barras de filtros)
 
 ```python
 campo_tabla_texto(*, valor="", on_blur=None, ancho=None)
+
+SelectCompacto(page, opciones, *, valor="", ancho=None, titulo="Seleccionar",
+               on_change=None, disabled=False)   # .control, .value, .disabled,
+                                                 # .set_opciones(opciones, valor)
+
+
 campo_tabla_opciones(opciones, *, valor=None, on_change=None, ancho=None,
-                     page=None, titulo="Seleccionar")
+                     page=None, titulo="Seleccionar")   # atajo: devuelve .control
 ```
+
+**`SelectCompacto` es la única forma de tener un select bajo en este proyecto**
+(35px en vez de los 56 de Material). No existe alternativa: `ft.Dropdown` ignora
+`dense`, `height` y `content_padding`, así que reducirlo por esa vía es
+imposible. Úsalo en tablas y en barras de filtros; trae buscador, que a partir de
+unas pocas decenas de opciones deja de ser un lujo.
+
+`campo_tabla_opciones` es el mismo control devolviendo solo `.control`, para
+celdas donde el valor se lee por el `on_change` de la fila y no hace falta
+conservar el objeto.
 
 Aquí la caja (borde, radio, fondo, alto) **la dibujamos nosotros** y dentro va
 solo el contenido, porque en una fila compacta ningún campo de Material se deja
@@ -112,6 +168,11 @@ cuenta). Con la caja propia, texto y select miden lo mismo **por construcción**
 `campo_tabla_opciones` abre un diálogo **con buscador** en vez de un menú, porque
 los catálogos son largos (~58 empresas). Su `on_change` recibe un evento con
 `e.control.value`, igual que un campo nativo.
+
+El cursor de mano lo lleva dentro (ver `puntero_mano`), y como el select se apaga
+y se enciende, guarda ese `GestureDetector` en `._cursor` para devolverle la
+flecha al deshabilitarlo: un select bloqueado que ofrece la mano promete un menú
+que no va a abrirse.
 
 Para cambiar el alto: mueve `ALTO_CAMPO_TABLA` (los dos lo comparten) y verifica
 que `_ALTO_FILA` en [tabla_responsiva.py](tabla_responsiva.py) siga siendo mayor.

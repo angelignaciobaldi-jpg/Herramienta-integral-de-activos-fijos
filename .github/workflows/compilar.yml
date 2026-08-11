@@ -3,9 +3,24 @@ name: Pipeline de Compilación y Empaquetado Automático
 # Se dispara al PUBLICAR un Release en GitHub (no en push/merge a main).
 # El AutoUpdater de la app lee releases/latest, así que el flujo natural es:
 #   crear el Release con su tag (mayor que el anterior) -> publicar.
+#
+# `workflow_dispatch` añade el botón «Run workflow» de la pestaña Actions. Sirve
+# para recompilar sin publicar un Release, y sobre todo para DIAGNOSTICAR: si el
+# botón corre pero un Release no dispara nada, el problema está en el evento; si
+# no corre ninguno de los dos, Actions está bloqueado a nivel de repositorio.
+#
+# El botón solo aparece cuando este archivo está en la rama POR DEFECTO.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Tag con el que sellar la compilación. Es obligatorio porque el CI
+          escribe este valor en core/version.py: sin él, una ejecución manual
+          publicaría un instalable que miente sobre su propia versión.
+        required: true
 
 # Permite que el GITHUB_TOKEN automático suba el instalador al Release.
 permissions:
@@ -26,7 +41,10 @@ jobs:
       - name: Sincronizar versión con el tag del Release
         shell: pwsh
         run: |
-          $tag = "${{ github.event.release.tag_name }}"
+          # En una ejecución manual no hay release, así que el tag lo pone la
+          # entrada del formulario. El `||` de las expresiones de Actions toma
+          # el primero que no esté vacío.
+          $tag = "${{ github.event.release.tag_name || inputs.tag }}"
           $ver = $tag -replace '^v', ''
           Write-Host "Tag del release: $tag  ->  version: $ver"
           (Get-Content core/version.py) `
@@ -62,12 +80,17 @@ jobs:
       #    ejecución del RPA en la PC del usuario. Imagenes sí va (versionada).
       - name: Compilar con flet pack
         shell: pwsh
-        run: >
-          flet pack app.py -n "ActivosFijos" -D
-          --add-data "Imagenes:Imagenes"
-          --hidden-import openpyxl
-          --pyinstaller-build-args=--collect-all=playwright
-          -y
+        run: |
+          $datos = @("--add-data", "Imagenes:Imagenes")
+          # La tipografía Inter es OPCIONAL y se detecta en vez de fijarse: si el
+          # .ttf está versionado se empaqueta, y si no, la app cae a la fuente del
+          # sistema (ui/tema.py -> registrar_fuente). Con --add-data fijo, un repo
+          # sin la carpeta tumbaría el build; así, agregarla no exige tocar el CI.
+          if (Test-Path "Fuentes") { $datos += @("--add-data", "Fuentes:Fuentes") }
+          flet pack app.py -n "ActivosFijos" -D $datos `
+            --hidden-import openpyxl `
+            --pyinstaller-build-args=--collect-all=playwright `
+            -y
 
       # 2. Instalar Inno Setup y compilar el instalador (instalador.iss).
       - name: Instalar Inno Setup
@@ -80,9 +103,15 @@ jobs:
 
       # 4. Publicar el instalador como asset del Release (nombre exacto que busca
       #    el AutoUpdater: Instalador_ActivosFijos.exe).
+      #
+      #    UN solo paso para los dos disparos. El tag sale del release cuando lo
+      #    hay, y de la entrada del formulario cuando se lanzó a mano: así el
+      #    botón adjunta al release YA PUBLICADO en vez de dejar el ejecutable
+      #    como artefacto suelto, que obligaba a bajarlo y subirlo a mano.
       - name: Subir Instalador al Release de GitHub
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
           files: Output/Instalador_ActivosFijos.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

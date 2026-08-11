@@ -26,7 +26,8 @@ from core import rutas
 # Nombres de las variables que maneja la app.
 VAR_GITHUB_PAT = "QUETZALTIC_GITHUB_PAT"
 # Microservicios: URL base (p. ej. https://api.quetzaltic.dev) y token opcional
-# (Bearer) para autenticar las peticiones. Los consume core/api.py.
+# para autenticar las peticiones. Los consume core/api.py, que manda el token en
+# la cabecera `x-auth-token` (ver core.api.CABECERA_TOKEN).
 VAR_API_BASE_URL = "QUETZALTIC_API_BASE_URL"
 VAR_API_TOKEN = "QUETZALTIC_API_TOKEN"
 
