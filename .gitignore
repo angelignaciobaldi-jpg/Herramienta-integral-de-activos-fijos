@@ -46,6 +46,9 @@ Paginas html/
 # Documentos de prueba (facturas / resguardos con datos reales)
 Documentos de pruebas/
 descargas/
+# Cartas responsivas de ejemplo: son PDFs generados con datos de colaboradores
+# REALES (nombre y folio). Se conservan en local como referencia del formato.
+Ejemplos cartas responsivas/
 
 # Inventarios reales en Excel (pesados y con datos del negocio)
 *.xlsx
