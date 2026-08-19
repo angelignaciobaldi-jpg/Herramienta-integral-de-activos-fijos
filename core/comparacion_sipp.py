@@ -58,8 +58,14 @@ CAMPOS: list[CampoComparable] = [
                     empujable=False),
     CampoComparable("empresa", "Empresa", "empresa", columna="empresa",
                     empujable=False),
+    # La sucursal SÍ viaja al SIPP: el RPA la fija en el RESGUARDO del activo
+    # (`id_SucursalResguardo`, que el formulario de edición sí expone). El valor no
+    # sale de este `ng_model` —lo inyecta `_payload_alta` desde la columna del
+    # registro—, pero declararlo es lo que marca el campo como empujable y evita
+    # decirle al usuario que lo cambie a mano cuando la herramienta puede hacerlo.
     CampoComparable("sucursal", "Sucursal", "sucursal", columna="sucursal",
-                    empujable=False),
+                    control="select",
+                    ng_model="filtrosAgregar.id_SucursalResguardo"),
     CampoComparable("nu_Serie", "No. de serie", "serie",
                     clave_datos="nu_Serie", columna="no_serie",
                     ng_model="filtrosAgregar.nu_Serie"),

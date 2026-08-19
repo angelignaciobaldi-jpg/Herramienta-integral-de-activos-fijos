@@ -139,14 +139,14 @@ async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) 
     async def flujo() -> None:
         nonlocal resultado, error
         from core import sync_sipp
-        from core.rpa_sipp import SesionSipp
+        from core.rpa_sipp import SesionSipp, mensaje_amigable
         try:
             async with SesionSipp(headless=True) as sipp:
                 await sipp.login(usuario, contrasena)
                 resultado = await sync_sipp.actualizar_sipp(
                     sipp, id_empresa, empresa, progreso=avance, mensaje=mensaje)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            error = str(exc)
+            error = mensaje_amigable(exc)
 
     from core.rpa_sipp import BucleRpa
     bucle = BucleRpa()

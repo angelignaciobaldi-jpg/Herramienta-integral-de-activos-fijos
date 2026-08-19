@@ -32,10 +32,27 @@ def url_qr(base_url: str, etiqueta: str) -> str:
     return base.rstrip("/") + "/" + etiqueta.lstrip("/")
 
 
+# Módulos de blanco alrededor del código. El estándar exige 4: sin ellos el
+# lector no distingue dónde empieza el símbolo y falla aunque el QR sea enorme.
+_ZONA_SILENCIO = 4
+
+
+def _codigo(contenido: str):
+    """Símbolo QR ESTÁNDAR de `contenido`.
+
+    Se usa `make_qr` y no `make` porque este último devuelve un **Micro QR**
+    cuando el dato es corto (una etiqueta lo es), y buena parte de los lectores de
+    teléfono no leen ese formato: el usuario ve un código impecable que su celular
+    simplemente ignora. El QR estándar lo lee todo el mundo.
+
+    'm' tolera ~15% de daño, que en una etiqueta pegada a un activo (roces, polvo,
+    despegues parciales) es lo que la mantiene legible."""
+    return segno.make_qr(contenido, error="m")
+
+
 def qr_svg(contenido: str, scale: int = 4) -> str:
     """SVG inline (sin declaración XML) del QR de `contenido`, listo para HTML."""
-    q = segno.make(contenido, error="m")  # 'm' tolera ~15% de daño en la etiqueta
-    return q.svg_inline(scale=scale, border=0)
+    return _codigo(contenido).svg_inline(scale=scale, border=_ZONA_SILENCIO)
 
 
 # --- Hoja de etiquetas ----------------------------------------------------
@@ -45,37 +62,73 @@ _CSS = """
   body { font-family: Arial, Helvetica, sans-serif; margin: 0; color: #111; }
   .hoja { display: flex; flex-wrap: wrap; gap: 4mm; }
   .etq {
-    width: 60mm; height: 30mm; border: 1px solid #bbb; border-radius: 2mm;
-    padding: 2.5mm; display: flex; align-items: center; gap: 2.5mm;
+    width: 60mm; height: 40mm; border: 1px solid #bbb; border-radius: 2mm;
+    padding: 2mm; display: flex; align-items: center;
+    justify-content: center; gap: 2mm;
     page-break-inside: avoid;
   }
-  .etq .qr { width: 25mm; height: 25mm; flex: 0 0 25mm; }
-  .etq .qr svg { width: 100%; height: 100%; }
-  .etq .info { overflow: hidden; }
-  .etq .num { font-size: 12pt; font-weight: bold; letter-spacing: .3px; }
-  .etq .ins { font-size: 8pt; color: #333; margin-top: 1mm;
-              display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-              overflow: hidden; }
-  .etq .emp { font-size: 7pt; color: #777; margin-top: 1mm; }
+  /* El QR es CUADRADO, así que lo limita el ALTO de la etiqueta: por eso crece
+     hacia abajo (30 -> 40 mm) y no a lo ancho. El recuadro incluye la zona de
+     silencio, que es parte del símbolo y no un margen decorativo.
+     `align-items` + `justify-content` centran el QR entre los bordes de la
+     etiqueta en los DOS ejes; el `flex: 0 0` impide que se deforme al repartir
+     el ancho con el número. */
+  .etq .qr { width: 36mm; height: 36mm; flex: 0 0 36mm;
+             display: flex; align-items: center; justify-content: center; }
+  .etq .qr svg { width: 100%; height: 100%; display: block; }
+  /* El número, centrado en la columna que le queda (el mismo trato que el QR). */
+  .etq .info { width: 18mm; flex: 0 0 18mm; overflow: hidden;
+               text-align: center; }
+  /* `nowrap`: el número es UN dato, partirlo en dos renglones lo vuelve dos
+     números a la vista. El tamaño lo calcula `_pt_una_linea` por etiqueta, porque
+     las hay de 7 y de 10 dígitos y un valor fijo no le sirve a ambas. */
+  .etq .num { font-weight: bold; letter-spacing: .5px; white-space: nowrap; }
 """
+
+
+# Geometría de la etiqueta (mm). Vive aquí y no solo en el CSS porque el tamaño
+# del número se calcula a partir del hueco que deja el QR.
+_ETQ_ANCHO_MM = 60
+_ETQ_PADDING_MM = 2
+_QR_MM = 36
+_GAP_MM = 2
+_NUM_ANCHO_MM = _ETQ_ANCHO_MM - 2 * _ETQ_PADDING_MM - _QR_MM - _GAP_MM
+_PT_MAX = 16          # tope: más grande no se ve mejor, solo empuja el salto
+_PT_MIN = 6
+_AVANCE_DIGITO = 0.556   # ancho de un dígito en Arial bold, en 'em'
+_PT_A_MM = 0.3528
+
+
+def _pt_una_linea(texto: str) -> float:
+    """Tamaño de fuente (pt) con el que `texto` entra en UNA línea.
+
+    Se calcula en vez de fijarlo porque las etiquetas no miden todas lo mismo
+    (7 dígitos en unas empresas, 10 en otras) y un tamaño único obligaría a elegir
+    entre partir las largas o achicar las cortas sin necesidad. El 0.95 es holgura
+    para el interletraje y el redondeo del render.
+
+    El piso de `_PT_MIN` cubre hasta ~15 dígitos; más allá el número se recortaría
+    (las etiquetas reales del SIPP traen entre 7 y 10)."""
+    n = max(1, len(texto))
+    cabe = _NUM_ANCHO_MM / (_AVANCE_DIGITO * n * _PT_A_MM)
+    return round(max(_PT_MIN, min(_PT_MAX, cabe * 0.95)), 1)
 
 
 def _label(activo: dict, base_url: str) -> str:
     etiqueta = str(activo.get("etiqueta") or "").strip()
-    insumo = _html.escape(str(activo.get("insumo") or ""))
-    empresa = _html.escape(str(activo.get("empresa") or ""))
     svg = qr_svg(url_qr(base_url, etiqueta))
     return (
         f'<div class="etq"><div class="qr">{svg}</div>'
-        f'<div class="info"><div class="num">{_html.escape(etiqueta)}</div>'
-        f'<div class="ins">{insumo}</div>'
-        f'<div class="emp">{empresa}</div></div></div>')
+        f'<div class="info"><div class="num" '
+        f'style="font-size:{_pt_una_linea(etiqueta)}pt">'
+        f'{_html.escape(etiqueta)}</div></div></div>')
 
 
 def construir_html_etiquetas(activos: list[dict], base_url: str = "",
                              titulo: str = "Etiquetas de activos") -> str:
-    """Arma la hoja HTML con una etiqueta (QR + datos) por activo. Cada dict:
-    etiqueta (obligatorio), insumo, empresa."""
+    """Arma la hoja HTML con una etiqueta (QR + número) por activo. Cada dict
+    necesita solo `etiqueta`: el insumo y la empresa se quitaron del formato a
+    pedido de operación (se identifican al escanear)."""
     etiquetas = "".join(_label(a, base_url) for a in activos if a.get("etiqueta"))
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f'<title>{_html.escape(titulo)}</title><style>{_CSS}</style></head>'
@@ -130,8 +183,8 @@ def png_etiqueta(activo: dict, base_url: str = "", escala: int = 10) -> bytes:
 
     # QR como PNG en memoria.
     buf = io.BytesIO()
-    segno.make(url_qr(base_url, etiqueta), error="m").save(
-        buf, kind="png", scale=escala, border=2)
+    _codigo(url_qr(base_url, etiqueta)).save(
+        buf, kind="png", scale=escala, border=_ZONA_SILENCIO)
     buf.seek(0)
     qr_img = Image.open(buf).convert("RGB")
     w = qr_img.width

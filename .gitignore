@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# Ajustes del editor: apuntan al intérprete de CADA máquina (aquí el entorno vive
+# fuera del repo porque la ruta del proyecto rebasa el límite de Windows).
+.vscode/
 
 # ===== Empaquetado (PyInstaller / flet pack) =====
 build/
@@ -49,6 +52,8 @@ descargas/
 
 # Imágenes extraídas de los ZIP de levantamiento (datos reales)
 imagenes_levantamiento/
+# Imágenes del insumo adjuntadas en la captura (se suben al SIPP; datos reales)
+imagenes_insumo/
 
 # Ejemplos de diseño en html (mockups de referencia, pesados)
 ejemplos/
