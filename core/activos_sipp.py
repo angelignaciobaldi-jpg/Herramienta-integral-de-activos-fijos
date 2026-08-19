@@ -39,6 +39,108 @@ class ErrorActivosSipp(Exception):
     """Falla al descargar los activos del SIPP."""
 
 
+# ------------------------------------------------ vía API REST (sin navegador)
+# Endpoint propio del listado. A diferencia del cfproxy de arriba NO necesita
+# navegador ni sesión: basta la URL base y el token de core/ajustes_api.
+_RUTA_API = "/api/activos-fijos/listado"
+# Filas por página. El servicio aceptó 5000; se pide menos para que un corte de
+# red no tire una descarga grande y para no cargar de golpe 60 mil registros.
+_TAM_PAGINA = 2_000
+# Tope de páginas: red de seguridad si `total` viniera mal y el bucle no cerrara.
+_MAX_PAGINAS = 200
+# El servicio marca "sin empleado" con esta leyenda. Guardarla tal cual haría que
+# la comparación viera una diferencia contra un Excel que simplemente va vacío.
+_SIN_EMPLEADO = "sin empleado asignado"
+
+
+def hay_api() -> bool:
+    """¿Está configurada la API (URL base + token)? Si no, se usa el portal."""
+    from . import ajustes_api
+    return bool(ajustes_api.base_url() and ajustes_api.token())
+
+
+def _fila_api(r: dict) -> dict:
+    """Traduce un registro de la API al formato de la caché.
+
+    Solo se mapea lo que el endpoint entrega HOY (etiqueta, insumo, serie,
+    empleado, sucursal). Ubicación, departamento, tipo y el detalle (situación,
+    costo, centros de costo, fechas) no vienen en él: se dejan FUERA del dict a
+    propósito, para que `db.fusionar_activos_sipp` conserve lo que ya hubiera
+    descargado el portal en vez de vaciarlo."""
+    empleado = (r.get("empleado_resguardo") or "").strip()
+    if empleado.lower() == _SIN_EMPLEADO:
+        empleado = ""
+    return {
+        "etiqueta": str(r.get("etiqueta") or "").strip(),
+        "insumo": (r.get("nombre") or "").strip(),
+        "serie": (r.get("serie") or "").strip(),
+        "empleado": empleado,
+        "sucursal": (r.get("sucursal") or "").strip(),
+    }
+
+
+def descargar_activos_api(id_empresa: int, empresa_nombre: str = "",
+                          progreso=None) -> dict:
+    """Descarga por HTTP el listado de activos de una empresa y lo FUSIONA en la
+    caché. No abre navegador ni inicia sesión en el portal.
+
+    `id_empresa` va tal cual al parámetro `empresa` del endpoint, que espera el ID
+    numérico (por nombre responde 500). `progreso(traidos, total)` es opcional.
+
+    Devuelve {guardados, nuevos, eliminados, total, origen, duplicadas, candidatos}.
+    `candidatos` es {etiqueta -> [activos que la comparten]} y solo trae las
+    repetidas; sirve para preguntarle al usuario cuál es el suyo antes de que el
+    RPA edite a ciegas la primera coincidencia.
+    """
+    from . import api
+
+    registros: list[dict] = []
+    total = 0
+    nombre_final = empresa_nombre
+    for pagina in range(1, _MAX_PAGINAS + 1):
+        try:
+            resp = api.solicitar(_RUTA_API, params={
+                "empresa": id_empresa, "page": pagina, "pageSize": _TAM_PAGINA})
+        except api.ErrorAPI as exc:
+            raise ErrorActivosSipp(str(exc)) from exc
+        filas = resp.get("data") or []
+        if not filas:
+            break
+        # El total viaja DENTRO de cada fila (no en la raíz de la respuesta).
+        try:
+            total = int(filas[0].get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if not nombre_final:
+            nombre_final = (filas[0].get("empresa") or "").strip()
+        registros.extend(_fila_api(f) for f in filas)
+        if callable(progreso):
+            progreso(len(registros), total or len(registros))
+        if len(filas) < _TAM_PAGINA or (total and len(registros) >= total):
+            break
+
+    # Etiquetas repetidas: el SIPP permite que DOS activos distintos compartan
+    # número de inventario, y la caché guarda uno por etiqueta (es su clave), así
+    # que uno tapa al otro. No se corrige aquí —es dato de origen— pero se reporta
+    # CON SUS CANDIDATOS: la etiqueta es con lo que el RPA localiza el activo al
+    # modificar, así que hay que poder enseñarle al usuario entre qué insumos está
+    # la ambigüedad antes de tocar nada.
+    por_etiqueta: dict[str, list[dict]] = {}
+    for r in registros:
+        por_etiqueta.setdefault(r["etiqueta"], []).append(r)
+    candidatos = {e: filas for e, filas in por_etiqueta.items() if len(filas) > 1}
+
+    sello = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # `eliminar_ausentes` solo si de verdad se trajo el listado COMPLETO: con una
+    # descarga a medias (red caída a la tercera página) borraría activos buenos.
+    completo = bool(registros) and (not total or len(registros) >= total)
+    res = db.fusionar_activos_sipp(id_empresa, nombre_final or empresa_nombre,
+                                   registros, sello,
+                                   eliminar_ausentes=completo)
+    return {**res, "total": total or len(registros), "origen": "api",
+            "duplicadas": sorted(candidatos), "candidatos": candidatos}
+
+
 def _elegir_columna(cols: list[str], *claves: str) -> "int | None":
     """Índice de la primera columna cuyo nombre (mayúsculas) contenga alguna clave."""
     for clave in claves:

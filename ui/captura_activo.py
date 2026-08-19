@@ -338,7 +338,14 @@ class DialogoCapturaActivo:
 
     # ------------------------------------------------------- apertura
     def abrir(self, registro: "db.Levantamiento") -> None:
-        """Abre el formulario para `registro`, precargando lo ya capturado."""
+        """Abre el formulario para `registro`, precargando lo ya capturado.
+
+        El registro se RELEE de la base: quien llama suele traer el objeto con que
+        se pintó la tabla, y lo editado ahí en línea (empresa, sucursal y sobre todo
+        DEPARTAMENTO) no viaja en ese objeto. Sin esto, el formulario abría con la
+        ubicación vieja y, al guardar, la revertía."""
+        actual = db.obtener_levantamiento(registro.id)
+        registro = actual if actual is not None else registro
         self._registro = registro
         self.modal.subtitulo = (
             f"{registro.nombre_insumo} · Serie: {registro.no_serie or '—'}")
@@ -612,7 +619,7 @@ class DialogoCapturaActivo:
 
         async def flujo() -> None:
             nonlocal entrada, info, error
-            from core.rpa_sipp import SesionSipp
+            from core.rpa_sipp import SesionSipp, mensaje_amigable
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
@@ -621,7 +628,7 @@ class DialogoCapturaActivo:
                     if entrada is not None:
                         info = await compras.datos_factura(sipp, entrada)
             except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-                error = str(exc)
+                error = mensaje_amigable(exc)
 
         from core.rpa_sipp import BucleRpa
         bucle = BucleRpa()

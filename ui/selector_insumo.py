@@ -43,7 +43,10 @@ class DialogoSelectorInsumo:
         # El catálogo es local (SQLite), así que filtrar al teclear es viable y
         # ahorra el paso de pulsar Enter para ver resultados.
         self.tf.on_change = self._buscar
-        self.chk_af = ft.Checkbox(label="Solo activo fijo", value=True,
+        # Arranca DESACTIVADO: el catálogo del SIPP no marca como "activo fijo"
+        # todo lo que en la práctica se levanta, así que filtrar por defecto
+        # escondía insumos válidos y obligaba a descubrir el check para hallarlos.
+        self.chk_af = ft.Checkbox(label="Solo activo fijo", value=False,
                                   on_change=self._buscar)
         self.lista = lista_resultados()
         self.estado = ft.Text("", size=12, color=GRIS)

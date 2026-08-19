@@ -186,6 +186,32 @@ def inicializar() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS ix_insumos_nombre "
                     "ON insumos_sipp (nombre)")
 
+        # HISTORIAL de lo que la herramienta envió al SIPP (altas y
+        # modificaciones). Es la única memoria de esas operaciones: los reportes
+        # se arman en memoria y se pierden al cerrar el modal, así que sin esta
+        # tabla no hay forma de responder "¿qué se dio de alta el martes?".
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movimientos_sipp (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                lote         TEXT    NOT NULL,   -- agrupa una corrida del RPA
+                tipo         TEXT    NOT NULL,   -- 'alta' | 'modificacion'
+                id_levantamiento INTEGER,
+                etiqueta     TEXT,
+                insumo       TEXT,
+                serie        TEXT,
+                empresa      TEXT,
+                sucursal     TEXT,
+                exito        INTEGER NOT NULL DEFAULT 0,
+                observacion  TEXT,
+                cambios      TEXT,               -- JSON [(rótulo, antes, después)]
+                fecha        TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+            """
+        )
+        con.execute("CREATE INDEX IF NOT EXISTS ix_movimientos_fecha "
+                    "ON movimientos_sipp (fecha DESC)")
+
         # Caché del catálogo de EMPLEADOS del SIPP (global, para el resguardo).
         con.execute(
             """
@@ -482,6 +508,20 @@ def listar_levantamiento() -> list[Levantamiento]:
             "SELECT * FROM levantamiento ORDER BY creado_en DESC, id DESC"
         ).fetchall()
     return [Levantamiento(**dict(f)) for f in filas]
+
+
+def obtener_levantamiento(id_lev: int) -> "Levantamiento | None":
+    """Relee UN registro del levantamiento. None si ya no existe.
+
+    Hace falta porque las pantallas conservan los objetos con que pintaron la
+    tabla, y las ediciones EN LÍNEA (empresa/sucursal/departamento de cada fila)
+    solo tocan la base para no reconstruir la tabla y perder foco y scroll. Sin
+    releer, un formulario abierto después mostraría los datos de antes.
+    """
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT * FROM levantamiento WHERE id = ?", (id_lev,)).fetchone()
+    return Levantamiento(**dict(fila)) if fila else None
 
 
 def listar_levantamiento_por_estatus(estatus: str) -> list[Levantamiento]:
@@ -835,7 +875,136 @@ def estado_catalogo_empleados() -> dict:
     return dict(fila)
 
 
+# ------------------------------------------------ historial de movimientos
+MOV_ALTA = "alta"
+MOV_MODIFICACION = "modificacion"
+
+
+def registrar_movimientos(lote: str, tipo: str, filas: list[dict]) -> int:
+    """Guarda en el historial lo que una corrida del RPA envió al SIPP.
+
+    `lote` agrupa la corrida (para poder mostrarla junta). Cada fila: etiqueta,
+    insumo, serie, empresa, sucursal, exito, observacion, cambios
+    ([(rótulo, antes, después)]) e id_levantamiento.
+    """
+    if not filas:
+        return 0
+    with _conectar() as con:
+        con.executemany(
+            """INSERT INTO movimientos_sipp
+               (lote, tipo, id_levantamiento, etiqueta, insumo, serie, empresa,
+                sucursal, exito, observacion, cambios)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(lote, tipo, f.get("id_levantamiento"), f.get("etiqueta"),
+              f.get("insumo"), f.get("serie"), f.get("empresa"), f.get("sucursal"),
+              1 if f.get("exito") else 0, f.get("observacion"),
+              json.dumps(f.get("cambios"), ensure_ascii=False)
+              if f.get("cambios") else None)
+             for f in filas])
+    return len(filas)
+
+
+def listar_movimientos(tipo: str | None = None, texto: str = "",
+                       limite: int = 300) -> list[dict]:
+    """Historial más reciente primero. `texto` busca en etiqueta, insumo y serie."""
+    cond, params = [], []
+    if tipo:
+        cond.append("tipo = ?"); params.append(tipo)
+    texto = (texto or "").strip().lower()
+    if texto:
+        cond.append("(LOWER(IFNULL(etiqueta,'')) LIKE ? OR "
+                    "LOWER(IFNULL(insumo,'')) LIKE ? OR "
+                    "LOWER(IFNULL(serie,'')) LIKE ?)")
+        params += [f"%{texto}%"] * 3
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT * FROM movimientos_sipp{where} ORDER BY fecha DESC, id DESC "
+            f"LIMIT ?", [*params, limite]).fetchall()
+    movimientos = []
+    for f in filas:
+        d = dict(f)
+        d["exito"] = bool(d["exito"])
+        try:
+            d["cambios"] = json.loads(d["cambios"]) if d["cambios"] else []
+        except (ValueError, TypeError):
+            d["cambios"] = []
+        movimientos.append(d)
+    return movimientos
+
+
+def resumen_movimientos() -> dict:
+    """Cuántos movimientos hay por tipo (para los conteos de las pestañas)."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT tipo, COUNT(*) AS n, SUM(exito) AS ok FROM movimientos_sipp "
+            "GROUP BY tipo").fetchall()
+    return {f["tipo"]: {"total": f["n"], "exitosos": f["ok"] or 0} for f in filas}
+
+
 # --------------------------------------------------- activos del SIPP (por empresa)
+def fusionar_activos_sipp(id_empresa: int, empresa_nombre: str,
+                          registros: list[dict], actualizado_en: str,
+                          eliminar_ausentes: bool = True) -> dict:
+    """Mezcla activos en la caché SIN borrar lo que la fuente no trae.
+
+    Existe por una asimetría real entre las dos fuentes: el listado del portal
+    (cfproxy) trae el detalle completo —ubicación, departamento, tipo, costo,
+    centros de costo, fechas—, mientras que la API REST solo entrega etiqueta,
+    insumo, serie, empleado y sucursal. Reemplazar con lo de la API vaciaría esas
+    columnas y dejaría a «Comparar SIPP vs Excel» sin la mitad de su lado del SIPP.
+
+    Por eso aquí cada columna se escribe SOLO si el registro la trae con valor; si
+    no, conserva lo que ya había. `eliminar_ausentes` (para un listado COMPLETO de
+    la empresa) borra los que ya no están en el SIPP, que es lo que antes lograba
+    el DELETE del reemplazo.
+
+    Devuelve {guardados, nuevos, eliminados}.
+    """
+    filas = [r for r in registros if (r.get("etiqueta") or "").strip()]
+    etiquetas = [r["etiqueta"].strip() for r in filas]
+    with _conectar() as con:
+        previas = {f[0] for f in con.execute(
+            "SELECT etiqueta FROM activos_sipp WHERE id_empresa = ?",
+            (id_empresa,)).fetchall()}
+        # COALESCE(NULLIF(nuevo,''), viejo): la cadena vacía cuenta como "no lo
+        # trae", no como "bórralo". Un '' del origen no debe pisar un dato bueno.
+        con.executemany(
+            """INSERT INTO activos_sipp
+               (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
+                empleado, sucursal, departamento, id_tipo, tipo, extra, actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id_empresa, etiqueta) DO UPDATE SET
+                 empresa_nombre = COALESCE(NULLIF(excluded.empresa_nombre,''),
+                                           empresa_nombre),
+                 insumo       = COALESCE(NULLIF(excluded.insumo,''), insumo),
+                 serie        = COALESCE(NULLIF(excluded.serie,''), serie),
+                 ubicacion    = COALESCE(NULLIF(excluded.ubicacion,''), ubicacion),
+                 empleado     = COALESCE(NULLIF(excluded.empleado,''), empleado),
+                 sucursal     = COALESCE(NULLIF(excluded.sucursal,''), sucursal),
+                 departamento = COALESCE(NULLIF(excluded.departamento,''), departamento),
+                 id_tipo      = COALESCE(excluded.id_tipo, id_tipo),
+                 tipo         = COALESCE(NULLIF(excluded.tipo,''), tipo),
+                 extra        = COALESCE(NULLIF(excluded.extra,''), extra),
+                 actualizado_en = excluded.actualizado_en""",
+            [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
+              r.get("serie"), r.get("ubicacion"), r.get("empleado"),
+              r.get("sucursal"), r.get("departamento"),
+              r.get("id_tipo"), r.get("tipo"),
+              json.dumps(r.get("extra"), ensure_ascii=False) if r.get("extra") else None,
+              actualizado_en)
+             for r in filas])
+        eliminados = 0
+        if eliminar_ausentes and etiquetas:
+            marcas = ",".join("?" * len(etiquetas))
+            cur = con.execute(
+                f"DELETE FROM activos_sipp WHERE id_empresa = ? "
+                f"AND etiqueta NOT IN ({marcas})", [id_empresa, *etiquetas])
+            eliminados = cur.rowcount or 0
+    nuevos = len({e for e in etiquetas} - previas)
+    return {"guardados": len(filas), "nuevos": nuevos, "eliminados": eliminados}
+
+
 def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
                             registros: list[dict], actualizado_en: str) -> int:
     """Reemplaza los activos cacheados de una empresa. Cada dict: etiqueta
@@ -887,6 +1056,39 @@ def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[di
                 pass
         activos.append(base)
     return activos
+
+
+def buscar_activos_sipp(texto: str, id_empresa: int | None = None,
+                        limite: int = 50) -> list[dict]:
+    """Busca activos cacheados por ETIQUETA, SERIE o INSUMO (coincidencia parcial).
+
+    Sirve para generar la etiqueta de UN activo concreto sin tener que listar la
+    empresa entera. Sin `id_empresa` busca en todas las cacheadas: el usuario suele
+    tener la etiqueta en la mano y no saber a qué empresa pertenece.
+    """
+    texto = (texto or "").strip().lower()
+    if not texto:
+        return []
+    cond = ["(LOWER(IFNULL(etiqueta,'')) LIKE ? OR LOWER(IFNULL(serie,'')) LIKE ? "
+            "OR LOWER(IFNULL(insumo,'')) LIKE ?)"]
+    params: list = [f"%{texto}%"] * 3
+    if id_empresa is not None:
+        cond.append("id_empresa = ?"); params.append(id_empresa)
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion, "
+            "empleado, sucursal, departamento, id_tipo, tipo FROM activos_sipp "
+            f"WHERE {' AND '.join(cond)} "
+            # La coincidencia EXACTA de etiqueta va primero: es lo que se teclea
+            # cuando ya se tiene el número y no debe quedar sepultada entre
+            # coincidencias parciales.
+            "ORDER BY (LOWER(etiqueta) = ?) DESC, etiqueta LIMIT ?",
+            [*params, texto, limite]).fetchall()
+    return [{"empresa": f["empresa_nombre"], "id_empresa": f["id_empresa"],
+             "etiqueta": f["etiqueta"], "insumo": f["insumo"], "serie": f["serie"],
+             "ubicacion": f["ubicacion"], "empleado": f["empleado"],
+             "sucursal": f["sucursal"], "departamento": f["departamento"],
+             "id_tipo": f["id_tipo"], "tipo": f["tipo"]} for f in filas]
 
 
 def sucursales_activos_sipp(id_empresa: int) -> list[str]:
