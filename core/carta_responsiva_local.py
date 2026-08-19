@@ -321,6 +321,34 @@ async def generar_carta_local(sesion, activos: list, ruta_pdf: str, folio: str,
     return str(ruta)
 
 
+def carpeta_para_cartas(carpeta_base: str, empresa: str, cuando=None) -> str:
+    """Crea (si no existe) la subcarpeta «EMPRESA AAAA-MM-DD» y devuelve su ruta.
+
+    Las cartas se emiten por tandas y quedaban sueltas en la carpeta que eligiera
+    el usuario, mezclándose con las de otra empresa o de otro día. Agruparlas evita
+    tener que distinguirlas por el nombre del archivo.
+
+    La fecha va en formato ISO a propósito: en el explorador de Windows las
+    carpetas se ordenan alfabéticamente, y así quedan además en orden cronológico.
+    Dos tandas de la MISMA empresa el MISMO día caen en la misma carpeta, que es lo
+    esperable (una carta reemitida sustituye a la anterior).
+    """
+    import os
+    from datetime import date
+
+    sello = (cuando or date.today()).strftime("%Y-%m-%d")
+    nombre = f"{(empresa or 'Sin empresa').strip()} {sello}"
+    destino = os.path.join(carpeta_base, _sanear(nombre))
+    os.makedirs(destino, exist_ok=True)
+    return destino
+
+
+def _sanear(texto: str) -> str:
+    """Nombre válido para carpeta/archivo en Windows."""
+    import re
+    return re.sub(r'[\/:*?"<>|]+', "", str(texto or "")).strip().rstrip(".") or "Sin nombre"
+
+
 def nombre_archivo_carta(nombre_empleado: str, empresa: str) -> str:
     """Nombre de archivo de la carta: 'Carta responsiva NOMBRE - EMPRESA' (saneado)."""
     import re

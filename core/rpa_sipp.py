@@ -34,6 +34,7 @@ import re
 import sys
 import threading
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from playwright.async_api import (
     Browser,
@@ -104,8 +105,47 @@ async def asegurar_navegador() -> None:
         )
 
 
+def serie_para_alta(serie: str = "", etiqueta: str = "",
+                    etiqueta_actual: str = "") -> str:
+    """No. de serie con el que un activo queda registrado en el SIPP.
+
+    El campo es OBLIGATORIO en el portal, así que un activo sin serie legible se
+    da de alta con su ETIQUETA. La regla vive aquí, y no dentro del alta, porque
+    la herramienta necesita guardar EXACTAMENTE lo mismo que quedó en el SIPP: si
+    cada lado la calculara por su cuenta, la columna «No. de serie» mostraría «—»
+    donde el portal ya tiene un dato, y la comparación marcaría una diferencia
+    inexistente.
+    """
+    return ((serie or "").strip() or (etiqueta or "").strip()
+            or (etiqueta_actual or "").strip())
+
+
 class ErrorSipp(Exception):
     """Falla esperada del RPA del SIPP (login fallido, elemento ausente, etc.)."""
+
+
+# Errores de red de Chromium (net::ERR_*) traducidos a su causa real. Sin esto el
+# usuario ve el código del navegador, que no le dice qué hacer.
+_CAUSAS_RED = (
+    ("ERR_INTERNET_DISCONNECTED", "el equipo no tiene conexión a internet"),
+    ("ERR_NAME_NOT_RESOLVED",
+     "no se pudo resolver la dirección del portal (revisa el DNS o la VPN)"),
+    ("ERR_PROXY_CONNECTION_FAILED", "falló la conexión con el proxy de la red"),
+    ("ERR_CONNECTION_TIMED_OUT", "el servidor no contestó a tiempo"),
+    ("ERR_CONNECTION_REFUSED", "el servidor rechazó la conexión"),
+    ("ERR_CONNECTION_RESET", "la conexión se interrumpió"),
+    ("ERR_CERT", "el certificado de seguridad del sitio no es válido"),
+)
+
+
+def mensaje_amigable(exc) -> str:
+    """Texto de un error del RPA apto para MOSTRARLE AL USUARIO.
+
+    Playwright adjunta al mensaje un «Call log:» de varias líneas con selectores,
+    URLs y tiempos: invaluable al depurar, ruido incomprensible en un aviso de la
+    interfaz. Se conserva la primera parte y se descarta la bitácora."""
+    texto = str(exc).split("Call log:")[0]
+    return " ".join(texto.split()) or "Error desconocido del RPA."
 
 
 # JS que elige una opción de un <select> de AngularJS decorado con 'chosen'.
@@ -198,11 +238,12 @@ class SesionSipp:
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
     # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    # Ambiente de PRUEBAS (test): se opera aquí mientras se desarrolla el módulo.
-    BASE_URL = "https://test.sipp.petroil.dev"
+    # PRODUCTIVO: el RPA opera sobre datos REALES (da de alta y modifica activos
+    # de verdad). Para desarrollo, cambia a alguno de los de abajo.
+    BASE_URL = "https://sipp.petroil.com.mx"
+    # BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
     # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
     # BASE_URL = "https://dev.sipp.petroil.dev"    # desarrollo
-    # BASE_URL = "https://sipp.petroil.com.mx"     # productivo
     URL_LOGIN = BASE_URL + "/login.html"
     URL_CONFIG_SESION = BASE_URL + "/index.cfm#/configuracionsession"
     # Rutas SPA del módulo de Activos Fijos (confirmadas en el DOM real).
@@ -213,6 +254,12 @@ class SesionSipp:
     TIMEOUT_NAV = 30_000        # navegación / carga de página
     TIMEOUT_ELEMENTO = 10_000   # aparición de un elemento
     TIMEOUT_LOGIN_OK = 5_000    # confirmación de inicio de sesión
+    # Llenado de formularios. Son CORTOS a propósito: se pagan una vez POR CAMPO y
+    # el formulario ya está montado cuando se llega a llenarlo (el tipo y el insumo
+    # se eligieron antes, con su propia espera). Un campo que está a la vista no
+    # consume nada de esto; solo lo paga el que aún no pinta o no es editable.
+    TIMEOUT_CAMPO = 500         # gracia para un campo presente que aún no aparece
+    TIMEOUT_ESCRITURA = 1_200   # escribir en un campo ya visible
 
     def __init__(self, headless: bool = False, slow_mo: int = 0, zoom: float = 0.8):
         self.headless = headless
@@ -261,6 +308,34 @@ class SesionSipp:
             raise ErrorSipp("La sesión del SIPP no está iniciada (llama a iniciar()).")
         return self.page
 
+    # ------------------------------------------------------- navegación
+    async def _abrir_url(self, url: str, descripcion: str) -> None:
+        """Navega a `url` traduciendo los fallos de red a un aviso entendible.
+
+        El error crudo ('Page.goto: Timeout 30000ms exceeded' + un Call log) no le
+        dice al usuario ni qué falló ni qué hacer, y en la práctica la causa casi
+        siempre es la misma: internet lento o intermitente, la VPN caída o el
+        portal fuera de servicio. Eso es lo que se nombra aquí."""
+        page = self._exigir_pagina()
+        sitio = urlsplit(url).netloc or url
+        try:
+            await page.goto(url, wait_until="domcontentloaded",
+                            timeout=self.TIMEOUT_NAV)
+        except PlaywrightTimeoutError as exc:
+            raise ErrorSipp(
+                f"{descripcion} ({sitio}) no respondió en "
+                f"{self.TIMEOUT_NAV // 1000} segundos. Suele ser por una conexión "
+                "lenta o intermitente: revisa tu internet (y la VPN, si la usas) "
+                "y vuelve a intentar."
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — red caída, DNS, proxy, certificado…
+            texto = str(exc)
+            causa = next((c for marca, c in _CAUSAS_RED if marca in texto), "")
+            raise ErrorSipp(
+                f"{descripcion} ({sitio}) no se pudo abrir: "
+                f"{causa or mensaje_amigable(exc)}."
+            ) from exc
+
     # ------------------------------------------------------------ login
     async def login(self, usuario: str, contrasena: str) -> None:
         """Inicia sesión en el portal. Lanza ErrorSipp si faltan credenciales o
@@ -268,7 +343,7 @@ class SesionSipp:
         if not usuario or not contrasena:
             raise ErrorSipp("Faltan credenciales para iniciar sesión en el SIPP.")
         page = self._exigir_pagina()
-        await page.goto(self.URL_LOGIN, wait_until="domcontentloaded", timeout=self.TIMEOUT_NAV)
+        await self._abrir_url(self.URL_LOGIN, "El portal del SIPP")
 
         campo_usuario = await self._primer_visible(
             [
@@ -515,7 +590,7 @@ class SesionSipp:
         elemento ancla que confirme que la pantalla cargó. Si no aparece, guarda un
         diagnóstico (captura + HTML) y lanza ErrorSipp."""
         page = self._exigir_pagina()
-        await page.goto(url, wait_until="domcontentloaded", timeout=self.TIMEOUT_NAV)
+        await self._abrir_url(url, "La pantalla del SIPP")
         try:
             await ancla.wait_for(state="visible", timeout=self.TIMEOUT_ELEMENTO)
             return
@@ -556,38 +631,97 @@ class SesionSipp:
         raise ErrorSipp(
             "No se pudo elegir '%s' en el combo '%s'.%s" % (texto, ng_model, detalle))
 
-    async def set_input(self, ng_model: str, valor: str) -> None:
-        """Escribe `valor` en un input por su ng-model. Se filtra por ':visible'
-        porque el portal repite ng-models en paneles ocultos (ng-hide).
+    async def _campo_a_la_vista(self, ng_model: str) -> "Locator | None":
+        """Devuelve el input visible de `ng_model`, o None si no aplica a esta
+        pantalla. Se filtra por ':visible' porque el portal repite ng-models en
+        paneles ocultos (ng-hide).
 
-        Si el campo NO está presente/visible para este tipo de activo, se omite de
-        inmediato (chequeo corto) en vez de esperar el timeout completo: así el RPA
-        avanza «conforme encuentra los campos» y no se atora en los no aplicables."""
+        El orden importa para la VELOCIDAD, porque esto se paga por cada campo de
+        cada activo:
+          1. ¿Ya está a la vista? `count()` NO espera: es una consulta al DOM.
+             Es el caso normal y cuesta milisegundos.
+          2. ¿Existe siquiera en el DOM? Si el portal no lo pinta para este tipo de
+             activo (o el formulario de edición no lo expone), no va a aparecer por
+             esperarlo: se omite YA, sin consumir ningún timeout.
+          3. Existe pero oculto: puede ser una cascada de Angular a medio pintar,
+             así que se le da una gracia corta y se sigue.
+        """
         page = self._exigir_pagina()
-        campo = page.locator(f'[ng-model="{ng_model}"]:visible').first
+        visibles = page.locator(f'[ng-model="{ng_model}"]:visible')
         try:
-            await campo.wait_for(state="visible", timeout=1_500)
+            cuantos = await visibles.count()
+            if cuantos == 0:
+                if await page.locator(f'[ng-model="{ng_model}"]').count() == 0:
+                    return None
+                await visibles.first.wait_for(state="visible",
+                                              timeout=self.TIMEOUT_CAMPO)
+                cuantos = await visibles.count()
+            if cuantos > 1:
+                # El portal REPITE el mismo ng-model entre sus modales (edición y
+                # detalle) y una de las copias viene bloqueada: hay que quedarse con
+                # la que sí admite escritura. La comprobación solo se paga cuando
+                # hay duplicados a la vista, no en el caso normal.
+                for i in range(cuantos):
+                    campo = visibles.nth(i)
+                    if await campo.is_editable(timeout=self.TIMEOUT_CAMPO):
+                        return campo
         except PlaywrightTimeoutError:
-            return  # campo ausente/oculto para este tipo: se omite y se sigue
+            return None
+        except Exception:  # noqa: BLE001 — DOM cambiando bajo los pies: se omite
+            return None
+        return visibles.first
+
+    async def _campo_existe(self, ng_model: str) -> bool:
+        """¿El ng-model está en el DOM? Consulta instantánea, sin esperas.
+
+        NO se exige que sea visible: los <select> decorados con 'chosen' quedan
+        ocultos y aun así se llenan por JS, así que pedirles visibilidad los daría
+        por ausentes."""
+        page = self._exigir_pagina()
         try:
-            await campo.fill(valor, timeout=2_500)
+            return await page.locator(f'[ng-model="{ng_model}"]').count() > 0
+        except Exception:  # noqa: BLE001 — DOM cambiando: se trata como ausente
+            return False
+
+    async def set_input(self, ng_model: str, valor: str) -> None:
+        """Escribe `valor` en un input por su ng-model.
+
+        Si el campo NO aplica a esta pantalla se omite y se sigue: así el RPA
+        avanza «conforme encuentra los campos» y no se atora en los no aplicables
+        (ver `_campo_a_la_vista`)."""
+        campo = await self._campo_a_la_vista(ng_model)
+        if campo is None:
+            return
+        try:
+            await campo.fill(valor, timeout=self.TIMEOUT_ESCRITURA)
         except Exception:  # noqa: BLE001 — respaldo: fijar por JS y avisar a Angular
             try:
                 await campo.evaluate(
                     "(el, v) => { el.value = v;"
                     " el.dispatchEvent(new Event('input', {bubbles:true}));"
                     " el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                    valor, timeout=2_500)
+                    valor, timeout=self.TIMEOUT_ESCRITURA)
             except Exception:  # noqa: BLE001 — no editable (deshabilitado): se omite
                 pass
 
     async def set_fecha(self, ng_model: str, valor: str) -> None:
         """Escribe una fecha (DD/MM/AAAA) en un input con máscara. Se usa `fill`,
         que enfoca SIN clic real: así no se abre el calendario y Angular sí
-        registra el valor (dispara 'input')."""
-        page = self._exigir_pagina()
-        campo = page.locator(f'[ng-model="{ng_model}"]:visible').first
-        await campo.fill(valor)
+        registra el valor (dispara 'input').
+
+        Pasa por el mismo chequeo que `set_input`: sin él, una fecha que no exista
+        en la pantalla se llevaba el timeout POR DEFECTO de Playwright (30 s).
+        A diferencia de `set_input`, aquí el fallo SÍ se reporta (lanza): es lo que
+        alimenta la lista de campos no aplicados de `modificar_activo`, y el motivo
+        va en el mensaje porque no es el mismo problema que el campo no exista a
+        que el portal lo bloquee (p. ej. la Fecha de Asignación de la edición, que
+        el SIPP marca `ng-disabled` porque se cambia al reasignar)."""
+        campo = await self._campo_a_la_vista(ng_model)
+        if campo is None:
+            raise ErrorSipp("No está en esta pantalla del SIPP.")
+        if not await campo.is_editable(timeout=self.TIMEOUT_CAMPO):
+            raise ErrorSipp("El SIPP lo bloquea aquí (es de solo lectura).")
+        await campo.fill(valor, timeout=self.TIMEOUT_ESCRITURA)
 
     async def llenar_campos_detalle(self, detalles: dict) -> dict:
         """Llena las CARACTERÍSTICAS del insumo ('Detalles Insumo'), que en el SIPP
@@ -606,8 +740,8 @@ class SesionSipp:
         da un margen mayor que el de un elemento normal."""
         page = self._exigir_pagina()
         ancla = page.locator("[ng-model='js_filtroListado.de_SerieActivo']").first
-        await page.goto(self.URL_CATALOGO_ACTIVOS, wait_until="domcontentloaded",
-                        timeout=self.TIMEOUT_NAV)
+        await self._abrir_url(self.URL_CATALOGO_ACTIVOS,
+                              "El catálogo de Activos Fijos del SIPP")
         try:
             await ancla.wait_for(state="visible", timeout=self.TIMEOUT_NAV)
             return
@@ -890,8 +1024,7 @@ class SesionSipp:
         # El No. de serie es OBLIGATORIO en el SIPP. Si el activo NO trae serie, se
         # usa la ETIQUETA como número de serie (la generada por el SIPP; como
         # respaldo, la del levantamiento). Se hace tras generar la etiqueta.
-        serie_final = ((serie or "").strip() or (etiqueta or "").strip()
-                       or (etiqueta_actual or "").strip())
+        serie_final = serie_para_alta(serie, etiqueta, etiqueta_actual)
         if serie_final:
             try:
                 await self.set_input("filtrosAgregar.nu_Serie", serie_final)
@@ -1005,14 +1138,27 @@ class SesionSipp:
         return await self._leer_etiqueta()
 
     async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
-                               detalles: "dict | None" = None) -> list:
+                               detalles: "dict | None" = None,
+                               punto_control=None) -> dict:
         """Busca un activo por ETIQUETA (o serie si no hay), abre su edición, aplica
-        los campos y guarda. Devuelve la lista de campos que NO se pudieron aplicar
-        (el formulario de edición no expone exactamente los mismos que el alta, así
-        que un campo ausente no aborta el resto).
+        los campos y guarda. Devuelve:
+
+            {"cambios": [(ng_model, antes, después)],
+             "no_aplicados": [(ng_model, motivo)]}
+
+        `cambios` es lo que de verdad cambió en el portal (leído del formulario
+        antes y después de escribir), para que el reporte pueda mostrarlo.
+        `no_aplicados` son los campos que el formulario de edición no admitió: no
+        expone exactamente los mismos que el alta, así que uno ausente no aborta el
+        resto. El MOTIVO va incluido porque «no existe» y «el portal no deja
+        editarlo» piden acciones distintas de quien lee el reporte.
 
         `campos`: [(ng_model, valor, control)] ya en su forma de EDICIÓN
-        (filtrosEditar.* / FH_*_EDITAR)."""
+        (filtrosEditar.* / FH_*_EDITAR).
+
+        `punto_control`: corrutina que se llama entre campos para permitir detener
+        el proceso a media captura (ver `_aplicar_campos_edicion`). Si aborta antes
+        de Guardar, el activo queda SIN tocar en el SIPP."""
         page = self._exigir_pagina()
         filas = await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         if filas == 0:
@@ -1041,10 +1187,83 @@ class SesionSipp:
             raise ErrorSipp(
                 "No se abrió el formulario de edición del activo.") from exc
 
-        no_aplicados = []
+        cambios, no_aplicados = await self._aplicar_campos_edicion(
+            campos, punto_control=punto_control)
+
+        if detalles:
+            await self.llenar_campos_detalle(detalles)
+
+        # Última salida limpia: detenerse AQUÍ deja el activo intacto en el portal,
+        # porque nada se guarda hasta pulsar Guardar. Pasado este punto el cambio ya
+        # está enviado y detener solo evita seguir con el SIGUIENTE activo.
+        if punto_control is not None:
+            await punto_control()
+
+        guardar = await self._primer_visible(
+            [
+                page.locator("[ng-click*='guardarActivoFijoEditar()']"),
+                page.get_by_role("button", name=re.compile(r"^\s*guardar\s*$", re.I)),
+            ],
+            "botón Guardar de la edición del activo")
+        await self._click_seguro(guardar)
+        await self.confirmar_aviso_si_hay(3_000)
+        return {"cambios": cambios, "no_aplicados": no_aplicados}
+
+    async def _valor_actual(self, ng_model: str, control: str = "text") -> str:
+        """Lo que el formulario YA tiene en ese campo, para el «antes» del reporte.
+
+        Se lee ANTES de escribir; es el valor real del portal, no el que la
+        herramienta suponga. Un select se lee por el TEXTO de su opción (que es lo
+        que ve el usuario) y sin exigir que esté a la vista: cuando lo decora
+        'chosen', el <select> original queda oculto pero conserva el valor."""
+        campo = await self._campo_a_la_vista(ng_model)
+        if campo is None:
+            # Sin copia a la vista: puede ser un select oculto por 'chosen' (que sí
+            # conserva su valor) o un campo que no existe. Se distingue con una
+            # consulta instantánea, porque operar sobre un locator que no resuelve
+            # se lleva el timeout POR DEFECTO de Playwright (30 s) por campo.
+            if not await self._campo_existe(ng_model):
+                return ""
+            campo = self._exigir_pagina().locator(f'[ng-model="{ng_model}"]').first
+        try:
+            if control == "select":
+                return await campo.evaluate(
+                    "el => (el.options && el.selectedIndex >= 0)"
+                    " ? (el.options[el.selectedIndex].text || '') : (el.value || '')",
+                    timeout=self.TIMEOUT_ESCRITURA) or ""
+            return await campo.input_value(timeout=self.TIMEOUT_CAMPO)
+        except Exception:  # noqa: BLE001 — campo ilegible: se sigue sin «antes»
+            return ""
+
+    async def _aplicar_campos_edicion(self, campos: list,
+                                      punto_control=None) -> "tuple[list, list]":
+        """Aplica `campos` al formulario de edición ya abierto.
+
+        Devuelve `(cambios, no_aplicados)`:
+          - `cambios`: [(ng_model, antes, después)] SOLO de lo que de verdad cambió.
+            Un campo cuyo valor ya coincidía no es un cambio y no debe ensuciar el
+            reporte.
+          - `no_aplicados`: [(ng_model, motivo)] de lo que el portal no admitió.
+
+        `punto_control` (opcional) se llama ANTES de cada campo: es lo que permite
+        que «Detener» corte en segundos en vez de al terminar el activo. Lanza
+        RpaDetenido, que sale sin pulsar Guardar y deja el activo intacto.
+        """
+        page = self._exigir_pagina()
+        cambios, no_aplicados = [], []
         for ng_model, valor, control in campos:
+            if punto_control is not None:
+                await punto_control()
             if not valor or not ng_model:
                 continue
+            # Un campo que no está en el formulario se reporta y se salta SIN
+            # pelearlo: insistir costaba ~60 s por campo (esperas de Playwright +
+            # reintentos del combo) y encima no dejaba rastro en el reporte.
+            if not await self._campo_existe(ng_model):
+                no_aplicados.append(
+                    (ng_model, "No existe en el formulario de edición del SIPP."))
+                continue
+            antes = await self._valor_actual(ng_model, control)
             try:
                 if control == "select":
                     # El centro de costo depende del grupo (cascada AJAX): se espera
@@ -1060,21 +1279,19 @@ class SesionSipp:
                     await self.set_fecha(ng_model, valor)
                 else:
                     await self.set_input(ng_model, valor)
-            except Exception:  # noqa: BLE001 — campo ausente en edición: se reporta
-                no_aplicados.append(ng_model)
-
-        if detalles:
-            await self.llenar_campos_detalle(detalles)
-
-        guardar = await self._primer_visible(
-            [
-                page.locator("[ng-click*='guardarActivoFijoEditar()']"),
-                page.get_by_role("button", name=re.compile(r"^\s*guardar\s*$", re.I)),
-            ],
-            "botón Guardar de la edición del activo")
-        await self._click_seguro(guardar)
-        await self.confirmar_aviso_si_hay(3_000)
-        return no_aplicados
+            except ErrorSipp as exc:  # motivo conocido (ausente / bloqueado)
+                no_aplicados.append((ng_model, str(exc)))
+                continue
+            except Exception as exc:  # noqa: BLE001 — cualquier otro fallo del campo
+                no_aplicados.append((ng_model, mensaje_amigable(exc)))
+                continue
+            # El «después» se relee del formulario en vez de dar por hecho que se
+            # escribió lo que se pidió: las máscaras y los combos normalizan (una
+            # fecha se reformatea, un select guarda el texto de su opción).
+            despues = await self._valor_actual(ng_model, control)
+            if despues.strip() != antes.strip():
+                cambios.append((ng_model, antes.strip(), despues.strip()))
+        return cambios, no_aplicados
 
     # --------------------------------------------------------- utilidades
     async def _click_seguro(self, locator: Locator) -> None:

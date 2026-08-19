@@ -1,10 +1,9 @@
 """Pantalla "Cartas responsivas" (generación LOCAL del PDF).
 
 Dos modos (pestañas):
-  - "Por empleado": elegir empresa + empleado, filtrar por rango de fecha de
-    registro, marcar activos y generar UNA carta.
-  - "Masiva por empresa": elegir empresa (+ rango de fecha), cargar TODOS los
-    colaboradores de esa empresa en secciones plegables; en cada sección se ven sus
+  - "Por empleado": elegir empresa + empleado, marcar activos y generar UNA carta.
+  - "Masiva por empresa": elegir empresa y cargar TODOS los colaboradores de esa
+    empresa en secciones plegables; en cada sección se ven sus
     activos con casilla (sin marcar por defecto) y un buscador propio. Cada
     colaborador con ≥1 activo marcado entra en la exportación; se genera un PDF por
     colaborador nombrado "Carta responsiva NOMBRE - EMPRESA.pdf".
@@ -21,8 +20,8 @@ import flet as ft
 
 from core import credenciales, preferencias
 from core.empresas import ID_POR_EMPRESA
-from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE, parse_fecha
-from ui.componentes import (CampoFecha, Modal, boton_herramienta, boton_primario,
+from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
+from ui.componentes import (Modal, boton_herramienta, boton_primario,
                             boton_secundario, buscador, campo_opciones, campo_texto,
                             tarjeta_seccion)
 
@@ -70,10 +69,6 @@ class SeccionCartasResponsivas:
         self._panel_masiva.visible = clave == "masiva"
         self._safe_update()
 
-    def _rango_fechas(self, cf_desde, cf_hasta):
-        """(desde, hasta) como date | None a partir de dos CampoFecha."""
-        return parse_fecha(cf_desde.value), parse_fecha(cf_hasta.value)
-
     # ---------------------------------------------------- panel INDIVIDUAL
     def _construir_individual(self) -> ft.Control:
         self.blq_empresa, self.dd_empresa = campo_opciones(
@@ -82,9 +77,6 @@ class SeccionCartasResponsivas:
         self.txt_empleado = ft.Text("Ningún empleado elegido.", size=13, color=GRIS,
                                     expand=True, no_wrap=False)
         self.progreso = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)
-        self.cf_desde = CampoFecha(self.page, "Desde (registro)", flotante=True)
-        self.cf_hasta = CampoFecha(self.page, "Hasta (registro)", flotante=True)
-
         self.buscador_filtro = buscador("Filtrar por insumo, serie o etiqueta…",
                                         expand=True)
         self.buscador_filtro.on_change = lambda _e: self._pintar_lista()
@@ -107,28 +99,27 @@ class SeccionCartasResponsivas:
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([ft.Icon(ft.Icons.BADGE, size=18, color=GRIS), self.txt_empleado],
                        spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Row([self.cf_desde.control, self.cf_hasta.control], spacing=12,
-                       wrap=True),
                 ft.Row([boton_primario("Buscar activos dados de alta", ft.Icons.SEARCH,
-                                       self._buscar_activos),
-                        boton_secundario("Actualizar información del SIPP", ft.Icons.SYNC,
-                                         self._actualizar_sipp)], spacing=12, wrap=True),
+                                       self._buscar_activos)], spacing=12, wrap=True),
                 self.txt_estado,
             ],
             spacing=14, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
+        # La acción va ARRIBA de la tabla, no al pie: la lista crece con los
+        # activos del colaborador y el botón quedaba fuera de pantalla, obligando
+        # a bajar hasta el final para algo que se decide al marcar.
         tarjeta_lista = tarjeta_seccion(ft.Column(
-            [ft.Row([self.buscador_filtro]),
+            [ft.Row([self.buscador_filtro,
+                     boton_primario("Generar carta responsiva (PDF)",
+                                    ft.Icons.DESCRIPTION, self._generar_carta)],
+                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
              ft.Row([self.chk_todos, self.txt_conteo],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
              self._encabezado_tabla(), self.lista],
             spacing=10, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
-        barra = ft.Row([boton_primario("Generar carta responsiva (PDF)",
-                                       ft.Icons.DESCRIPTION, self._generar_carta)],
-                       alignment=ft.MainAxisAlignment.END)
-        return ft.Column([tarjeta_seccion(cabecera), tarjeta_lista, barra],
+        return ft.Column([tarjeta_seccion(cabecera), tarjeta_lista],
                          spacing=14, tight=True,
                          horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
@@ -151,10 +142,7 @@ class SeccionCartasResponsivas:
         self.m_blq_empresa, self.m_dd_empresa = campo_opciones(
             "Empresa", list(NOMBRES_EMPRESAS), flotante=True,
             on_change=lambda _e: self._m_reset())
-        self.m_cf_desde = CampoFecha(self.page, "Desde (registro)", flotante=True)
-        self.m_cf_hasta = CampoFecha(self.page, "Hasta (registro)", flotante=True)
-        for c in (self.m_dd_empresa, self.m_cf_desde.control, self.m_cf_hasta.control):
-            c.expand = True
+        self.m_dd_empresa.expand = True
         self.m_progreso = ft.ProgressRing(width=22, height=22, stroke_width=3,
                                           visible=False)
         # Búsqueda por BOTÓN/Enter (no en cada tecla): repintar 120 secciones por
@@ -174,31 +162,33 @@ class SeccionCartasResponsivas:
                         "colaborador con al menos uno marcado se incluye.", size=13,
                         color=GRIS),
                 ft.Divider(),
-                ft.Row([self.m_dd_empresa, self.m_cf_desde.control,
-                        self.m_cf_hasta.control, self.m_progreso], spacing=12,
+                ft.Row([self.m_dd_empresa, self.m_progreso], spacing=12,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([boton_primario("Cargar colaboradores", ft.Icons.GROUPS,
-                                       self._cargar_colaboradores),
-                        boton_secundario("Actualizar información del SIPP", ft.Icons.SYNC,
-                                         self._actualizar_sipp)], spacing=12, wrap=True),
+                                       self._cargar_colaboradores)], spacing=12,
+                       wrap=True),
                 self.m_estado,
             ], spacing=14, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
+        # Aquí el problema era peor: con hasta 120 colaboradores desplegables, el
+        # botón del pie quedaba a una pantalla larga de distancia.
         tarjeta_lista = tarjeta_seccion(ft.Column(
             [ft.Row([self.m_buscar_colab,
                      boton_secundario("Buscar", ft.Icons.SEARCH,
-                                      self._pintar_colaboradores)],
+                                      self._pintar_colaboradores),
+                     boton_primario("Generar cartas masivas (PDF)",
+                                    ft.Icons.DESCRIPTION, self._generar_masivas)],
+                    # SIN `wrap`: el buscador lleva `expand=True` y en un Row
+                    # envolvente el hijo expandido pierde su cota de ancho y se
+                    # estira sin límite (el cuadro gris gigante).
+                    spacing=12,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
              self.m_conteo,
              ft.Container(self.m_lista)],
             spacing=10, tight=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
-        self.m_barra = ft.Row(
-            [boton_primario("Generar cartas masivas (PDF)", ft.Icons.DESCRIPTION,
-                            self._generar_masivas)],
-            alignment=ft.MainAxisAlignment.END)
-        return ft.Column([tarjeta_seccion(cabecera), tarjeta_lista, self.m_barra],
+        return ft.Column([tarjeta_seccion(cabecera), tarjeta_lista],
                          spacing=14, tight=True,
                          horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
@@ -218,15 +208,12 @@ class SeccionCartasResponsivas:
 
         DialogoSelectorEmpleado(self.app, _al_elegir).abrir()
 
-    def _actualizar_sipp(self, _e=None) -> None:
-        from ui.actualizar_sipp import DialogoActualizarSipp
-
-        def _fijar(nombre: str) -> None:
-            self.dd_empresa.value = nombre
-            self.m_dd_empresa.value = nombre
-            self._safe_update()
-
-        DialogoActualizarSipp(self.app, set_empresa=_fijar).abrir()
+    # El botón vive en el encabezado (app.py); el shell llama a estos ganchos.
+    def fijar_empresa(self, nombre: str) -> None:
+        """Refleja en AMBAS pestañas la empresa elegida al actualizar el SIPP."""
+        self.dd_empresa.value = nombre
+        self.m_dd_empresa.value = nombre
+        self._safe_update()
 
     async def _buscar_activos(self, _e=None) -> None:
         idemp = self._empresa_id()
@@ -239,7 +226,6 @@ class SeccionCartasResponsivas:
             self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
             return
         usuario, contrasena = creds
-        desde, hasta = self._rango_fechas(self.cf_desde, self.cf_hasta)
         id_empleado = self._id_empleado
 
         self.progreso.visible = True
@@ -252,14 +238,17 @@ class SeccionCartasResponsivas:
         async def flujo():
             nonlocal activos, error
             from core import cartas_responsivas as cr
-            from core.rpa_sipp import SesionSipp
+            from core.rpa_sipp import SesionSipp, mensaje_amigable
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
+                    # Sin filtro de fecha: se traen TODOS los activos vigentes
+                    # del colaborador. Acotar por fecha de registro escondía
+                    # activos que sí tiene asignados hoy.
                     activos = await cr.listar_activos_empleado(
-                        sipp, idemp, id_empleado, fh_inicio=desde, fh_fin=hasta)
+                        sipp, idemp, id_empleado)
             except Exception as exc:  # noqa: BLE001
-                error = str(exc)
+                error = mensaje_amigable(exc)
 
         from core.rpa_sipp import BucleRpa
         bucle = BucleRpa()
@@ -279,8 +268,8 @@ class SeccionCartasResponsivas:
         self._seleccion = set()
         self.chk_todos.value = False
         if not activos:
-            self.txt_estado.value = (f"«{self._nombre_empleado}» no tiene activos en "
-                                     f"ese criterio.")
+            self.txt_estado.value = (f"«{self._nombre_empleado}» no tiene activos "
+                                     "dados de alta en el SIPP.")
             self.txt_estado.color = NARANJA
         else:
             self.txt_estado.value = f"{len(activos)} activo(s) de «{self._nombre_empleado}»."
@@ -394,6 +383,15 @@ class SeccionCartasResponsivas:
         id_empleado = self._id_empleado
         nombre = self._nombre_empleado or (activos_sel[0].empleado if activos_sel else "")
         empresa = activos_sel[0].empresa if activos_sel else (self.dd_empresa.value or "")
+        # La carta va a su carpeta «EMPRESA AAAA-MM-DD». Se crea ANTES de arrancar
+        # el navegador: si la ruta no admite escritura, se sabe ya y no tras el
+        # login y la consulta al SIPP.
+        from core import carta_responsiva_local as _crl
+        try:
+            destino = _crl.carpeta_para_cartas(carpeta, empresa)
+        except OSError as exc:
+            self.app.avisar(f"No se pudo crear la carpeta: {exc}", ROJO)
+            return
 
         prog = Modal(self.page, "Generando carta responsiva", subtitulo=nombre, ancho=460)
         prog.cuerpo.controls = [ft.Text("Generando la carta…", size=13), ft.ProgressBar()]
@@ -403,17 +401,17 @@ class SeccionCartasResponsivas:
         async def flujo():
             nonlocal ruta, error
             from core import carta_responsiva_local as crl
-            from core.rpa_sipp import SesionSipp
+            from core.rpa_sipp import SesionSipp, mensaje_amigable
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
                     base = crl.nombre_archivo_carta(nombre, empresa)
                     ruta = await crl.generar_carta_local(
-                        sipp, activos_sel, os.path.join(carpeta, base + ".pdf"), folio,
+                        sipp, activos_sel, os.path.join(destino, base + ".pdf"), folio,
                         nombre_empleado=nombre, id_empleado=id_empleado,
                         id_empresa=id_empresa)
             except Exception as exc:  # noqa: BLE001
-                error = str(exc)
+                error = mensaje_amigable(exc)
 
         from core.rpa_sipp import BucleRpa
         bucle = BucleRpa()
@@ -456,7 +454,6 @@ class SeccionCartasResponsivas:
             self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
             return
         usuario, contrasena = creds
-        desde, hasta = self._rango_fechas(self.m_cf_desde, self.m_cf_hasta)
 
         self.m_progreso.visible = True
         self.m_estado.value = "Consultando el SIPP…"
@@ -468,14 +465,13 @@ class SeccionCartasResponsivas:
         async def flujo():
             nonlocal activos, error
             from core import cartas_responsivas as cr
-            from core.rpa_sipp import SesionSipp
+            from core.rpa_sipp import SesionSipp, mensaje_amigable
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
-                    activos = await cr.listar_activos_empresa(
-                        sipp, idemp, fh_inicio=desde, fh_fin=hasta)
+                    activos = await cr.listar_activos_empresa(sipp, idemp)
             except Exception as exc:  # noqa: BLE001
-                error = str(exc)
+                error = mensaje_amigable(exc)
 
         from core.rpa_sipp import BucleRpa
         bucle = BucleRpa()
@@ -646,6 +642,13 @@ class SeccionCartasResponsivas:
         creds = credenciales.cargar()
         usuario, contrasena = creds
         empresa = self.m_dd_empresa.value or ""
+        # Todas las cartas de la tanda van juntas en «EMPRESA AAAA-MM-DD».
+        from core import carta_responsiva_local as _crl
+        try:
+            destino = _crl.carpeta_para_cartas(carpeta, empresa)
+        except OSError as exc:
+            self.app.avisar(f"No se pudo crear la carpeta: {exc}", ROJO)
+            return
         # Armar grupos (nombre, id_empleado, [activos seleccionados]).
         grupos = []
         for eid, _nombre in incluidos:
@@ -674,14 +677,14 @@ class SeccionCartasResponsivas:
         async def flujo():
             nonlocal resultados, folio_fin, error
             from core import carta_responsiva_local as crl
-            from core.rpa_sipp import SesionSipp
+            from core.rpa_sipp import SesionSipp, mensaje_amigable
             try:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
                     resultados, folio_fin = await crl.generar_cartas_masivas(
-                        sipp, grupos, carpeta, folio, empresa, progreso=avance)
+                        sipp, grupos, destino, folio, empresa, progreso=avance)
             except Exception as exc:  # noqa: BLE001
-                error = str(exc)
+                error = mensaje_amigable(exc)
 
         from core.rpa_sipp import BucleRpa
         bucle = BucleRpa()
@@ -703,7 +706,7 @@ class SeccionCartasResponsivas:
         if fallidas:
             msg += f" {len(fallidas)} con error."
         self.app.avisar(msg, VERDE if not fallidas else NARANJA, accion="Abrir carpeta",
-                        on_accion=lambda _e, x=carpeta: self.app.abrir_en_sistema(x),
+                        on_accion=lambda _e, x=destino: self.app.abrir_en_sistema(x),
                         duracion=9000)
 
     # ==================================================== utilidades

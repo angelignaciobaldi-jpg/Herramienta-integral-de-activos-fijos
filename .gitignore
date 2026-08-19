@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# Ajustes del editor: apuntan al intérprete de CADA máquina (aquí el entorno vive
+# fuera del repo porque la ruta del proyecto rebasa el límite de Windows).
+.vscode/
 
 # ===== Empaquetado (PyInstaller / flet pack) =====
 build/
@@ -43,12 +46,17 @@ Paginas html/
 # Documentos de prueba (facturas / resguardos con datos reales)
 Documentos de pruebas/
 descargas/
+# Cartas responsivas de ejemplo: son PDFs generados con datos de colaboradores
+# REALES (nombre y folio). Se conservan en local como referencia del formato.
+Ejemplos cartas responsivas/
 
 # Inventarios reales en Excel (pesados y con datos del negocio)
 *.xlsx
 
 # Imágenes extraídas de los ZIP de levantamiento (datos reales)
 imagenes_levantamiento/
+# Imágenes del insumo adjuntadas en la captura (se suben al SIPP; datos reales)
+imagenes_insumo/
 
 # Ejemplos de diseño en html (mockups de referencia, pesados)
 ejemplos/

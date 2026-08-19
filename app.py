@@ -130,12 +130,11 @@ class AppActivosFijos:
 
         # Área de contenido: todas las pantallas viven aquí; solo se muestra la
         # activa (se alterna 'visible'), en vez de un TabBarView de Material.
-        self._secciones = [
-            self.dashboard.contenido,
-            self.registro.contenido,
-            self.generador_qr.contenido,
-            self.cartas.contenido,
-        ]
+        # MISMO ORDEN que `_construir_nav`: el índice de la navegación indexa las
+        # dos listas (contenido a mostrar y pantalla a la que avisar).
+        self._pantallas = [self.dashboard, self.registro, self.generador_qr,
+                           self.cartas]
+        self._secciones = [p.contenido for p in self._pantallas]
         for i, seccion in enumerate(self._secciones):
             seccion.visible = i == 0
         self._area = ft.Column(self._secciones, expand=True)
@@ -159,11 +158,21 @@ class AppActivosFijos:
             tooltip="Modo claro" if oscuro else "Modo oscuro",
             on_click=self._alternar_tema,
         )
+        # Actualizar SIPP vive en el ENCABEZADO y no dentro de cada pantalla: lo
+        # usan tres (registro, QR y cartas) y tenerlo en un sitio distinto de cada
+        # una obligaba a buscarlo. Aquí siempre está en el mismo lugar.
+        from ui.componentes import boton_secundario
+        self.btn_sipp = boton_secundario(
+            "Actualizar SIPP", ft.Icons.SYNC, self._actualizar_sipp,
+            tooltip="Descarga del SIPP los activos e insumos de una empresa y el "
+                    "catálogo de empleados")
         encabezado = ft.Row(
             [
                 self.logo,
                 self._construir_nav(),
-                ft.Row([self.btn_actualizar, self.btn_config, self.btn_tema], tight=True),
+                ft.Row([self.btn_sipp, self.btn_actualizar, self.btn_config,
+                        self.btn_tema], tight=True,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=12,
@@ -202,6 +211,29 @@ class AppActivosFijos:
                 cargar()
 
     # ------------------------------------------------------ navegación
+    def _actualizar_sipp(self, _e=None) -> None:
+        """Abre «Actualizar información del SIPP» y avisa a la pantalla activa.
+
+        El diálogo es común, pero cada pantalla reacciona distinto (fijar la
+        empresa elegida, recargar sus listas). En vez de que el shell las conozca,
+        se le pregunta a la activa por dos ganchos OPCIONALES:
+        `fijar_empresa(nombre)` y `tras_actualizar_sipp()`."""
+        from ui.actualizar_sipp import DialogoActualizarSipp
+
+        pantalla = self._pantallas[self._nav_activa]
+
+        def _fijar(nombre: str) -> None:
+            gancho = getattr(pantalla, "fijar_empresa", None)
+            if callable(gancho):
+                gancho(nombre)
+
+        def _tras() -> None:
+            gancho = getattr(pantalla, "tras_actualizar_sipp", None)
+            if callable(gancho):
+                gancho()
+
+        DialogoActualizarSipp(self, set_empresa=_fijar, al_terminar=_tras).abrir()
+
     def _construir_nav(self) -> ft.Control:
         self._nav_activa = 0
         self._nav_items: list[dict] = []

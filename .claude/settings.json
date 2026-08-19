@@ -22,7 +22,16 @@
       "Bash(python -m py_compile ui/selector_empleado.py)",
       "Bash(PYTHONIOENCODING=utf-8 python -c \"import sys; sys.path.insert\\(0,'.'\\); from core.empresas import NOMBRES_EMPRESAS; print\\([n for n in NOMBRES_EMPRESAS if 'ASKE' in n.upper\\(\\) or 'ASE' in n.upper\\(\\)]\\)\")",
       "Bash(awk '/_JS_ELEGIR_OPCION = /,/^\"\"\"|^'\"'\"''\"'\"''\"'\"'/' core/rpa_sipp.py)",
-      "Bash(python -m py_compile ui/captura_activo.py)"
+      "Bash(python -m py_compile ui/captura_activo.py)",
+      "Bash(git rev-parse *)",
+      "Bash(git show *)",
+      "Read(//tmp/**)",
+      "Bash(xargs echo \"marcadores restantes:\")",
+      "Bash(python -m py_compile ui/captura_activo.py ui/selector_insumo.py ui/selector_empleado.py)",
+      "Bash(python -m py_compile ui/actualizar_sipp.py)",
+      "Bash(python -m py_compile ui/componentes.py)",
+      "Bash(python -c \"import flet; print\\('flet', flet.version.version if hasattr\\(flet,'version'\\) else flet.__version__\\)\")",
+      "Bash(python -c \"import flet, importlib.metadata as m; print\\('flet', m.version\\('flet'\\)\\)\")"
     ]
   }
 }

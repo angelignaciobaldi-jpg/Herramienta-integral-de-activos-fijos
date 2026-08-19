@@ -24,18 +24,20 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import datetime
 
 import flet as ft
 
 from core import archivos, comparacion_sipp, compras_sipp, credenciales, db, rutas
 from core.empresas import ID_POR_EMPRESA
-from core.rpa_sipp import BucleRpa, ControlRpa, ErrorSipp, RpaDetenido, SesionSipp
+from core.rpa_sipp import (BucleRpa, ControlRpa, ErrorSipp, RpaDetenido,
+                           SesionSipp, mensaje_amigable, serie_para_alta)
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.captura_activo import DialogoCapturaActivo
 from ui.carga_masiva import DialogoCargaMasiva
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.componentes import (GUTTER_SCROLL, Modal, Pestanas, boton_herramienta,
-                            boton_primario, boton_secundario,
+                            boton_primario, boton_secundario, buscador,
                             campo_opciones, campo_tabla_opciones,
                             campo_tabla_texto, campo_texto, tarjeta_seccion)
 from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
@@ -87,6 +89,15 @@ def parsear_nombre(nombre_archivo: str) -> tuple[str, str]:
         nombre, serie = base.rsplit("_", 1)
         return nombre.strip(), serie.strip()
     return base.strip(), ""
+
+
+def _fecha_corta(sello: str) -> str:
+    """'2026-08-14 15:24:03' -> '14/08/2026 15:24'. Devuelve el crudo si no cuadra."""
+    texto = str(sello or "")
+    try:
+        return datetime.strptime(texto[:16], "%Y-%m-%d %H:%M").strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return texto
 
 
 def _prefill_desde_sipp(info: dict) -> dict:
@@ -159,10 +170,6 @@ class SeccionRegistroActivos:
                                tooltip="Da de alta activos desde una carpeta, un ZIP "
                                        "o un Excel"),
                 boton_secundario("Buscar en SIPP", ft.Icons.SEARCH, self._buscar),
-                boton_secundario("Actualizar información del SIPP", ft.Icons.SYNC,
-                                 self._actualizar_sipp,
-                                 tooltip="Descarga del SIPP los insumos y activos de "
-                                         "una empresa, más el catálogo de empleados"),
                 self.progreso,
                 self.estado,
             ],
@@ -190,12 +197,10 @@ class SeccionRegistroActivos:
             [
                 boton_herramienta("Seleccionar todos", ft.Icons.SELECT_ALL,
                                   self._seleccionar_todos),
-                boton_herramienta("Asignar tipo", ft.Icons.CATEGORY,
-                                  self._abrir_asignar_tipo,
-                                  tooltip="Asigna el tipo de activo a los seleccionados"),
-                boton_herramienta("Asignar departamento", ft.Icons.APARTMENT,
-                                  self._abrir_asignar_departamento,
-                                  tooltip="Asigna el departamento a los seleccionados"),
+                boton_herramienta("Consultar movimientos", ft.Icons.HISTORY,
+                                  self._abrir_movimientos,
+                                  tooltip="Historial de altas y modificaciones "
+                                          "enviadas al SIPP"),
                 boton_herramienta("Eliminar seleccionados", ft.Icons.DELETE_OUTLINE,
                                   self._eliminar_seleccionados, destructivo=True),
             ],
@@ -643,7 +648,7 @@ class SeccionRegistroActivos:
                             ruta = await compras_sipp.descargar_factura(
                                 sipp, entrada, os.path.join(rutas.DATOS, "facturas"))
             except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-                error = str(exc)
+                error = mensaje_amigable(exc)
 
         bucle = BucleRpa()
         try:
@@ -751,94 +756,6 @@ class SeccionRegistroActivos:
                 actions_alignment=ft.MainAxisAlignment.END,
             )
         )
-
-    # ------------------------------------------- asignación masiva de tipo
-    def _abrir_asignar_tipo(self, _e=None) -> None:
-        """Asigna un tipo de activo a TODOS los registros seleccionados.
-
-        El inventario importado llega sin tipo y el alta en el SIPP lo exige;
-        clasificarlos uno por uno sería inviable con miles de activos. Lo práctico
-        es filtrar un grupo (p. ej. «laptop»), seleccionarlo y clasificarlo aquí."""
-        ids = list(self._seleccionados)
-        if not ids:
-            self.app.avisar(
-                "Selecciona primero los activos a clasificar (puedes filtrar y "
-                "usar «Seleccionar todos»).", NARANJA)
-            return
-
-        bloque_tipo, dd = campo_opciones(
-            "Tipo de activo", list(TIPOS_ACTIVO.values()), width=340,
-            hint="Elige un tipo")
-
-        def aplicar(_e=None) -> None:
-            nombre = dd.value
-            if not nombre:
-                self.app.avisar("Elige un tipo de activo.", ROJO)
-                return
-            n = db.actualizar_tipo_lote(ids, ID_POR_NOMBRE.get(nombre))
-            self.page.pop_dialog()
-            self._refrescar()
-            self.app.avisar(f"{n} activo(s) clasificados como «{nombre}».", VERDE)
-
-        self.page.show_dialog(
-            ft.AlertDialog(
-                modal=True,
-                title=ft.Text("Asignar tipo de activo"),
-                content=ft.Container(
-                    ft.Column(
-                        [ft.Text(f"Se aplicará a {len(ids)} activo(s) seleccionado(s).",
-                                 size=13),
-                         bloque_tipo,
-                         ft.Text("Los campos particulares de cada tipo se capturan "
-                                 "después, en el formulario de cada activo.",
-                                 size=11, color=GRIS)],
-                        spacing=12, tight=True),
-                    width=380),
-                actions=[
-                    boton_herramienta("Cancelar",
-                                      on_click=lambda _e: self.page.pop_dialog()),
-                    boton_primario("Asignar", ft.Icons.CHECK, aplicar),
-                ],
-                actions_alignment=ft.MainAxisAlignment.END,
-            )
-        )
-
-    def _abrir_asignar_departamento(self, _e=None) -> None:
-        """Asigna un departamento (del catálogo del SIPP) a los registros
-        seleccionados. El desplegable trae los departamentos importados del SIPP."""
-        ids = list(self._seleccionados)
-        if not ids:
-            self.app.avisar("Selecciona primero los activos.", NARANJA)
-            return
-        deptos = db.listar_departamentos_todos()
-        if not deptos:
-            self.app.avisar("No hay departamentos descargados del SIPP. Usa "
-                            "«Actualizar información del SIPP».", NARANJA)
-            return
-        bloque_dep, dd = campo_opciones(
-            "Departamento", deptos, width=380, hint="Elige un departamento")
-
-        def aplicar(_e=None) -> None:
-            nombre = (dd.value or "").strip()
-            if not nombre:
-                self.app.avisar("Elige un departamento.", ROJO)
-                return
-            n = db.actualizar_departamento_lote(ids, nombre)
-            self.page.pop_dialog()
-            self._refrescar()
-            self.app.avisar(f"{n} activo(s) con departamento «{nombre}».", VERDE)
-
-        self.page.show_dialog(ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Asignar departamento"),
-            content=ft.Container(
-                ft.Column([ft.Text(f"Se aplicará a {len(ids)} activo(s) seleccionado(s).",
-                                   size=13), bloque_dep], spacing=12, tight=True),
-                width=420),
-            actions=[boton_herramienta("Cancelar",
-                                       on_click=lambda _e: self.page.pop_dialog()),
-                     boton_primario("Asignar", ft.Icons.CHECK, aplicar)],
-            actions_alignment=ft.MainAxisAlignment.END))
 
     # ------------------------------------------------------ acciones por fila
     def _ver_imagen(self, ruta: "str | None") -> None:
@@ -1361,11 +1278,23 @@ class SeccionRegistroActivos:
     def _buscar_por_empresa(self, por_empresa: dict) -> tuple[int, list[str]]:
         """(hilo) Recorre cada empresa, usa su caché del SIPP y actualiza el
         estatus de sus registros. Devuelve (registros_procesados, empresas_sin_caché)."""
+        from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
         from core.proveedor_activos import ProveedorSipp, SinCacheActivos
         hechos = 0
         sin_cache: list[str] = []
         for empresa, regs in por_empresa.items():
+            # Refresco previo por API (HTTP, sin navegador ni login): la búsqueda
+            # compara así contra el SIPP de AHORA, y funciona aunque nunca se haya
+            # corrido «Actualizar información del SIPP». Best-effort: si la API no
+            # está configurada o falla, se sigue con la caché tal como estaba, que
+            # es exactamente el comportamiento anterior.
+            if activos_sipp.hay_api():
+                try:
+                    activos_sipp.descargar_activos_api(
+                        ID_POR_EMPRESA[empresa], empresa)
+                except Exception:  # noqa: BLE001 — se cae a la caché existente
+                    pass
             proveedor = ProveedorSipp(ID_POR_EMPRESA[empresa])
             # Criterio: el identificador del alta es la ETIQUETA. Sin etiqueta se da
             # por hecho que NO está dado de alta (ni se busca). Con etiqueta se busca
@@ -1405,9 +1334,16 @@ class SeccionRegistroActivos:
                     id_tipo_nuevo = (idt if idt in TIPOS_ACTIVO
                                      and r.id_tipo_activo is None else None)
                     prefill = _prefill_desde_sipp(datos_sipp) if not r.datos() else None
-                    if id_tipo_nuevo is not None or prefill:
+                    # Los activos dados de alta ANTES de reflejar la serie quedaron
+                    # con la columna vacía; al reconocerlos en el SIPP se adopta la
+                    # suya (que suele ser su propia etiqueta).
+                    serie_sipp = str(datos_sipp.get("serie") or "").strip()
+                    serie_nueva = (serie_sipp if serie_sipp
+                                   and not (r.no_serie or "").strip() else None)
+                    if id_tipo_nuevo is not None or prefill or serie_nueva:
                         db.actualizar_datos_levantamiento(
-                            r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill)
+                            r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill,
+                            no_serie=serie_nueva)
                 hechos += 1
         return hechos, sin_cache
 
@@ -1476,18 +1412,45 @@ class SeccionRegistroActivos:
 
         txt = ft.Text(f"Preparando… (0/{total})", size=13)
         barra = ft.ProgressBar(value=0)
+        # A diferencia de la modificación, aquí «Detener» NO corta a media captura:
+        # el alta genera la ETIQUETA (un consecutivo global del SIPP) antes de
+        # guardar, así que abortar a la mitad la quemaría sin activo que la use. Se
+        # termina el activo en curso y no se empieza otro; el usuario tiene que
+        # saberlo, o creerá que la herramienta ignoró su clic.
+        aviso_detencion = ft.Row(
+            [ft.Icon(ft.Icons.HOURGLASS_TOP, size=16, color=NARANJA),
+             ft.Text("", size=11, color=NARANJA, no_wrap=False, expand=True)],
+            spacing=8, visible=False,
+            vertical_alignment=ft.CrossAxisAlignment.START)
+        actual = {"nombre": ""}   # último activo anunciado (para nombrarlo en el aviso)
+
+        def pedir_detener(_e=None) -> None:
+            ctrl.detener()
+            en_curso = actual["nombre"] or "el activo en curso"
+            aviso_detencion.controls[1].value = (
+                f"Deteniendo… Se terminará el alta de «{en_curso}» y no se iniciará "
+                "ninguna más. No se corta antes para no desperdiciar la etiqueta "
+                "que el SIPP ya generó.")
+            aviso_detencion.visible = True
+            btn_detener.disabled = True
+            btn_detener.content = "Deteniendo…"
+            modal.refrescar()
+
+        btn_detener = boton_herramienta("Detener", on_click=pedir_detener,
+                                        destructivo=True)
         modal = Modal(self.page, "Registrando activos en el SIPP", ancho=460,
-                      acciones=[boton_herramienta("Detener",
-                                                  on_click=lambda _e: ctrl.detener(),
-                                                  destructivo=True)])
+                      acciones=[btn_detener])
         modal.cuerpo.controls = [
-            txt, barra,
-            ft.Text("Se abrirá un navegador; no lo cierres.", size=11, color=GRIS)]
+            txt, barra, aviso_detencion,
+            ft.Text("Se abrirá un navegador; no lo cierres. Al terminar se queda "
+                    "abierto para que revises los registros.",
+                    size=11, color=GRIS, no_wrap=False)]
         modal.abrir()
 
         def avance(i: int, nombre: str) -> None:
             """Actualiza el progreso desde el hilo del RPA (marshalado a la UI)."""
             def aplicar() -> None:
+                actual["nombre"] = nombre
                 txt.value = f"({i}/{total}) {nombre}"
                 barra.value = i / total
                 modal.refrescar()
@@ -1497,61 +1460,78 @@ class SeccionRegistroActivos:
         resultados: list[dict] = []      # una fila por activo (para el reporte)
         errores_generales: list[str] = []
 
-        async def flujo() -> None:
-            async with SesionSipp(headless=False) as sipp:
-                await sipp.login(usuario, contrasena)
-                # El RPA entra con una empresa/sucursal ESTABLE (el selector del
-                # portal es frágil); la empresa/sucursal real de cada activo se fija
-                # en el formulario de alta (ver _payload_alta).
-                try:
-                    await sipp.seleccionar_empresa_sucursal(_EMPRESA_RPA, _SUCURSAL_RPA)
-                except ErrorSipp as exc:
-                    errores_generales.append(
-                        f"Selección de empresa/sucursal ({_EMPRESA_RPA}/"
-                        f"{_SUCURSAL_RPA}): {exc}")
-                for i, r in enumerate(pendientes, 1):
-                    await ctrl.punto_control()
-                    avance(i, r.nombre_insumo)
-                    fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
-                            "serie": r.no_serie or "", "estatus": reporte_altas.PENDIENTE,
-                            "observacion": "", "_empresa": r.empresa or ""}
-                    tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
-                    # Sin insumo resuelto: no se puede dar de alta -> se salta y se
-                    # anota, sin intentar (el alta fallaría en el SIPP).
-                    if not insumo_id:
-                        fila["observacion"] = ("No se encontró el insumo en el catálogo "
-                                               "del SIPP; captúralo en la ficha.")
-                        resultados.append(fila)
-                        continue
-                    try:
-                        # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
-                        # en el registro (id del activo = su etiqueta).
-                        etiqueta_gen = await sipp.alta_activo(
-                            tipo, campos, detalles, insumo_id, empleado_id,
-                            serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
-                            empresa=r.empresa or "", sucursal=r.sucursal or "",
-                            empleado_nombre=(r.datos().get("nb_Empleado")
-                                             or r.responsable or ""),
-                            imagenes=r.datos().get("imagenes_insumo") or [])
-                        db.actualizar_estatus_levantamiento(
-                            r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
-                        if etiqueta_gen:
-                            db.fijar_etiqueta_levantamiento(r.id, etiqueta_gen)
-                            fila["etiqueta"] = etiqueta_gen
-                        fila["estatus"] = reporte_altas.ALTA
-                        fila["observacion"] = (f"Etiqueta generada: {etiqueta_gen}"
-                                               if etiqueta_gen else "Alta registrada")
-                    # Un registro con error (insumo no hallado en el modal, campo, red…)
-                    # NO aborta el lote: se anota y se sigue con el siguiente.
-                    except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
-                        fila["observacion"] = str(exc)
-                    resultados.append(fila)
+        # El navegador NO se cierra al terminar: queda abierto para que el usuario
+        # revise en el propio SIPP lo que el RPA hizo, y se cierra desde el reporte
+        # ("Cerrar navegador"). Por eso la sesión se crea aquí en vez de con
+        # `async with`, que la cerraría al salir del flujo; su cierre se agenda
+        # después en ESTE MISMO bucle, que es donde Playwright ató sus objetos.
+        sipp = SesionSipp(headless=False)
 
-                # Confirmación final: por cada empresa, se trae su listado del SIPP y
-                # se verifica que las etiquetas generadas estén presentes (que el alta
-                # realmente quedó). Lo que no aparezca se marca para revisar.
-                avance(total, "Confirmando altas…")
-                await self._confirmar_altas(sipp, resultados)
+        async def flujo() -> None:
+            await sipp.iniciar()
+            await sipp.login(usuario, contrasena)
+            # El RPA entra con una empresa/sucursal ESTABLE (el selector del
+            # portal es frágil); la empresa/sucursal real de cada activo se fija
+            # en el formulario de alta (ver _payload_alta).
+            try:
+                await sipp.seleccionar_empresa_sucursal(_EMPRESA_RPA, _SUCURSAL_RPA)
+            except ErrorSipp as exc:
+                errores_generales.append(
+                    f"Selección de empresa/sucursal ({_EMPRESA_RPA}/"
+                    f"{_SUCURSAL_RPA}): {exc}")
+            for i, r in enumerate(pendientes, 1):
+                await ctrl.punto_control()
+                avance(i, r.nombre_insumo)
+                # Las claves con guion bajo son de uso interno (no salen al Excel):
+                # identifican el registro para poder actualizarlo al confirmar.
+                fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
+                        "serie": r.no_serie or "", "estatus": reporte_altas.PENDIENTE,
+                        "observacion": "", "_empresa": r.empresa or "",
+                        "_sucursal": r.sucursal or "", "_id": r.id}
+                tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
+                # Sin insumo resuelto: no se puede dar de alta -> se salta y se
+                # anota, sin intentar (el alta fallaría en el SIPP).
+                if not insumo_id:
+                    fila["observacion"] = ("No se encontró el insumo en el catálogo "
+                                           "del SIPP; captúralo en la ficha.")
+                    resultados.append(fila)
+                    continue
+                try:
+                    # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
+                    # en el registro (id del activo = su etiqueta).
+                    etiqueta_gen = await sipp.alta_activo(
+                        tipo, campos, detalles, insumo_id, empleado_id,
+                        serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
+                        empresa=r.empresa or "", sucursal=r.sucursal or "",
+                        empleado_nombre=(r.datos().get("nb_Empleado")
+                                         or r.responsable or ""),
+                        imagenes=r.datos().get("imagenes_insumo") or [])
+                    db.actualizar_estatus_levantamiento(
+                        r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
+                    if etiqueta_gen:
+                        db.fijar_etiqueta_levantamiento(r.id, etiqueta_gen)
+                        fila["etiqueta"] = etiqueta_gen
+                    # El activo pudo quedar registrado con su ETIQUETA como No. de
+                    # serie (el SIPP lo exige). Se refleja aquí o la herramienta
+                    # seguiría mostrando «—» sobre un dato que el portal sí tiene.
+                    serie_sipp = serie_para_alta(r.no_serie or "", etiqueta_gen or "",
+                                                 r.etiqueta or "")
+                    if serie_sipp and serie_sipp != (r.no_serie or "").strip():
+                        # `datos` REEMPLAZA datos_json, así que se parte de lo ya
+                        # capturado en vez de mandar solo la serie.
+                        datos_act = dict(r.datos())
+                        datos_act["nu_Serie"] = serie_sipp
+                        db.actualizar_datos_levantamiento(
+                            r.id, datos=datos_act, no_serie=serie_sipp)
+                        fila["serie"] = serie_sipp
+                    fila["estatus"] = reporte_altas.ALTA
+                    fila["observacion"] = (f"Etiqueta generada: {etiqueta_gen}"
+                                           if etiqueta_gen else "Alta registrada")
+                # Un registro con error (insumo no hallado en el modal, campo, red…)
+                # NO aborta el lote: se anota y se sigue con el siguiente.
+                except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
+                    fila["observacion"] = mensaje_amigable(exc)
+                resultados.append(fila)
 
         detenido = False
         try:
@@ -1559,23 +1539,45 @@ class SeccionRegistroActivos:
         except RpaDetenido:
             detenido = True
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            errores_generales.append(str(exc))
+            errores_generales.append(mensaje_amigable(exc))
         finally:
-            bucle.cerrar()
+            # Confirmación final: por cada empresa se trae su listado del SIPP, se
+            # verifica que las etiquetas generadas estén (que el alta realmente
+            # quedó) y se guarda la foto del activo. Va FUERA del flujo para que
+            # también corra al DETENER: si no, las altas ya hechas se quedaban sin
+            # confirmar y sin foto solo por haber parado el proceso.
+            if any(f.get("estatus") == reporte_altas.ALTA for f in resultados):
+                avance(total, "Confirmando altas…")
+                try:
+                    await asyncio.wrap_future(
+                        bucle.enviar(self._confirmar_altas(sipp, resultados)))
+                except Exception as exc:  # noqa: BLE001 — las altas ya se hicieron
+                    errores_generales.append(
+                        f"No se pudieron confirmar las altas: {mensaje_amigable(exc)}")
+            # Ojo: aquí NO se apaga el bucle. Sigue vivo porque es el único hilo
+            # desde el que se puede cerrar el navegador que queda abierto; lo
+            # apaga el reporte al cerrarlo.
             modal.cerrar()
             self._refrescar()
 
-        self._mostrar_reporte_altas(resultados, detenido, errores_generales)
+        self._guardar_historial(db.MOV_ALTA, resultados)
+        self._mostrar_reporte_altas(resultados, detenido, errores_generales,
+                                    sipp, bucle)
 
     async def _confirmar_altas(self, sipp, resultados: list) -> None:
         """Verifica que las altas hayan quedado en el SIPP y, de paso, REFRESCA la
         caché de activos de cada empresa (así una búsqueda posterior es consistente
         y no marca 'no dado de alta' un activo recién creado). Por empresa, descarga
-        su listado fresco y comprueba que la etiqueta generada de cada alta esté."""
+        su listado fresco y comprueba que la etiqueta generada de cada alta esté.
+
+        Con ese listado se guarda además la FOTO del activo en el registro
+        (`datos_sipp`), que es el lado «SIPP» de «Comparar SIPP vs Excel»: sin ella,
+        un activo recién dado de alta no tenía contra qué compararse y la pantalla
+        exigía volver a correr «Buscar en SIPP»."""
         from collections import defaultdict
 
         from core import activos_sipp, reporte_altas
-        from core.empresas import ID_POR_EMPRESA
+        from core.proveedor_activos import ProveedorSipp
 
         por_empresa: dict = defaultdict(list)
         for fila in resultados:
@@ -1588,26 +1590,69 @@ class SeccionRegistroActivos:
             try:
                 # Descarga y CACHEA los activos frescos de la empresa.
                 await activos_sipp.descargar_activos(sipp, idemp, nombre)
-                presentes = {(a.get("etiqueta") or "").strip().upper()
-                             for a in db.listar_activos_sipp(idemp)}
+                # Misma búsqueda por etiqueta EXACTA que usa «Buscar en SIPP», para
+                # que la confirmación y la foto salgan del mismo criterio.
+                hallados = ProveedorSipp(idemp).buscar_por_etiqueta(
+                    [f["etiqueta"].strip() for f in filas_e])
             except Exception:  # noqa: BLE001 — si falla la descarga, no se confirma
-                presentes = None
+                hallados = None
             for fila in filas_e:
-                if presentes is None:
+                if hallados is None:
                     fila["observacion"] += "  ·  No se pudo confirmar en el SIPP."
-                elif fila["etiqueta"].strip().upper() in presentes:
+                    continue
+                res = hallados.get(fila["etiqueta"].strip())
+                if res is not None and res.dado_de_alta:
                     fila["observacion"] += "  ·  Confirmado en el SIPP."
+                    if fila.get("_id") is not None and res.datos:
+                        db.actualizar_estatus_levantamiento(
+                            fila["_id"], db.EST_DADO_ALTA, res.id_activo_sipp,
+                            res.datos)
                 else:
                     fila["estatus"] = reporte_altas.PENDIENTE
                     fila["observacion"] += "  ·  No aparece en el listado del SIPP (revisar)."
 
-    def _mostrar_reporte_altas(self, filas: list, detenido: bool,
-                               errores_generales: list) -> None:
-        """Reporte final del proceso de altas: estadísticas (realizadas/pendientes),
-        observaciones por activo y opción de exportar a Excel."""
-        from core import reporte_altas
-        res = reporte_altas.resumen_altas(filas, detenido)
+    # ------------------------------ navegador que el RPA deja abierto al final
+    @staticmethod
+    def _navegador_vivo(sipp: "SesionSipp") -> bool:
+        """¿Sigue abierto el navegador del RPA? El usuario pudo haberlo cerrado a
+        mano desde Windows, así que no basta con que la sesión exista."""
+        try:
+            return sipp.browser is not None and sipp.browser.is_connected()
+        except Exception:  # noqa: BLE001 — driver caído: cuenta como cerrado
+            return False
 
+    async def _cerrar_navegador(self, sipp: "SesionSipp", bucle: BucleRpa) -> None:
+        """Cierra el navegador que el flujo dejó abierto y apaga el bucle del RPA.
+
+        El cierre se agenda EN el bucle del RPA porque Playwright ata sus objetos
+        al loop donde se crearon; hacerlo desde el hilo de la UI truena."""
+        # Salida temprana ante un segundo disparo (doble clic): con el bucle ya
+        # apagado, `enviar()` deja un Future que nadie resolvería nunca.
+        if not self._navegador_vivo(sipp):
+            bucle.cerrar()
+            return
+        try:
+            await asyncio.wrap_future(bucle.enviar(sipp.cerrar()))
+        except Exception:  # noqa: BLE001 — ya cerrado a mano / driver caído
+            pass
+        finally:
+            bucle.cerrar()
+
+    def _modal_reporte_rpa(self, titulo: str, stats: list, filas: list,
+                           errores_generales: list, sipp: "SesionSipp",
+                           bucle: BucleRpa, *, detenido: bool = False,
+                           extra: list | None = None) -> Modal:
+        """Arma el reporte final de un flujo del RPA: estadísticas arriba, una
+        línea por registro con su observación y, en el pie, el botón que cierra el
+        navegador que quedó abierto para la revisión.
+
+        `stats`: [(número, etiqueta, color)].
+        `filas`: [(ok, título, observación)] o, si el flujo los tiene,
+        [(ok, título, observación, [(rótulo, antes, después)])] para desglosar
+        DATO POR DATO lo que cambió en el portal (lo usan las modificaciones; el
+        alta no tiene «antes» contra qué comparar).
+        `extra`: acciones adicionales del pie (p. ej. exportar).
+        """
         def stat(n, etiqueta, color):
             return ft.Column(
                 [ft.Text(str(n), size=24, weight=ft.FontWeight.BOLD, color=color),
@@ -1615,48 +1660,115 @@ class SeccionRegistroActivos:
                 spacing=0, tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER)
 
-        stats = ft.Row(
-            [stat(res["realizadas"], "Realizadas", VERDE),
-             stat(res["pendientes"], "Pendientes", NARANJA),
-             stat(res["total"], "Total", ft.Colors.ON_SURFACE_VARIANT)],
-            alignment=ft.MainAxisAlignment.SPACE_EVENLY)
+        fila_stats = ft.Row([stat(*s) for s in stats],
+                            alignment=ft.MainAxisAlignment.SPACE_EVENLY)
 
         lista = ft.ListView(spacing=4, expand=True)
+        for datos in filas:
+            ok, titulo_fila, observacion = datos[0], datos[1], datos[2]
+            cambios = datos[3] if len(datos) > 3 else ()
+            detalle = ft.Column(
+                [ft.Text(titulo_fila, size=12, weight=ft.FontWeight.W_500,
+                         color=ft.Colors.ON_SURFACE),
+                 ft.Text(observacion, size=11, color=GRIS, no_wrap=False)],
+                spacing=0, tight=True, expand=True)
+            for rotulo, antes, despues in cambios:
+                # El valor viejo va tachado y el nuevo destacado: se lee de un
+                # golpe qué quedó registrado, sin comparar dos columnas.
+                detalle.controls.append(ft.Row(
+                    [ft.Text(f"{rotulo}:", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+                     ft.Text(antes or "(vacío)", size=11, color=GRIS,
+                             style=ft.TextStyle(
+                                 decoration=ft.TextDecoration.LINE_THROUGH)),
+                     ft.Icon(ft.Icons.ARROW_RIGHT_ALT, size=14, color=GRIS),
+                     ft.Text(despues or "(vacío)", size=11, weight=ft.FontWeight.W_500,
+                             color=ft.Colors.ON_SURFACE, no_wrap=False, expand=True)],
+                    spacing=6, wrap=False,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER))
+            lista.controls.append(ft.Row(
+                [ft.Icon(ft.Icons.CHECK_CIRCLE if ok else ft.Icons.ERROR_OUTLINE,
+                         size=16, color=VERDE if ok else NARANJA),
+                 detalle],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        vivo = self._navegador_vivo(sipp)
+        cuerpo = [fila_stats, ft.Divider()]
+        if errores_generales:
+            cuerpo.append(ft.Text("Observaciones generales: "
+                                  + "; ".join(errores_generales), size=11, color=ROJO,
+                                  no_wrap=False))
+        if vivo:
+            cuerpo.append(ft.Row(
+                [ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=GRIS),
+                 ft.Text("El navegador quedó abierto para que revises los registros "
+                         "en el SIPP. Ciérralo desde aquí cuando termines.",
+                         size=11, color=GRIS, no_wrap=False, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+        cuerpo.append(ft.Container(lista, height=280))
+
+        def _al_descartar() -> None:
+            # Si el reporte se descarta con la X o Esc y el navegador sigue vivo,
+            # este aviso es el último atajo para cerrarlo desde la herramienta.
+            # `silenciar_aviso` lo pone «Reanudar»: ahí el modal se cierra para
+            # seguir usando ESE navegador, así que el aviso sobraría.
+            if getattr(modal, "silenciar_aviso", False):
+                return
+            if self._navegador_vivo(sipp):
+                self.app.avisar(
+                    "El navegador del RPA sigue abierto.", NARANJA,
+                    accion="Cerrar navegador",
+                    on_accion=lambda _e: self.page.run_task(
+                        self._cerrar_navegador, sipp, bucle),
+                    duracion=12000)
+
+        modal = Modal(self.page, titulo,
+                      subtitulo="Proceso detenido" if detenido else None, ancho=580,
+                      al_cerrar=_al_descartar)
+        modal.cuerpo.controls = cuerpo
+
+        async def _cerrar_nav(_e=None) -> None:
+            await self._cerrar_navegador(sipp, bucle)
+            modal.cerrar()   # ya sin navegador vivo: no reaparece el aviso
+            self.app.avisar("Navegador del RPA cerrado.", VERDE)
+
+        if vivo:
+            acciones = [boton_secundario("Cerrar navegador", ft.Icons.CLOSE,
+                                         _cerrar_nav)]
+        else:
+            # Sin navegador que cerrar, el hilo del RPA ya no hace falta.
+            bucle.cerrar()
+            acciones = [boton_herramienta("Cerrar",
+                                          on_click=lambda _e: modal.cerrar())]
+        modal.set_acciones(acciones + list(extra or []))
+        return modal
+
+    def _mostrar_reporte_altas(self, filas: list, detenido: bool,
+                               errores_generales: list, sipp: "SesionSipp",
+                               bucle: BucleRpa) -> None:
+        """Reporte final del proceso de altas: estadísticas (realizadas/pendientes),
+        observaciones por activo y opción de exportar a Excel."""
+        from core import reporte_altas
+        res = reporte_altas.resumen_altas(filas, detenido)
+
         # Pendientes primero (son las que requieren atención).
+        renglones = []
         for f in sorted(filas, key=lambda x: x.get("estatus") == reporte_altas.ALTA):
             ok = f.get("estatus") == reporte_altas.ALTA
             titulo = f.get("insumo", "")
             if f.get("etiqueta"):
                 titulo += f"  ·  {f['etiqueta']}"
-            lista.controls.append(ft.Row(
-                [ft.Icon(ft.Icons.CHECK_CIRCLE if ok else ft.Icons.ERROR_OUTLINE,
-                         size=16, color=VERDE if ok else NARANJA),
-                 ft.Column(
-                     [ft.Text(titulo, size=12, weight=ft.FontWeight.W_500,
-                              color=ft.Colors.ON_SURFACE),
-                      ft.Text(f.get("observacion", ""), size=11, color=GRIS,
-                              no_wrap=False)],
-                     spacing=0, tight=True, expand=True)],
-                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
-
-        cuerpo = [stats, ft.Divider()]
-        if errores_generales:
-            cuerpo.append(ft.Text("Observaciones generales: "
-                                  + "; ".join(errores_generales), size=11, color=ROJO,
-                                  no_wrap=False))
-        cuerpo.append(ft.Container(lista, height=280))
-
-        modal = Modal(self.page, "Reporte de altas",
-                      subtitulo="Proceso detenido" if detenido else None, ancho=580)
-        modal.cuerpo.controls = cuerpo
+            renglones.append((ok, titulo, f.get("observacion", "")))
 
         async def _exportar(_e=None) -> None:
             await self._exportar_reporte_altas(filas, detenido, errores_generales)
 
-        modal.set_acciones([
-            boton_herramienta("Cerrar", on_click=lambda _e: modal.cerrar()),
-            boton_primario("Exportar (Excel)", ft.Icons.DOWNLOAD, _exportar),
-        ])
+        modal = self._modal_reporte_rpa(
+            "Reporte de altas",
+            [(res["realizadas"], "Realizadas", VERDE),
+             (res["pendientes"], "Pendientes", NARANJA),
+             (res["total"], "Total", ft.Colors.ON_SURFACE_VARIANT)],
+            renglones, errores_generales, sipp, bucle, detenido=detenido,
+            extra=[boton_primario("Exportar (Excel)", ft.Icons.DOWNLOAD, _exportar)])
         modal.abrir()
 
     async def _exportar_reporte_altas(self, filas: list, detenido: bool,
@@ -1680,12 +1792,24 @@ class SeccionRegistroActivos:
                         duracion=8000)
 
     # --------------------------------------------- RPA: modificación en SIPP
+    # El alta tiene DOS juegos de estos campos (compra y resguardo) y usa el de
+    # compra; la edición solo expone el de RESGUARDO —verificado en el DOM real del
+    # portal—, así que sin este puente el cambio no encontraba dónde aplicarse y se
+    # perdía en silencio. En la edición no hay ambigüedad: es el único de cada uno.
+    _RENOMBRES_EDICION = {
+        "filtrosEditar.id_GrupoCentroCosto": "filtrosEditar.id_GrupoCentroCostoResguardo",
+        "filtrosEditar.id_CentroCosto": "filtrosEditar.id_CentroCostoResguardo",
+        "filtrosEditar.id_Departamento": "filtrosEditar.id_DepartamentoResguardo",
+    }
+
     @staticmethod
     def _a_ng_model_edicion(ng_model: str) -> str:
         """Traduce el localizador del ALTA al del formulario de EDICIÓN del SIPP:
-        filtrosAgregar.X -> filtrosEditar.X  y  FH_X -> FH_X_EDITAR."""
+        filtrosAgregar.X -> filtrosEditar.X  y  FH_X -> FH_X_EDITAR, más los
+        renombres de `_RENOMBRES_EDICION`."""
         if ng_model.startswith("filtrosAgregar."):
-            return ng_model.replace("filtrosAgregar.", "filtrosEditar.", 1)
+            ng_model = ng_model.replace("filtrosAgregar.", "filtrosEditar.", 1)
+            return SeccionRegistroActivos._RENOMBRES_EDICION.get(ng_model, ng_model)
         # Fechas: FH_X / dt_FH_X -> ..._EDITAR
         if ("FH_" in ng_model) and not ng_model.endswith("_EDITAR"):
             return ng_model + "_EDITAR"
@@ -1698,35 +1822,340 @@ class SeccionRegistroActivos:
         campos_edicion = [(self._a_ng_model_edicion(ng), v, c) for ng, v, c in campos]
         return tipo, campos_edicion, detalles
 
-    async def _modificar_en_sipp(self, _e=None) -> None:
+    async def _refrescar_sipp_de(self, sipp: "SesionSipp", registros: list) -> list:
+        """Vuelve a bajar del SIPP los activos de las empresas tocadas y REESCRIBE
+        la foto (`datos_sipp`) de esos registros. Devuelve avisos si algo falló.
+
+        Hace falta porque esa foto se toma en «Buscar en SIPP» y NADA la refrescaba
+        después: tras modificar en el portal, «Comparar SIPP vs Excel» seguía
+        mostrando los valores viejos y marcaba diferencias ya resueltas.
+
+        Best-effort: la modificación ya quedó guardada en el SIPP, así que un fallo
+        aquí se reporta pero no la invalida."""
+        from collections import defaultdict
+
+        from core import activos_sipp
+        from core.proveedor_activos import ProveedorSipp
+
+        avisos: list[str] = []
+        por_empresa: dict = defaultdict(list)
+        for r in registros:
+            nombre = (r.empresa or "").strip()
+            idemp = ID_POR_EMPRESA.get(nombre)
+            if idemp is not None:
+                por_empresa[(idemp, nombre)].append(r)
+        for (idemp, nombre), regs in por_empresa.items():
+            try:
+                # Descarga y CACHEA los activos frescos de la empresa (misma vía que
+                # usa la confirmación de altas).
+                await activos_sipp.descargar_activos(sipp, idemp, nombre)
+                etiquetas = sorted({(r.etiqueta or "").strip() for r in regs
+                                    if (r.etiqueta or "").strip()})
+                resultados = ProveedorSipp(idemp).buscar_por_etiqueta(etiquetas)
+            except Exception as exc:  # noqa: BLE001 — no crítico: se avisa y se sigue
+                avisos.append(f"No se pudieron refrescar los datos del SIPP de "
+                              f"{nombre}: {mensaje_amigable(exc)}")
+                continue
+            for r in regs:
+                res = resultados.get((r.etiqueta or "").strip())
+                if res and res.dado_de_alta and res.datos:
+                    db.actualizar_estatus_levantamiento(
+                        r.id, db.EST_DADO_ALTA, res.id_activo_sipp, res.datos)
+        return avisos
+
+    def _rotulos_edicion(self, r: "db.Levantamiento") -> dict:
+        """{ng_model de EDICIÓN -> rótulo visible}. El RPA razona en ng-models del
+        portal; el reporte tiene que decir «Fecha de asignación», no
+        «dt_FH_ASIGNACION_EDITAR»."""
+        return {self._a_ng_model_edicion(c.ng_model): c.etiqueta
+                for c in campos_de_tipo(r.id_tipo_activo)}
+
+    # ------------------------------------------------ historial de movimientos
+    def _abrir_movimientos(self, _e=None) -> None:
+        """Historial de lo enviado al SIPP, separado en Altas y Modificaciones.
+
+        Responde la pregunta de operación «¿qué se hizo y cuándo?», que antes solo
+        vivía en el reporte de la corrida y se perdía al cerrarlo."""
+        resumen = db.resumen_movimientos()
+        if not resumen:
+            self.app.avisar(
+                "Todavía no hay movimientos registrados. Se van guardando conforme "
+                "des de alta o modifiques activos en el SIPP.", NARANJA, duracion=8000)
+            return
+
+        lista = ft.ListView(spacing=6, expand=True)
+        estado = ft.Text("", size=12, color=GRIS)
+        tf = buscador("Buscar por etiqueta, insumo o serie…", expand=True)
+
+        def pintar(_e=None) -> None:
+            tipo = (db.MOV_ALTA if tabs.activa == "altas"
+                    else db.MOV_MODIFICACION)
+            movs = db.listar_movimientos(tipo, tf.value or "")
+            lista.controls = [_fila_movimiento(m) for m in movs] or [
+                ft.Container(ft.Text("Sin movimientos con ese criterio.", size=12,
+                                     color=GRIS), padding=12)]
+            hechos = sum(1 for m in movs if m["exito"])
+            estado.value = (f"{len(movs)} movimiento(s) · {hechos} correcto(s) · "
+                            f"{len(movs) - hechos} con problema")
+            modal.refrescar()
+
+        def _fila_movimiento(m: dict) -> ft.Control:
+            ok = m["exito"]
+            titulo = m.get("insumo") or "(sin insumo)"
+            if m.get("etiqueta"):
+                titulo += f"  ·  {m['etiqueta']}"
+            ubic = " · ".join(p for p in (m.get("empresa"), m.get("sucursal")) if p)
+            detalle = ft.Column(
+                [ft.Row([ft.Text(titulo, size=12, weight=ft.FontWeight.W_500,
+                                 color=ft.Colors.ON_SURFACE, expand=True),
+                         # La fecha a la derecha: es lo que se escanea al buscar
+                         # "lo de ayer" sin leer cada renglón.
+                         ft.Text(_fecha_corta(m.get("fecha")), size=11, color=GRIS)],
+                        spacing=8),
+                 ft.Text(" · ".join(p for p in (ubic, m.get("observacion") or "") if p),
+                         size=11, color=GRIS, no_wrap=False)],
+                spacing=2, tight=True, expand=True)
+            # Las modificaciones muestran su antes -> después, igual que el reporte.
+            for cambio in (m.get("cambios") or []):
+                try:
+                    rotulo, antes, despues = cambio
+                except (ValueError, TypeError):
+                    continue
+                detalle.controls.append(ft.Row(
+                    [ft.Text(f"{rotulo}:", size=11,
+                             color=ft.Colors.ON_SURFACE_VARIANT),
+                     ft.Text(antes or "(vacío)", size=11, color=GRIS,
+                             style=ft.TextStyle(
+                                 decoration=ft.TextDecoration.LINE_THROUGH)),
+                     ft.Icon(ft.Icons.ARROW_RIGHT_ALT, size=14, color=GRIS),
+                     ft.Text(despues or "(vacío)", size=11,
+                             weight=ft.FontWeight.W_500, color=ft.Colors.ON_SURFACE,
+                             no_wrap=False, expand=True)],
+                    spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER))
+            return ft.Container(
+                ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE if ok else ft.Icons.ERROR_OUTLINE,
+                                size=16, color=VERDE if ok else NARANJA),
+                        detalle],
+                       spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=8)
+
+        tabs = Pestanas(
+            [("altas", "Altas", ft.Icons.ADD_CIRCLE_OUTLINE),
+             ("modificaciones", "Modificaciones", ft.Icons.EDIT_OUTLINED)],
+            al_cambiar=lambda _clave: pintar())
+        tabs.set_conteo("altas", resumen.get(db.MOV_ALTA, {}).get("total", 0))
+        tabs.set_conteo("modificaciones",
+                        resumen.get(db.MOV_MODIFICACION, {}).get("total", 0))
+        tf.on_change = lambda _e: pintar()
+
+        modal = Modal(self.page, "Movimientos realizados", ancho=760, alto_cuerpo=460)
+        modal.cuerpo.controls = [tabs.control, tf, estado,
+                                 ft.Container(lista, height=360)]
+        modal.set_acciones([boton_herramienta("Cerrar",
+                                              on_click=lambda _e: modal.cerrar())])
+        pintar()
+        modal.abrir()
+
+    def _guardar_historial(self, tipo: str, filas: list) -> None:
+        """Persiste en el historial lo que la corrida envió al SIPP.
+
+        Se llama con las MISMAS filas que alimentan el reporte en pantalla: ese
+        reporte se pierde al cerrarlo, y sin esto no quedaría rastro de qué se
+        envió ni cuándo. Best-effort: un fallo aquí no puede tumbar un trabajo que
+        ya se hizo en el portal."""
+        from core import reporte_altas
+
+        if not filas:
+            return
+        lote = datetime.now().strftime("%Y%m%d%H%M%S")
+        registros = []
+        for f in filas:
+            # El alta marca el resultado con su estatus; la modificación con `ok`.
+            exito = (f.get("estatus") == reporte_altas.ALTA if tipo == db.MOV_ALTA
+                     else bool(f.get("ok")))
+            registros.append({
+                "id_levantamiento": f.get("_id"), "etiqueta": f.get("etiqueta"),
+                "insumo": f.get("insumo"), "serie": f.get("serie"),
+                "empresa": f.get("_empresa"), "sucursal": f.get("_sucursal"),
+                "exito": exito, "observacion": f.get("observacion"),
+                "cambios": f.get("cambios") or None,
+            })
+        try:
+            db.registrar_movimientos(lote, tipo, registros)
+        except Exception as exc:  # noqa: BLE001 — el envío ya ocurrió
+            self.app.avisar(f"No se pudo guardar el historial: {exc}", NARANJA)
+
+    async def _confirmar_etiquetas_repetidas(self, pendientes: list) -> "list | None":
+        """Si alguna etiqueta por modificar está REPETIDA en el SIPP, lo consulta.
+
+        El SIPP admite dos activos con el mismo número de inventario, y el RPA
+        localiza el activo por etiqueta y edita la primera fila del listado: con una
+        repetida podría estar modificando el equipo equivocado sin que nadie se
+        entere. Antes de tocar nada se le enseñan al usuario los insumos que
+        comparten la etiqueta para que decida.
+
+        Devuelve la lista de registros a procesar (quizá recortada) o None si
+        cancela. Sin API configurada no hay forma de detectarlas: se sigue igual
+        que siempre.
+        """
+        from core import activos_sipp
+
+        if not activos_sipp.hay_api():
+            return pendientes
+
+        # Una descarga por empresa (también deja la caché al día). Best-effort: si
+        # la API falla, no se bloquea el trabajo por no poder hacer la advertencia.
+        etiquetas_reg: dict = {}
+        for r in pendientes:
+            etq = (r.etiqueta or "").strip()
+            if etq:
+                etiquetas_reg.setdefault(etq, []).append(r)
+        candidatos: dict = {}
+        for empresa in sorted({(r.empresa or "").strip() for r in pendientes}):
+            idemp = ID_POR_EMPRESA.get(empresa)
+            if idemp is None:
+                continue
+            try:
+                res = await asyncio.to_thread(
+                    activos_sipp.descargar_activos_api, idemp, empresa)
+            except Exception:  # noqa: BLE001 — sin aviso, pero el flujo sigue
+                continue
+            for etq, filas in (res.get("candidatos") or {}).items():
+                if etq in etiquetas_reg:
+                    candidatos[etq] = filas
+        if not candidatos:
+            return pendientes
+
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor: str) -> None:
+            if not decision.done():
+                decision.set_result(valor)
+            modal.cerrar()
+
+        cuerpo = [ft.Text(
+            f"{len(candidatos)} etiqueta(s) por modificar están repetidas en el "
+            "SIPP: varios activos comparten el mismo número de inventario. El RPA "
+            "busca por etiqueta y edita la PRIMERA coincidencia, así que podría "
+            "modificar el activo equivocado.", size=12, color=ft.Colors.ON_SURFACE,
+            no_wrap=False)]
+        for etq in sorted(candidatos):
+            mios = etiquetas_reg.get(etq, [])
+            nombre_mio = (mios[0].nombre_insumo or "").strip() if mios else ""
+            cuerpo.append(ft.Text(f"Etiqueta {etq}", size=13,
+                                  weight=ft.FontWeight.W_600, color=NARANJA))
+            cuerpo.append(ft.Text(f"Tu registro: «{nombre_mio}»", size=11, color=GRIS))
+            for c in candidatos[etq]:
+                insumo = (c.get("insumo") or "—").strip()
+                # Se marca el que coincide con el insumo capturado: suele ser el
+                # que el usuario quiere, aunque el portal no garantice el orden.
+                igual = insumo.casefold() == nombre_mio.casefold()
+                detalle = " · ".join(p for p in (
+                    f"serie {c.get('serie')}" if c.get("serie") else "",
+                    c.get("empleado") or "sin empleado",
+                    c.get("sucursal") or "") if p)
+                cuerpo.append(ft.Row(
+                    [ft.Icon(ft.Icons.CHECK_CIRCLE if igual else ft.Icons.HELP_OUTLINE,
+                             size=15, color=VERDE if igual else GRIS),
+                     ft.Column([ft.Text(insumo, size=12,
+                                        color=ft.Colors.ON_SURFACE),
+                                ft.Text(detalle, size=11, color=GRIS, no_wrap=False)],
+                               spacing=0, tight=True, expand=True)],
+                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        modal = Modal(self.page, "Etiquetas repetidas en el SIPP", ancho=620,
+                      alto_cuerpo=380,
+                      al_cerrar=lambda: responder("cancelar"))
+        modal.cuerpo.controls = cuerpo
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder("cancelar")),
+            boton_secundario("Enviar de todos modos", ft.Icons.WARNING_AMBER,
+                             lambda _e: responder("todos")),
+            boton_primario("Omitir los repetidos", ft.Icons.CHECK,
+                           lambda _e: responder("omitir")),
+        ])
+        modal.abrir()
+
+        eleccion = await decision
+        if eleccion == "cancelar":
+            return None
+        if eleccion == "omitir":
+            quedan = [r for r in pendientes
+                      if (r.etiqueta or "").strip() not in candidatos]
+            self.app.avisar(
+                f"Se omitieron {len(pendientes) - len(quedan)} activo(s) con "
+                "etiqueta repetida; quedan pendientes.", NARANJA)
+            return quedan
+        return pendientes
+
+    @staticmethod
+    def _pendientes_modificacion() -> list:
+        """Activos dados de alta con cambios locales por enviar. Se relee de la base
+        en cada corrida: es lo que hace que «Reanudar» retome exactamente lo que
+        faltó, sin llevar cuentas aparte."""
+        return [r for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                if r.modificado and r.id_tipo_activo is not None]
+
+    async def _modificar_en_sipp(self, _e=None, *, sesion=None,
+                                 bucle_previo=None) -> None:
         """Reenvía al SIPP (vía RPA) los activos dados de alta que fueron EDITADOS
-        en la herramienta (marca `modificado`)."""
+        en la herramienta (marca `modificado`).
+
+        `sesion`/`bucle_previo` los pasa «Reanudar proceso» desde el reporte: si el
+        navegador de la corrida anterior sigue vivo se reaprovecha —ya está logueado
+        y con la empresa elegida— en vez de abrir otro y volver a entrar."""
         creds = credenciales.cargar()
         if not creds or not creds[0]:
             self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
             return
         usuario, contrasena = creds
-        pendientes = [r for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
-                      if r.modificado and r.id_tipo_activo is not None]
+        pendientes = self._pendientes_modificacion()
         if not pendientes:
             self.app.avisar(
                 "No hay cambios por enviar. Edita un activo dado de alta (con el "
                 "botón de captura 📋 o sus celdas) y vuelve a intentar.", NARANJA)
             return
 
+        # Antes de abrir el navegador: avisar de las etiquetas que el SIPP tiene
+        # repetidas, donde el RPA no puede distinguir cuál activo es el tuyo.
+        pendientes = await self._confirmar_etiquetas_repetidas(pendientes)
+        if pendientes is None:
+            return
+        if not pendientes:
+            self.app.avisar("No quedó ningún activo por enviar.", NARANJA)
+            return
+
         total = len(pendientes)
-        bucle = BucleRpa()
+        # Reanudar: se reaprovecha el navegador anterior si sigue vivo; si el
+        # usuario ya lo cerró, se arranca uno nuevo con su propio bucle.
+        reanudar = (sesion is not None and bucle_previo is not None
+                    and self._navegador_vivo(sesion))
+        if not reanudar and bucle_previo is not None:
+            # El navegador anterior ya no está (lo cerró el usuario): su hilo del
+            # RPA no sirve para nada y quedaría colgado.
+            bucle_previo.cerrar()
+        sipp = sesion if reanudar else SesionSipp(headless=False)
+        bucle = bucle_previo if reanudar else BucleRpa()
         ctrl = ControlRpa(bucle.loop)
         ui_loop = asyncio.get_running_loop()
         txt = ft.Text(f"Preparando… (0/{total})", size=13)
         barra = ft.ProgressBar(value=0)
-        modal = Modal(self.page, "Aplicando modificaciones en el SIPP", ancho=460,
+        modal = Modal(self.page,
+                      "Reanudando modificaciones en el SIPP" if reanudar
+                      else "Aplicando modificaciones en el SIPP", ancho=460,
                       acciones=[boton_herramienta("Detener",
                                                   on_click=lambda _e: ctrl.detener(),
                                                   destructivo=True)])
         modal.cuerpo.controls = [
             txt, barra,
-            ft.Text("Se abrirá un navegador; no lo cierres.", size=11, color=GRIS)]
+            ft.Text(("Se usará el navegador que quedó abierto." if reanudar else
+                     "Se abrirá un navegador; no lo cierres.")
+                    + " Al terminar se queda abierto para que revises los registros. "
+                      "«Detener» corta en el acto: el activo en curso NO se guarda.",
+                    size=11, color=GRIS, no_wrap=False)]
         modal.abrir()
 
         def avance(i: int, nombre: str) -> None:
@@ -1736,11 +2165,15 @@ class SeccionRegistroActivos:
                 modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
-        exitosos, fallidos, omitidos = 0, [], []
+        resultados: list[dict] = []      # una fila por activo (para el reporte)
+        aplicados: list = []             # registros que sí se enviaron al SIPP
+        errores_generales: list[str] = []
 
         async def flujo() -> None:
-            nonlocal exitosos
-            async with SesionSipp(headless=False) as sipp:
+            # Al reanudar, la sesión ya está iniciada y con empresa elegida: repetir
+            # el login solo costaría tiempo.
+            if not reanudar:
+                await sipp.iniciar()
                 await sipp.login(usuario, contrasena)
                 primero = pendientes[0]
                 if primero.empresa and primero.sucursal:
@@ -1748,20 +2181,55 @@ class SeccionRegistroActivos:
                         await sipp.seleccionar_empresa_sucursal(
                             primero.empresa, primero.sucursal)
                     except ErrorSipp as exc:
-                        fallidos.append(f"Selección de empresa/sucursal: {exc}")
-                for i, r in enumerate(pendientes, 1):
-                    await ctrl.punto_control()
-                    avance(i, r.nombre_insumo)
-                    _tipo, campos, detalles = self._payload_modificacion(r)
-                    try:
-                        no_aplicados = await sipp.modificar_activo(
-                            r.etiqueta, r.no_serie, campos, detalles)
-                        db.actualizar_datos_levantamiento(r.id, modificado=False)
-                        exitosos += 1
-                        if no_aplicados:
-                            omitidos.append(f"{r.nombre_insumo}: {len(no_aplicados)} campo(s)")
-                    except ErrorSipp as exc:
-                        fallidos.append(f"{r.nombre_insumo} ({r.no_serie}): {exc}")
+                        errores_generales.append(
+                            f"Selección de empresa/sucursal: {exc}")
+            for i, r in enumerate(pendientes, 1):
+                await ctrl.punto_control()
+                avance(i, r.nombre_insumo)
+                fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
+                        "serie": r.no_serie or "", "ok": False, "observacion": "",
+                        "cambios": [], "_empresa": r.empresa or "",
+                        "_sucursal": r.sucursal or "", "_id": r.id}
+                _tipo, campos, detalles = self._payload_modificacion(r)
+                try:
+                    resultado = await sipp.modificar_activo(
+                        r.etiqueta, r.no_serie, campos, detalles,
+                        punto_control=ctrl.punto_control)
+                    no_aplicados = resultado["no_aplicados"]
+                    db.actualizar_datos_levantamiento(r.id, modificado=False)
+                    fila["ok"] = True
+                    # Antes/después con el rótulo que el usuario conoce; los
+                    # ng-models del portal no le dicen nada.
+                    rotulos = self._rotulos_edicion(r)
+                    fila["cambios"] = [(rotulos.get(ng, ng), antes, despues)
+                                       for ng, antes, despues in resultado["cambios"]]
+                    # Sin diferencias, decirlo explícitamente: "aplicada" a secas
+                    # haría creer que se cambió algo que ya estaba igual.
+                    fila["observacion"] = (
+                        f"Modificación aplicada ({len(fila['cambios'])} dato(s))."
+                        if fila["cambios"] else
+                        "Sin cambios: los datos del SIPP ya coincidían.")
+                    # El formulario de edición no expone los mismos campos que el
+                    # alta, y algunos los bloquea el portal. Se nombra CADA campo y
+                    # su motivo: un conteo suelto («1 campo sin aplicar») deja al
+                    # usuario sin saber si perdió un dato o si el SIPP no lo admite.
+                    if no_aplicados:
+                        detalle = "; ".join(f"{rotulos.get(ng, ng)} → {motivo}"
+                                            for ng, motivo in no_aplicados)
+                        fila["observacion"] += f" Sin aplicar: {detalle}"
+                    aplicados.append(r)
+                # Detenido a media captura: NADA se guardó de este activo (no se
+                # llegó a Guardar), así que queda pendiente tal cual para reanudar.
+                # Va ANTES del except genérico: RpaDetenido también es Exception.
+                except RpaDetenido:
+                    fila["observacion"] = ("Detenido aquí: no se guardó nada de este "
+                                           "activo, queda pendiente para reanudar.")
+                    resultados.append(fila)
+                    raise
+                # Un registro con error NO aborta el lote: se anota y se sigue.
+                except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
+                    fila["observacion"] = mensaje_amigable(exc)
+                resultados.append(fila)
 
         detenido = False
         try:
@@ -1769,33 +2237,74 @@ class SeccionRegistroActivos:
         except RpaDetenido:
             detenido = True
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            fallidos.append(str(exc))
+            errores_generales.append(mensaje_amigable(exc))
         finally:
-            bucle.cerrar()
+            # Con lo enviado ya en el portal, se vuelve a bajar la foto del SIPP:
+            # sin esto «Comparar SIPP vs Excel» seguiría mostrando los valores
+            # previos. Va FUERA del flujo, y no dentro, para que también corra
+            # cuando el usuario detiene a media lista: lo ya enviado se quedaría
+            # con la foto vieja. Como toca la sesión de Playwright, se manda al
+            # bucle del RPA igual que el resto.
+            if aplicados:
+                avance(total, "Actualizando datos del SIPP…")
+                try:
+                    errores_generales.extend(await asyncio.wrap_future(
+                        bucle.enviar(self._refrescar_sipp_de(sipp, aplicados))))
+                except Exception as exc:  # noqa: BLE001 — no crítico: ya se guardó
+                    errores_generales.append(mensaje_amigable(exc))
+            # El bucle sigue vivo a propósito: es el único hilo desde el que se
+            # puede cerrar el navegador que queda abierto (lo apaga el reporte).
             modal.cerrar()
             self._refrescar()
 
-        if detenido:
-            self.app.avisar(f"Proceso detenido. {exitosos} activo(s) actualizado(s).",
-                            NARANJA)
-        elif fallidos:
-            self.app.avisar(
-                f"{exitosos} actualizado(s), {len(fallidos)} con error: {fallidos[0]}",
-                ROJO, duracion=9000)
-        elif omitidos:
-            self.app.avisar(
-                f"{exitosos} actualizado(s). Sin aplicar (no existen en edición): "
-                + "; ".join(omitidos[:3]), NARANJA, duracion=9000)
-        else:
-            self.app.avisar(f"{exitosos} activo(s) actualizado(s) en el SIPP.", VERDE)
+        self._guardar_historial(db.MOV_MODIFICACION, resultados)
+        self._mostrar_reporte_modificaciones(resultados, detenido, errores_generales,
+                                             sipp, bucle)
+
+    def _mostrar_reporte_modificaciones(self, filas: list, detenido: bool,
+                                        errores_generales: list, sipp: "SesionSipp",
+                                        bucle: BucleRpa) -> None:
+        """Reporte final del envío de modificaciones al SIPP."""
+        hechas = sum(1 for f in filas if f.get("ok"))
+        datos = sum(len(f.get("cambios") or ()) for f in filas)
+        # Con error primero: son las que requieren atención.
+        renglones = []
+        for f in sorted(filas, key=lambda x: bool(x.get("ok"))):
+            titulo = f.get("insumo", "")
+            if f.get("etiqueta"):
+                titulo += f"  ·  {f['etiqueta']}"
+            renglones.append((bool(f.get("ok")), titulo, f.get("observacion", ""),
+                              f.get("cambios") or ()))
+
+        # Lo que quedó sin enviar se relee de la base (no se lleva una cuenta
+        # aparte): así «Reanudar» retoma exactamente lo pendiente, ya sea porque se
+        # detuvo el proceso o porque algún activo falló.
+        faltan = self._pendientes_modificacion()
+
+        async def _reanudar(_e=None) -> None:
+            modal.silenciar_aviso = True   # el navegador NO se cierra: se reusa
+            modal.cerrar()
+            await self._modificar_en_sipp(sesion=sipp, bucle_previo=bucle)
+
+        extra = []
+        if faltan:
+            extra.append(boton_primario(f"Reanudar proceso ({len(faltan)})",
+                                        ft.Icons.PLAY_ARROW, _reanudar))
+
+        modal = self._modal_reporte_rpa(
+            "Reporte de modificaciones",
+            [(hechas, "Modificados", VERDE),
+             (datos, "Datos cambiados", ft.Colors.PRIMARY),
+             (len(faltan), "Pendientes", NARANJA),
+             (len(filas), "Procesados", ft.Colors.ON_SURFACE_VARIANT)],
+            renglones, errores_generales, sipp, bucle, detenido=detenido,
+            extra=extra)
+        modal.abrir()
 
     # ------------------------------------ actualizar catálogo de insumos
-    def _actualizar_sipp(self, _e=None) -> None:
-        """Abre el modal para elegir empresa y actualizar su información del SIPP
-        (insumos + activos) y los empleados (global)."""
-        from ui.actualizar_sipp import DialogoActualizarSipp
-
-        DialogoActualizarSipp(self.app, al_terminar=self._refrescar).abrir()
+    # El botón vive en el encabezado (app.py); el shell llama a este gancho.
+    def tras_actualizar_sipp(self) -> None:
+        self._refrescar()
 
     def _set_cargando(self, cargando: bool, texto: str = "") -> None:
         self.progreso.visible = cargando
