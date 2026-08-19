@@ -278,8 +278,12 @@ class SesionSipp:
         """Arranca Playwright, el navegador y una pestaña limpia."""
         await asegurar_navegador()
         self._pw = await async_playwright().start()
+        # `channel="chromium"`: en modo headless Playwright usa por defecto un
+        # binario aparte (chromium_headless_shell) que `asegurar_navegador` NO
+        # descarga (instala con --no-shell para ahorrar ~80 MB). Con el canal
+        # explícito se corre headless sobre el Chromium completo, que sí está.
         self.browser = await self._pw.chromium.launch(
-            headless=self.headless, slow_mo=self.slow_mo,
+            headless=self.headless, slow_mo=self.slow_mo, channel="chromium",
             args=["--start-maximized", f"--force-device-scale-factor={self.zoom}"],
         )
         self.context = await self.browser.new_context(no_viewport=True)

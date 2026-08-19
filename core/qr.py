@@ -143,7 +143,9 @@ async def html_a_pdf(html_str: str, ruta_pdf: str) -> None:
 
     await asegurar_navegador()  # descarga Chromium en la app empaquetada si falta
     async with async_playwright() as p:
-        navegador = await p.chromium.launch(headless=True)
+        # Mismo motivo que en core/rpa_sipp.SesionSipp.iniciar: sin `channel` el
+        # headless exige el binario chrome-headless-shell, que la app no descarga.
+        navegador = await p.chromium.launch(headless=True, channel="chromium")
         try:
             pagina = await navegador.new_page()
             await pagina.set_content(html_str, wait_until="load")
