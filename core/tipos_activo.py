@@ -110,13 +110,6 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 "Empresa (compra)", "select", grupo="Compra"),
     CampoActivo("id_SucursalAgregar", "filtrosAgregar.id_SucursalAgregar",
                 "Sucursal (compra)", "select", grupo="Compra"),
-    # Grupo antes que Centro: el centro de costo depende del grupo elegido.
-    CampoActivo("id_GrupoCentroCosto", "filtrosAgregar.id_GrupoCentroCosto",
-                "Grupo centro de costo", "select", grupo="Compra"),
-    CampoActivo("id_CentroCosto", "filtrosAgregar.id_CentroCosto",
-                "Centro de costo", "select", grupo="Compra"),
-    CampoActivo("id_Departamento", "filtrosAgregar.id_Departamento",
-                "Departamento", "select", grupo="Compra"),
     CampoActivo("FH_ADQUISICION", "dt_FH_ADQUISICION", "Fecha de adquisición", "date",
                 grupo="Compra"),
     CampoActivo("FH_GARANTIA", "dt_FH_GARANTIA", "Fecha de garantía", "date",
@@ -124,10 +117,25 @@ CAMPOS_COMUNES: list[CampoActivo] = [
     # Resguardo
     CampoActivo("nb_Empleado", "filtrosAgregar.nb_Empleado", "Empleado (resguardo)",
                 "text", requerido=True, grupo="Resguardo"),
+    # Obligatorios en el portal (llevan asterisco en «Asignación del Activo»).
+    # La herramienta los toma de las columnas EMPRESA y SUCURSAL del registro.
     CampoActivo("id_EmpresaResguardo", "filtrosAgregar.id_EmpresaResguardo",
-                "Empresa (resguardo)", "select", grupo="Resguardo"),
+                "Empresa (resguardo)", "select", requerido=True, grupo="Resguardo"),
     CampoActivo("id_SucursalResguardo", "filtrosAgregar.id_SucursalResguardo",
-                "Sucursal (resguardo)", "select", grupo="Resguardo"),
+                "Sucursal (resguardo)", "select", requerido=True, grupo="Resguardo"),
+    # Grupo/centro/departamento: el portal los tiene DUPLICADOS (compra y
+    # resguardo). Los de compra están deshabilitados mientras no se llene la
+    # sucursal de compra —sección oculta que no tocamos—, así que escribir ahí no
+    # surtía efecto: se usan los de RESGUARDO, que son los de «Asignación del
+    # Activo». Van DESPUÉS de empresa/sucursal de resguardo porque cuelgan de
+    # ellas (ng-disabled), y grupo antes que centro (el centro depende del grupo).
+    CampoActivo("id_GrupoCentroCosto",
+                "filtrosAgregar.id_GrupoCentroCostoResguardo",
+                "Grupo centro de costo", "select", grupo="Resguardo"),
+    CampoActivo("id_CentroCosto", "filtrosAgregar.id_CentroCostoResguardo",
+                "Centro de costo", "select", grupo="Resguardo"),
+    CampoActivo("id_Departamento", "filtrosAgregar.id_DepartamentoResguardo",
+                "Departamento", "select", grupo="Resguardo"),
     CampoActivo("de_Ubicacion", "filtrosAgregar.de_Ubicacion", "Ubicación", "text",
                 grupo="Resguardo"),
     CampoActivo("FH_ASIGNACION", "dt_FH_ASIGNACION", "Fecha de asignación", "date",
@@ -185,3 +193,35 @@ def campos_de_tipo(id_tipo: "int | None") -> list[CampoActivo]:
 def nombre_tipo(id_tipo: "int | None") -> str:
     """Nombre del tipo de activo (o '' si es None/desconocido)."""
     return TIPOS_ACTIVO.get(id_tipo, "") if id_tipo is not None else ""
+
+
+def faltantes_obligatorios(id_tipo_activo, datos: dict, nombre_insumo: str = "",
+                           responsable: str = "", empresa: str = "",
+                           sucursal: str = "") -> list[str]:
+    """Rótulos de los campos OBLIGATORIOS del alta que este registro no tiene.
+
+    Es la misma exigencia del formulario del SIPP: sin ellos el alta se queda a
+    medias en el portal, con el activo creado pero incompleto, que es más caro de
+    arreglar que no haberlo intentado.
+
+    Dos campos se capturan en más de un sitio y se aceptan de cualquiera:
+    el INSUMO (`nb_NombreInsumo` o la columna del registro) y el EMPLEADO
+    (`nb_Empleado` o el responsable del levantamiento).
+    """
+    if id_tipo_activo is None:
+        return ["Tipo de activo"]
+    datos = datos or {}
+    # Varios obligatorios se capturan en la COLUMNA del registro y no en
+    # `datos_json`; se aceptan desde cualquiera de los dos sitios.
+    respaldos = {"nb_NombreInsumo": nombre_insumo, "nb_Empleado": responsable,
+                 "id_EmpresaResguardo": empresa, "id_SucursalResguardo": sucursal}
+    faltan = []
+    for campo in campos_de_tipo(id_tipo_activo):
+        # El tipo NO vive en `datos` sino en su propia columna, y ya se validó
+        # arriba: buscarlo aquí lo daría siempre por faltante.
+        if not campo.requerido or campo.clave == "id_TipoActivo":
+            continue
+        valor = (datos.get(campo.clave) or respaldos.get(campo.clave) or "")
+        if not str(valor).strip():
+            faltan.append(campo.etiqueta.replace(" *", ""))
+    return faltan

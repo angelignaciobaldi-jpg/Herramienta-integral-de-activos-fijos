@@ -19,10 +19,11 @@ Uso:
 from __future__ import annotations
 
 import asyncio
+import os
 
 import flet as ft
 
-from core import db
+from core import archivos, db
 from core.empresas import ID_POR_EMPRESA
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
@@ -272,12 +273,20 @@ class DialogoCapturaActivo:
                     self._campo_centro.value = mejor
 
     # ------------------------------------------------------------ UI
-    def _construir(self) -> None:
+    def _construir_encabezado(self, registro: "db.Levantamiento") -> None:
+        """Crea DE CERO los campos de ubicación y tipo, ya con los datos del
+        registro.
+
+        Se rehacen en cada apertura en vez de reutilizarlos: el `Dropdown` editable
+        de Flet conserva el TEXTO que muestra aunque se le ponga `value = None`, así
+        que al pasar de un activo a otro el tipo del anterior seguía a la vista
+        (parecía asignado automáticamente) mientras el valor real era nulo."""
         # La opción se identifica por el NOMBRE del tipo: es lo que ve el usuario
         # y lo que el RPA busca en el combo del SIPP; el id se resuelve con
         # ID_POR_NOMBRE al guardar.
         _, self.dd_tipo = campo_opciones(
             "Tipo de activo *", list(TIPOS_ACTIVO.values()),
+            valor=nombre_tipo(registro.id_tipo_activo) or None,
             flotante=True, on_change=self._cambiar_tipo)
         # Empresa/sucursal/departamento del LEVANTAMIENTO (las columnas del
         # registro). Misma fuente que el listado general: empresa del catálogo del
@@ -285,18 +294,37 @@ class DialogoCapturaActivo:
         # esa empresa (selector con buscador, como en la tabla). Al cambiar empresa
         # o sucursal se repintan los campos (grupo/centro dependen de la sucursal).
         _, self.dd_empresa = campo_opciones(
-            "Empresa", list(NOMBRES_EMPRESAS), flotante=True,
-            on_change=self._cambiar_contexto)
+            "Empresa", list(NOMBRES_EMPRESAS), valor=registro.empresa or None,
+            flotante=True, on_change=self._cambiar_contexto)
         self.campo_sucursal = _CampoCatalogo(
-            self, "Sucursal", "", opciones_fn=self._sucursales_empresa,
+            self, "Sucursal", registro.sucursal or "",
+            opciones_fn=self._sucursales_empresa,
             al_cambiar=lambda _v: self._cambiar_contexto())
         self.campo_departamento = _CampoCatalogo(
-            self, "Departamento", "", opciones_fn=self._departamentos_empresa)
+            self, "Departamento", registro.departamento or "",
+            opciones_fn=self._departamentos_empresa)
         # Etiqueta: la genera el SIPP al dar de alta (botón "Generar Etiqueta" del
         # portal); aquí es de SOLO LECTURA y se llena solo tras el alta.
         _, self.tf_etiqueta = campo_texto(
-            "Etiqueta", flotante=True, read_only=True,
-            hint="Se genera en el SIPP al dar de alta")
+            "Etiqueta", valor=registro.etiqueta or "", flotante=True,
+            read_only=True, hint="Se genera en el SIPP al dar de alta")
+
+        self._area_encabezado.controls = [
+            seccion_formulario(
+                "Ubicación del levantamiento", ft.Icons.PLACE,
+                [self.dd_empresa, self.campo_sucursal.control,
+                 self.campo_departamento.control, self.tf_etiqueta]),
+            # `columnas=1`: es un campo solo y manda en todo el formulario, así
+            # que ocupa el ancho completo. Con el 2 por defecto se quedaba en la
+            # primera mitad y la otra se rellenaba con un hueco vacío.
+            seccion_formulario("Tipo de activo", ft.Icons.CATEGORY,
+                               [self.dd_tipo], columnas=1),
+        ]
+
+    def _construir(self) -> None:
+        # Los campos del encabezado se crean al ABRIR (ver _construir_encabezado);
+        # aquí solo se reserva su hueco.
+        self._area_encabezado = ft.Column(spacing=28, tight=True)
 
         self.modal = Modal(
             self.page, "Capturar datos del activo",
@@ -323,15 +351,7 @@ class DialogoCapturaActivo:
                 spacing=8, tight=True)],
             columnas=1)
         self.modal.cuerpo.controls = [
-            seccion_formulario(
-                "Ubicación del levantamiento", ft.Icons.PLACE,
-                [self.dd_empresa, self.campo_sucursal.control,
-                 self.campo_departamento.control, self.tf_etiqueta]),
-            # `columnas=1`: es un campo solo y manda en todo el formulario, así
-            # que ocupa el ancho completo. Con el 2 por defecto se quedaba en la
-            # primera mitad y la otra se rellenaba con un hueco vacío.
-            seccion_formulario("Tipo de activo", ft.Icons.CATEGORY,
-                               [self.dd_tipo], columnas=1),
+            self._area_encabezado,
             self._area_campos,
             seccion_imagenes,
         ]
@@ -349,12 +369,18 @@ class DialogoCapturaActivo:
         self._registro = registro
         self.modal.subtitulo = (
             f"{registro.nombre_insumo} · Serie: {registro.no_serie or '—'}")
-        self.dd_tipo.value = nombre_tipo(registro.id_tipo_activo) or None
-        self.dd_empresa.value = registro.empresa or None
-        self.campo_sucursal.value = registro.sucursal or ""
-        self.campo_departamento.value = registro.departamento or ""
-        self.tf_etiqueta.value = registro.etiqueta or ""
-        self._imagenes_insumo = list(registro.datos().get("imagenes_insumo") or [])
+        # Campos del encabezado NUEVOS para este registro (ver el porqué allí).
+        self._construir_encabezado(registro)
+        # La FOTO del levantamiento se adjunta sola en la primera captura: es la
+        # imagen con la que se creó el registro y la que el RPA sube al dar de alta.
+        # Se distingue "nunca capturado" de "el usuario la quitó" por la PRESENCIA
+        # de la clave en datos_json; si no, volvería a agregarse en cada apertura.
+        datos = registro.datos()
+        if "imagenes_insumo" in datos:
+            self._imagenes_insumo = list(datos.get("imagenes_insumo") or [])
+        else:
+            ruta = (registro.ruta_imagen or "").strip()
+            self._imagenes_insumo = [ruta] if ruta and os.path.exists(ruta) else []
         self._pintar_imagenes()
         self._render_campos()
         self.modal.abrir()
@@ -668,7 +694,6 @@ class DialogoCapturaActivo:
 
     # ----------------------------------------------- imágenes del insumo
     async def _agregar_imagenes(self, _e=None) -> None:
-        import os
         import shutil
 
         from core import rutas
@@ -699,7 +724,6 @@ class DialogoCapturaActivo:
         self._pintar_imagenes()
 
     def _pintar_imagenes(self) -> None:
-        import os
         if not self._imagenes_insumo:
             self._area_imagenes.controls = [
                 ft.Text("Sin imágenes.", size=11, color=GRIS)]
@@ -768,6 +792,10 @@ class DialogoCapturaActivo:
         # Imágenes del insumo (rutas): se guardan en datos_json para que el RPA las
         # suba al alta.
         valores["imagenes_insumo"] = list(self._imagenes_insumo)
+        # El nombre no debe repetir la serie que ya va en su propia columna.
+        if insumo_cap and serie:
+            insumo_cap = archivos.nombre_sin_serie(
+                insumo_cap, serie, self._registro.etiqueta or "")
         db.actualizar_datos_levantamiento(
             self._registro.id, id_tipo_activo=tipo, datos=valores,
             modificado=True if ya_de_alta else None,

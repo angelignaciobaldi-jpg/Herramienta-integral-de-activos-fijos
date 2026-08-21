@@ -238,10 +238,11 @@ class SesionSipp:
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
     # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    # PRODUCTIVO: el RPA opera sobre datos REALES (da de alta y modifica activos
-    # de verdad). Para desarrollo, cambia a alguno de los de abajo.
-    BASE_URL = "https://sipp.petroil.com.mx"
-    # BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
+    # PRUEBAS: se opera aquí mientras se valida el flujo. OJO al publicar: para
+    # productivo hay que cambiar a sipp.petroil.com.mx (el RPA da de alta y
+    # modifica activos REALES).
+    BASE_URL = "https://test.sipp.petroil.dev"
+    # BASE_URL = "https://sipp.petroil.com.mx"     # productivo
     # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
     # BASE_URL = "https://dev.sipp.petroil.dev"    # desarrollo
     URL_LOGIN = BASE_URL + "/login.html"
@@ -962,16 +963,29 @@ class SesionSipp:
                 if control == "select":
                     # El CENTRO de costo depende del GRUPO (cascada AJAX): su opción
                     # solo existe tras elegir el grupo, así que se espera a que aparezca.
-                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
+                    # Combos que CARGAN POR AJAX al elegir otro: sus opciones no
+                    # existen todavía cuando se llega a ellos, así que hay que
+                    # reintentar hasta que aparezcan. La sucursal cuelga de la
+                    # empresa igual que el centro de costo cuelga del grupo; sin
+                    # esperarla se quedaba vacía y el SIPP —que la exige— rechazaba
+                    # el guardado sin que la herramienta se enterara.
+                    # La cadena completa llega por AJAX: empresa -> sucursal ->
+                    # grupo CC -> centro CC. El GRUPO también hay que esperarlo (sus
+                    # opciones no existen hasta que la sucursal las trae); sin eso se
+                    # quedaba vacío y el campo se perdía en silencio. El departamento
+                    # NO cuelga de nadie (no tiene ng-disabled), así que no se espera:
+                    # ahí un valor inexistente costaría el timeout completo por activo.
+                    dependiente = ("Sucursal" in ng_model
+                                   or "CentroCosto" in ng_model)
                     try:
-                        await self.set_combo(ng_model, valor, esperar=es_centro)
+                        await self.set_combo(ng_model, valor, esperar=dependiente)
                     except ErrorSipp:
                         # Algunos "select" del portal son en realidad campos de texto
                         # con búsqueda; se intenta escribirlos.
                         await self.set_input(ng_model, valor)
-                    if "GrupoCentroCosto" in ng_model:
-                        # Dar tiempo a que la cascada cargue los centros del grupo
-                        # antes de intentar elegir el centro.
+                    if "GrupoCentroCosto" in ng_model or "Empresa" in ng_model:
+                        # Deja que la cascada traiga las opciones dependientes
+                        # (centros del grupo / sucursales de la empresa).
                         await page.wait_for_timeout(1200)
                 elif control == "date":
                     await self.set_fecha(ng_model, valor)
@@ -994,16 +1008,16 @@ class SesionSipp:
         # (grupo -> centro -> departamento): elegir el empleado o la empresa/sucursal
         # de resguardo puede recargarlos o limpiarlos, así que se fijan AL FINAL, en
         # orden de dependencia, para que persistan al guardar.
-        for clave in ("filtrosAgregar.id_GrupoCentroCosto",
-                      "filtrosAgregar.id_CentroCosto",
-                      "filtrosAgregar.id_Departamento"):
+        for clave in ("filtrosAgregar.id_GrupoCentroCostoResguardo",
+                      "filtrosAgregar.id_CentroCostoResguardo",
+                      "filtrosAgregar.id_DepartamentoResguardo"):
             valor = next((v for ng, v, _c in campos if ng == clave and v), "")
             if not valor:
                 continue
             try:
-                es_centro = clave.endswith("id_CentroCosto")
-                await self.set_combo(clave, valor, esperar=es_centro)
-                if clave.endswith("id_GrupoCentroCosto"):
+                await self.set_combo(clave, valor,
+                                     esperar="CentroCosto" in clave)
+                if clave.endswith("id_GrupoCentroCostoResguardo"):
                     await page.wait_for_timeout(1000)  # deja cargar los centros
             except Exception:  # noqa: BLE001 — no aplica: se omite
                 pass
@@ -1270,11 +1284,12 @@ class SesionSipp:
             antes = await self._valor_actual(ng_model, control)
             try:
                 if control == "select":
-                    # El centro de costo depende del grupo (cascada AJAX): se espera
-                    # a que su opción cargue tras elegir el grupo.
-                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
+                    # Cascada AJAX: el grupo cuelga de la sucursal y el centro del
+                    # grupo, así que en ambos hay que esperar a que sus opciones
+                    # carguen; si no, el combo queda vacío y el cambio se pierde.
+                    cascada = "Sucursal" in ng_model or "CentroCosto" in ng_model
                     try:
-                        await self.set_combo(ng_model, valor, esperar=es_centro)
+                        await self.set_combo(ng_model, valor, esperar=cascada)
                     except ErrorSipp:
                         await self.set_input(ng_model, valor)
                     if "GrupoCentroCosto" in ng_model:

@@ -21,6 +21,24 @@ import segno
 from PIL import Image, ImageDraw, ImageFont
 
 
+# La URL base es un AJUSTE, no un dato de pantalla: se captura una vez en
+# Configuración y la usan todas las vías de generación (individual, carpeta, PDF).
+# Vive aquí, junto a quien la consume, para que exista una sola clave.
+CLAVE_URL_BASE = "qr_base_url"
+
+
+def base_url() -> str:
+    """URL base configurada para los QR ('' si no se ha fijado)."""
+    from . import preferencias
+    return (preferencias.cargar_valor(CLAVE_URL_BASE) or "").strip()
+
+
+def guardar_base_url(url: str) -> None:
+    """Fija la URL base de los QR (se guarda como preferencia local)."""
+    from . import preferencias
+    preferencias.guardar_valor(CLAVE_URL_BASE, (url or "").strip())
+
+
 def url_qr(base_url: str, etiqueta: str) -> str:
     """Contenido que codifica el QR: `base_url` + etiqueta. Si no hay base, solo
     la etiqueta (el lector/PWA arma la URL)."""

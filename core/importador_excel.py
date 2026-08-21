@@ -90,7 +90,11 @@ def _norm(texto) -> str:
     t = str(texto).strip().upper()
     for a, b in (("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("Ñ", "N")):
         t = t.replace(a, b)
-    return re.sub(r"\s+", " ", t)
+    # El «*» de los obligatorios (y el que alguien agregue a mano) se descarta: es
+    # una marca visual, no parte del nombre de la columna. Sin esto, marcar un
+    # encabezado rompería su detección al importar.
+    t = t.replace("*", " ")
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def _partes(celda) -> list[str]:
@@ -140,6 +144,41 @@ PLANTILLA_ENCABEZADOS = [
 ]
 
 
+# Dos campos obligatorios del alta se capturan en columnas que se llaman DISTINTO:
+# el formulario los conoce como `nb_NombreInsumo` y `nb_Empleado`, pero en la
+# plantilla viven en las columnas del levantamiento (INSUMO y RESPONSABLE), que es
+# de donde el RPA los toma. El resto se empareja solo por su clave.
+_OBLIGATORIO_EN_COLUMNA = {
+    "nb_NombreInsumo": "INSUMO",
+    "nb_Empleado": "RESPONSABLE",
+    # El resguardo del activo sale de la ubicación del levantamiento; en el
+    # portal son «Empresa» y «Sucursal» de «Asignación del Activo».
+    "id_EmpresaResguardo": "EMPRESA",
+    "id_SucursalResguardo": "SUCURSAL",
+}
+
+
+def columnas_obligatorias() -> list[str]:
+    """Encabezados de la plantilla que cubren un campo OBLIGATORIO del alta.
+
+    Se derivan de `core/tipos_activo` en vez de listarse a mano: si algún día un
+    campo pasa a requerido allá, la plantilla lo marca sin tocar este archivo.
+    Hoy los tres son iguales para los 12 tipos de activo.
+    """
+    from core.tipos_activo import TIPOS_ACTIVO, campos_de_tipo
+
+    inverso = {clave: hdr for hdr, clave in _ENCABEZADOS_ALTA.items()}
+    columnas: list[str] = []
+    for id_tipo in TIPOS_ACTIVO:
+        for campo in campos_de_tipo(id_tipo):
+            if not campo.requerido:
+                continue
+            col = inverso.get(campo.clave) or _OBLIGATORIO_EN_COLUMNA.get(campo.clave)
+            if col in PLANTILLA_ENCABEZADOS and col not in columnas:
+                columnas.append(col)
+    return columnas
+
+
 def generar_plantilla(ruta: str) -> str:
     """Crea en `ruta` un Excel plantilla de carga masiva: hoja «Activos» con TODOS
     los campos del alta y una hoja «Instrucciones». Devuelve la ruta escrita.
@@ -147,20 +186,33 @@ def generar_plantilla(ruta: str) -> str:
     Se deja SIN filas de datos para no importar ejemplos por error; el formato y el
     truco de varias etiquetas por fila se explican en la hoja de instrucciones.
     TIPO DE ACTIVO y SITUACION traen lista desplegable con los valores válidos."""
+    from openpyxl.comments import Comment
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.datavalidation import DataValidation
 
+    obligatorias = columnas_obligatorias()
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Activos"
-    ws.append(PLANTILLA_ENCABEZADOS)
+    # Los obligatorios llevan «*» en el rótulo, como en los formularios de la
+    # herramienta, y color propio: el asterisco solo se ve de cerca y la fila de
+    # encabezados es ancha.
+    ws.append([f"{h} *" if h in obligatorias else h for h in PLANTILLA_ENCABEZADOS])
     for i, celda in enumerate(ws[1], 1):
+        encabezado = PLANTILLA_ENCABEZADOS[i - 1]
+        es_obligatorio = encabezado in obligatorias
         celda.font = Font(bold=True, color="FFFFFF")
-        celda.fill = PatternFill("solid", fgColor="1F3A5F")
+        celda.fill = PatternFill("solid",
+                                 fgColor="B26A00" if es_obligatorio else "1F3A5F")
         celda.alignment = Alignment(horizontal="center", vertical="center")
+        if es_obligatorio:
+            celda.comment = Comment(
+                "Campo OBLIGATORIO del alta en el SIPP: sin él el activo no se "
+                "puede dar de alta.", "Herramienta de Activos Fijos")
         ws.column_dimensions[get_column_letter(i)].width = min(
-            40, max(14, len(PLANTILLA_ENCABEZADOS[i - 1]) + 2))
+            40, max(14, len(encabezado) + 4))
     ws.freeze_panes = "A2"
 
     # Listas desplegables para TIPO DE ACTIVO y SITUACION (valores válidos del SIPP).
@@ -180,6 +232,12 @@ def generar_plantilla(ruta: str) -> str:
     ins.column_dimensions["A"].width = 100
     guia = [
         "CARGA MASIVA DE ACTIVOS — INSTRUCCIONES",
+        "",
+        "COLUMNAS OBLIGATORIAS (encabezado en ÁMBAR y con «*»): "
+        + ", ".join(obligatorias) + ".",
+        "Son los campos que el alta del SIPP exige para CUALQUIER tipo de activo. "
+        "Sin ellos el activo no se puede dar de alta: el registro se importa igual, "
+        "pero queda pendiente hasta completarlos en la ficha.",
         "",
         "Captura un activo por fila en la hoja «Activos». El Excel es la base del "
         "registro: lo que llenes aquí es lo que usará el alta automática (RPA); lo "
@@ -287,20 +345,21 @@ def _fmt_valor(clave: str, valor) -> str:
 
 
 def _resolver_insumo(nombre: str, id_empresa, cache: dict) -> "int | None":
-    """Clave (id) del insumo por nombre exacto en la caché del SIPP; None si no está.
-    Busca primero en la empresa y, si no, en el catálogo global."""
+    """Clave (id) del insumo en la caché del SIPP; None si no está.
+
+    Se queda con el MÁS GENERAL de los que coinciden (ver
+    `core.insumos.elegir_mas_general`), que es el que debe registrarse."""
     n = _norm(nombre)
     if not n:
         return None
     if (n, id_empresa) in cache:
         return cache[(n, id_empresa)]
-    encontrado = None
-    candidatos = (db.buscar_insumos(nombre, empresa_id=id_empresa, limite=25)
-                  or db.buscar_insumos(nombre, limite=25))
-    for ins in candidatos:
-        if _norm(ins.nombre) == n:
-            encontrado = ins.id_insumo
-            break
+    from .insumos import resolver
+
+    # Solo el nombre EXACTO se acepta sin preguntar. Lo ambiguo se resuelve en la
+    # pantalla, donde el usuario elige el insumo del catálogo.
+    elegido, exacto = resolver(nombre, id_empresa)
+    encontrado = elegido.id_insumo if (elegido and exacto) else None
     cache[(n, id_empresa)] = encontrado
     return encontrado
 

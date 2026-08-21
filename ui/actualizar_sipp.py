@@ -162,8 +162,14 @@ async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) 
         app.avisar(f"No se pudo actualizar la información del SIPP: {error}", ROJO,
                    duracion=9000)
     else:
+        # Los costos vienen de un servicio APARTE del portal: si no llegaron, se
+        # dice en el mismo aviso. Callarlo dejaría creer que el inventario quedó
+        # completo cuando le falta el dato más caro de recuperar a mano.
+        fallo = (f" Los costos no se actualizaron: {resultado['costos_error']}."
+                 if resultado.get("costos_error") else "")
         app.avisar(
             f"SIPP actualizado para «{empresa}»: {resultado.get('insumos', 0)} insumo(s), "
             f"{resultado.get('activos', 0)} activo(s), "
             f"{resultado.get('centros', 0)} centro(s) de costo, "
-            f"{resultado.get('empleados', 0)} empleado(s).", VERDE, duracion=8000)
+            f"{resultado.get('empleados', 0)} empleado(s), "
+            f"{resultado.get('costos', 0)} costo(s)." + fallo, VERDE, duracion=8000)

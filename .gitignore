@@ -36,6 +36,8 @@ ms-playwright/
 # ===== Secretos / configuración sensible =====
 # Variables de entorno con tokens (PAT de GitHub, etc.). El .env.example sí va.
 .env
+# Notas locales con URLs y tokens REALES de la API (referencia del usuario).
+Datos para herramienta activos fijo*.txt
 
 # ===== Modelos de OCR (pesados; se obtienen aparte) =====
 tessdata/

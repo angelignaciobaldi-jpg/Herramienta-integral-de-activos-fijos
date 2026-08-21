@@ -61,3 +61,23 @@ def parse_fecha(texto: str | None) -> "datetime | None":
 
 def fmt_fecha(fecha: "datetime | None") -> str:
     return fecha.strftime(FORMATO_FECHA) if fecha else ""
+
+
+def error_al_guardar(exc: Exception, ruta: str = "") -> str:
+    """Mensaje entendible cuando falla escribir un archivo que eligió el usuario.
+
+    El caso común en Windows no es un permiso mal puesto: es que el archivo está
+    ABIERTO en Excel (o en el visor de PDF), que lo bloquea en exclusiva. El
+    sistema responde 'Permission denied' y el usuario, que además autorizó
+    reemplazarlo, se queda sin entender por qué no se guardó.
+    """
+    import os
+
+    nombre = os.path.basename(ruta) if ruta else "el archivo"
+    if isinstance(exc, PermissionError):
+        return (f"No se pudo guardar «{nombre}»: el archivo está abierto en otro "
+                "programa (Excel, un visor de PDF…) o es de solo lectura. "
+                "Ciérralo y vuelve a intentar, o guárdalo con otro nombre.")
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+        return f"No se pudo guardar «{nombre}»: no hay espacio en el disco."
+    return f"No se pudo guardar «{nombre}»: {exc}"
