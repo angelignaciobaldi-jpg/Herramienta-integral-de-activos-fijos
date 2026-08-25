@@ -238,11 +238,11 @@ class SesionSipp:
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
     # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    # PRUEBAS: se opera aquí mientras se valida el flujo. OJO al publicar: para
-    # productivo hay que cambiar a sipp.petroil.com.mx (el RPA da de alta y
-    # modifica activos REALES).
-    BASE_URL = "https://test.sipp.petroil.dev"
-    # BASE_URL = "https://sipp.petroil.com.mx"     # productivo
+    # PRODUCTIVO: el RPA da de alta y modifica activos REALES, y las etiquetas que
+    # consume el alta son consecutivos que no se recuperan. Al probar cambios del
+    # flujo, cámbialo a `test` y regrésalo antes de publicar.
+    BASE_URL = "https://sipp.petroil.com.mx"
+    # BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
     # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
     # BASE_URL = "https://dev.sipp.petroil.dev"    # desarrollo
     URL_LOGIN = BASE_URL + "/login.html"
