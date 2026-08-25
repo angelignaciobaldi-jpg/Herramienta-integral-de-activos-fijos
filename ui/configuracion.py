@@ -1,4 +1,5 @@
-"""Configuración: credenciales del SIPP (para el RPA) y ajustes de la API.
+"""Configuración: credenciales del SIPP (para el RPA), ajustes de la API y
+etiquetas QR.
 
 Se abre como diálogo desde el botón de la barra superior. Captura usuario y
 contraseña del SIPP, que se guardan localmente con la contraseña cifrada (DPAPI,
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 import flet as ft
 
-from core import ajustes_api, credenciales
+from core import ajustes_api, credenciales, qr
 from ui.comun import GRIS, VERDE
 from ui.componentes import (boton_herramienta, boton_primario, campo_texto,
                             tarjeta_seccion)
@@ -29,6 +30,7 @@ class SeccionConfiguracion:
         self._construir()
         self._cargar_credenciales()
         self._cargar_ajustes_api()
+        self.tf_qr_url.value = qr.base_url()
 
     # ------------------------------------------------------------ UI
     @staticmethod
@@ -56,6 +58,8 @@ class SeccionConfiguracion:
         bl_api_token, self.tf_api_token = campo_texto(
             "Token de la API", password=True, expand=True,
             hint="Déjalo vacío para conservar el actual")
+        bl_qr_url, self.tf_qr_url = campo_texto(
+            "URL base del QR", hint="https://activos.petroil.app/a/", expand=True)
         self.txt_api_token_estado = ft.Text(size=12)
         self._actualizar_estado_token()
 
@@ -76,9 +80,16 @@ class SeccionConfiguracion:
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER))
 
+        etiquetas = self._apartado(
+            "Etiquetas QR",
+            "Cada QR codifica esta URL + la etiqueta del activo, para que al "
+            "escanearlo se abra su ficha. Si la dejas vacía, el QR llevará solo el "
+            "número de etiqueta.",
+            bl_qr_url)
+
         grupo = tarjeta_seccion(ft.Column(
             [ft.Text("Sistema", size=15, weight=ft.FontWeight.BOLD),
-             cred, ft.Divider(), api],
+             cred, ft.Divider(), api, ft.Divider(), etiquetas],
             spacing=14, tight=True))
 
         contenido = ft.Column(
@@ -120,8 +131,12 @@ class SeccionConfiguracion:
         token = (self.tf_api_token.value or "").strip()
         if token:  # vacío -> se conserva el token guardado (no se borra al guardar)
             ajustes_api.guardar_token(token)
+        qr.guardar_base_url(self.tf_qr_url.value or "")
         self._actualizar_estado_token()
         self._cerrar()
+        # Las pantallas ya montadas muestran estos ajustes (p. ej. la URL del QR):
+        # sin avisarles seguirían enseñando el valor viejo hasta reiniciar.
+        self.app.notificar_configuracion()
         self.app.avisar("Configuración guardada.", VERDE)
 
     # -------------------------------------------------- integración (API)

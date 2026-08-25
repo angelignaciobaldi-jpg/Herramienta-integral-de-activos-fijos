@@ -18,7 +18,7 @@ import asyncio
 import flet as ft
 
 from core import importador_excel
-from ui.comun import GRIS, NARANJA, ROJO, VERDE
+from ui.comun import GRIS, NARANJA, ROJO, VERDE, error_al_guardar
 from ui.componentes import boton_herramienta, boton_primario, boton_secundario
 
 _ANCHO = 640
@@ -138,7 +138,7 @@ class DialogoCargaMasiva:
         try:
             await asyncio.to_thread(importador_excel.generar_plantilla, ruta)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            self.app.avisar(f"No se pudo generar la plantilla: {exc}", ROJO)
+            self.app.avisar(error_al_guardar(exc, ruta), ROJO, duracion=10000)
             return
         self.app.avisar(
             "Plantilla descargada. Llénala y súbela aquí.", VERDE, accion="Abrir",

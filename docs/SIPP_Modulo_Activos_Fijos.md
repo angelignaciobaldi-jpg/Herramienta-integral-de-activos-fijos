@@ -247,6 +247,77 @@ el rótulo a emparejar.
 - Fechas del activo: `FH_ADQUISICION`, `FH_ASIGNACION`, `FH_GARANTIA` (abiertas con
   `fnc_openRedCalendar`).
 
+## B.5 El empleado de resguardo NO se cambia desde la edición
+
+Hallazgo verificado en el DOM real (`Paginas html/Pagina de edicion de activo
+fijo.html`). Importa porque explica por qué «Comparar SIPP vs Excel» marca
+*Empleado resguardo* como **solo local** y no lo empuja.
+
+En el formulario de edición, el empleado viene bloqueado por partida doble:
+
+```html
+<input ng-model="filtrosEditar.nb_Empleado" readonly="">
+<input ng-model="filtrosEditar.id_EmpleadoResguardo" ng-disabled="true">
+```
+
+Y **no hay modal que abrir**: el portal tiene seis botones «Buscar Empleado»
+(`abrirModal('empleados', <n>)`) y ninguno pertenece a la edición.
+
+| índice | contexto |
+|--------|----------|
+| 2 | `filtrosAgregar` (ALTA — el que usa hoy `SesionSipp.seleccionar_empleado`) |
+| 3 | `filtrosReasignacion` |
+| 4 | `filtrosCartaResponsiva` |
+| 5 | `filtrosBandeja` |
+| 6 | `filtrosSubirCartaResponsiva` |
+| 7 | `filtrosReporte` |
+
+El botón más cercano a `filtrosEditar.nb_Empleado` está a ~46,500 caracteres: es
+el del alta, otro formulario.
+
+### Contraste: el INSUMO sí se puede cambiar en la edición
+
+Conviene no meter los dos en el mismo saco (la comparación marca ambos como
+`empujable=False`, pero por razones distintas). El insumo también es `readonly` +
+`ng-disabled="true"`, **pero tiene su botón «Buscar Insumo» pegado al campo**, en
+el mismo `<div class="col-md-8">`, a ~196 caracteres:
+
+```html
+<input ng-model="filtrosEditar.nb_NombreInsumo" ng-disabled="true" readonly="">
+<button ng-click="abrirModal('insumos')" class="btn-icon25p btn-buscar25p"></button>
+```
+
+Ese `abrirModal('insumos')` **no lleva índice** (a diferencia de `'empleados'`): es
+el mismo modal para las tres pantallas que lo usan, y `SesionSipp.seleccionar_insumo`
+ya resuelve cuál botón pulsar con `_primer_visible`. Es decir: automatizar el cambio
+de insumo en la modificación es viable con lo que ya existe; automatizar el cambio de
+empleado NO, porque ahí no hay modal que abrir.
+
+### La vía que sí existe: REASIGNACIÓN
+
+El SIPP trata el cambio de resguardo como un **movimiento**, no como una edición
+—coherente con que de ahí salgan las cartas responsivas—. Es una acción por fila
+del listado:
+
+```
+grid.appScope.abrirModal('reasignacion', 0, row.entity)   ->   guardarReasignacion(sn_opcionReasignar)
+```
+
+Campos del modal (`reasignarModalFiltros.*`); solo el empleado es obligatorio:
+
+| campo | nota |
+|-------|------|
+| `id_EmpleadoNuevo` | **obligatorio**, `select` con `chosen` |
+| `id_EmpresaNuevo`, `id_SucursalNuevo` | |
+| `id_GrupoCentroCostoNuevo`, `id_CentroCostoNuevo` | |
+| `id_DepartamentoNuevo`, `de_UbicacionNuevo` | |
+| `sn_GenerarCentroCostoModal`, `sn_habilitarCamposReasignacion` | banderas del propio modal |
+
+Automatizarlo es viable (el buscador de empleados ya lo maneja
+`SesionSipp.seleccionar_empleado`), pero es un flujo distinto al de modificación y
+con efectos propios en el portal. **Decisión de agosto 2026: se documenta, no se
+implementa por ahora.**
+
 ## B.4 Ambiente de pruebas
 
 El RPA opera contra **stage**: `https://stage.sipp.petroil.dev` (fijado en

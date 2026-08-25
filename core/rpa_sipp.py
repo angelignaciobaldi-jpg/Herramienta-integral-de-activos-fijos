@@ -238,8 +238,9 @@ class SesionSipp:
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
     # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    # PRODUCTIVO: el RPA opera sobre datos REALES (da de alta y modifica activos
-    # de verdad). Para desarrollo, cambia a alguno de los de abajo.
+    # PRODUCTIVO: el RPA da de alta y modifica activos REALES, y las etiquetas que
+    # consume el alta son consecutivos que no se recuperan. Al probar cambios del
+    # flujo, cámbialo a `test` y regrésalo antes de publicar.
     BASE_URL = "https://sipp.petroil.com.mx"
     # BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
     # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
@@ -260,6 +261,10 @@ class SesionSipp:
     # consume nada de esto; solo lo paga el que aún no pinta o no es editable.
     TIMEOUT_CAMPO = 500         # gracia para un campo presente que aún no aparece
     TIMEOUT_ESCRITURA = 1_200   # escribir en un campo ya visible
+    # Cuántas coincidencias de un mismo localizador se revisan buscando la visible
+    # (ver _primer_visible). El portal repite ng-clicks entre formularios, pero
+    # nunca decenas del mismo a la vista.
+    _MAX_COINCIDENCIAS = 12
 
     def __init__(self, headless: bool = False, slow_mo: int = 0, zoom: float = 0.8):
         self.headless = headless
@@ -278,8 +283,12 @@ class SesionSipp:
         """Arranca Playwright, el navegador y una pestaña limpia."""
         await asegurar_navegador()
         self._pw = await async_playwright().start()
+        # `channel="chromium"`: en modo headless Playwright usa por defecto un
+        # binario aparte (chromium_headless_shell) que `asegurar_navegador` NO
+        # descarga (instala con --no-shell para ahorrar ~80 MB). Con el canal
+        # explícito se corre headless sobre el Chromium completo, que sí está.
         self.browser = await self._pw.chromium.launch(
-            headless=self.headless, slow_mo=self.slow_mo,
+            headless=self.headless, slow_mo=self.slow_mo, channel="chromium",
             args=["--start-maximized", f"--force-device-scale-factor={self.zoom}"],
         )
         self.context = await self.browser.new_context(no_viewport=True)
@@ -830,6 +839,9 @@ class SesionSipp:
         Insumo': abre el modal, teclea el id, busca y hace clic en la fila
         resultante. Es exacto (por id), a diferencia de buscar por nombre."""
         page = self._exigir_pagina()
+        # Hay un botón igual por formulario (alta, edición, reasignación) y todos
+        # viven en el DOM a la vez: el bueno es el del formulario ABIERTO, que es
+        # el único visible. De eso se encarga `_primer_visible`.
         abrir = await self._primer_visible(
             [page.locator("[ng-click*=\"abrirModal('insumos')\"]"),
              page.locator("[ng-click*='insumos']")],
@@ -958,16 +970,29 @@ class SesionSipp:
                 if control == "select":
                     # El CENTRO de costo depende del GRUPO (cascada AJAX): su opción
                     # solo existe tras elegir el grupo, así que se espera a que aparezca.
-                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
+                    # Combos que CARGAN POR AJAX al elegir otro: sus opciones no
+                    # existen todavía cuando se llega a ellos, así que hay que
+                    # reintentar hasta que aparezcan. La sucursal cuelga de la
+                    # empresa igual que el centro de costo cuelga del grupo; sin
+                    # esperarla se quedaba vacía y el SIPP —que la exige— rechazaba
+                    # el guardado sin que la herramienta se enterara.
+                    # La cadena completa llega por AJAX: empresa -> sucursal ->
+                    # grupo CC -> centro CC. El GRUPO también hay que esperarlo (sus
+                    # opciones no existen hasta que la sucursal las trae); sin eso se
+                    # quedaba vacío y el campo se perdía en silencio. El departamento
+                    # NO cuelga de nadie (no tiene ng-disabled), así que no se espera:
+                    # ahí un valor inexistente costaría el timeout completo por activo.
+                    dependiente = ("Sucursal" in ng_model
+                                   or "CentroCosto" in ng_model)
                     try:
-                        await self.set_combo(ng_model, valor, esperar=es_centro)
+                        await self.set_combo(ng_model, valor, esperar=dependiente)
                     except ErrorSipp:
                         # Algunos "select" del portal son en realidad campos de texto
                         # con búsqueda; se intenta escribirlos.
                         await self.set_input(ng_model, valor)
-                    if "GrupoCentroCosto" in ng_model:
-                        # Dar tiempo a que la cascada cargue los centros del grupo
-                        # antes de intentar elegir el centro.
+                    if "GrupoCentroCosto" in ng_model or "Empresa" in ng_model:
+                        # Deja que la cascada traiga las opciones dependientes
+                        # (centros del grupo / sucursales de la empresa).
                         await page.wait_for_timeout(1200)
                 elif control == "date":
                     await self.set_fecha(ng_model, valor)
@@ -990,16 +1015,16 @@ class SesionSipp:
         # (grupo -> centro -> departamento): elegir el empleado o la empresa/sucursal
         # de resguardo puede recargarlos o limpiarlos, así que se fijan AL FINAL, en
         # orden de dependencia, para que persistan al guardar.
-        for clave in ("filtrosAgregar.id_GrupoCentroCosto",
-                      "filtrosAgregar.id_CentroCosto",
-                      "filtrosAgregar.id_Departamento"):
+        for clave in ("filtrosAgregar.id_GrupoCentroCostoResguardo",
+                      "filtrosAgregar.id_CentroCostoResguardo",
+                      "filtrosAgregar.id_DepartamentoResguardo"):
             valor = next((v for ng, v, _c in campos if ng == clave and v), "")
             if not valor:
                 continue
             try:
-                es_centro = clave.endswith("id_CentroCosto")
-                await self.set_combo(clave, valor, esperar=es_centro)
-                if clave.endswith("id_GrupoCentroCosto"):
+                await self.set_combo(clave, valor,
+                                     esperar="CentroCosto" in clave)
+                if clave.endswith("id_GrupoCentroCostoResguardo"):
                     await page.wait_for_timeout(1000)  # deja cargar los centros
             except Exception:  # noqa: BLE001 — no aplica: se omite
                 pass
@@ -1139,7 +1164,7 @@ class SesionSipp:
 
     async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
                                detalles: "dict | None" = None,
-                               punto_control=None) -> dict:
+                               punto_control=None, insumo_id=None) -> dict:
         """Busca un activo por ETIQUETA (o serie si no hay), abre su edición, aplica
         los campos y guarda. Devuelve:
 
@@ -1158,7 +1183,11 @@ class SesionSipp:
 
         `punto_control`: corrutina que se llama entre campos para permitir detener
         el proceso a media captura (ver `_aplicar_campos_edicion`). Si aborta antes
-        de Guardar, el activo queda SIN tocar en el SIPP."""
+        de Guardar, el activo queda SIN tocar en el SIPP.
+
+        `insumo_id`: si se pasa, cambia el INSUMO con el modal «Buscar Insumo» de
+        la edición (no es un campo de texto: el portal lo bloquea y solo se elige
+        ahí). Se omite si el activo ya tiene ese insumo."""
         page = self._exigir_pagina()
         filas = await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         if filas == 0:
@@ -1187,8 +1216,17 @@ class SesionSipp:
             raise ErrorSipp(
                 "No se abrió el formulario de edición del activo.") from exc
 
-        cambios, no_aplicados = await self._aplicar_campos_edicion(
+        # El INSUMO va PRIMERO, como en el alta: elegirlo repinta los campos por
+        # tipo (camposDetalle), así que hacerlo después borraría lo ya escrito.
+        cambios, no_aplicados = [], []
+        if insumo_id:
+            cambio = await self._cambiar_insumo_edicion(insumo_id)
+            if cambio:
+                cambios.append(cambio)
+
+        mas_cambios, no_aplicados = await self._aplicar_campos_edicion(
             campos, punto_control=punto_control)
+        cambios.extend(mas_cambios)
 
         if detalles:
             await self.llenar_campos_detalle(detalles)
@@ -1208,6 +1246,31 @@ class SesionSipp:
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
         return {"cambios": cambios, "no_aplicados": no_aplicados}
+
+    async def _cambiar_insumo_edicion(self, insumo_id) -> "tuple | None":
+        """Cambia el insumo del activo abierto en la EDICIÓN. Devuelve el
+        (ng_model, antes, después) del reporte, o None si no hubo cambio.
+
+        A diferencia del empleado —que la edición del portal no deja tocar—, el
+        insumo SÍ es modificable ahí: su campo es `readonly`, pero tiene al lado el
+        botón «Buscar Insumo» (`abrirModal('insumos')`), el mismo modal del alta.
+
+        Antes de abrirlo se compara el ID que ya tiene el activo: si es el mismo, se
+        ahorra todo el viaje por el modal, que es lo caro. Se compara por ID y no
+        por nombre porque el nombre del portal y el del levantamiento pueden diferir
+        en mayúsculas, acentos o serie, y eso provocaría reelecciones inútiles."""
+        deseado = str(insumo_id or "").strip()
+        if not deseado:
+            return None
+        actual_id = (await self._valor_actual("filtrosEditar.id_InsumoOrigen")).strip()
+        if actual_id == deseado:
+            return None
+        antes = await self._valor_actual("filtrosEditar.nb_NombreInsumo")
+        await self.seleccionar_insumo(deseado)
+        despues = await self._valor_actual("filtrosEditar.nb_NombreInsumo")
+        if (antes or "").strip() == (despues or "").strip():
+            return None
+        return ("filtrosEditar.nb_NombreInsumo", antes, despues)
 
     async def _valor_actual(self, ng_model: str, control: str = "text") -> str:
         """Lo que el formulario YA tiene en ese campo, para el «antes» del reporte.
@@ -1266,11 +1329,12 @@ class SesionSipp:
             antes = await self._valor_actual(ng_model, control)
             try:
                 if control == "select":
-                    # El centro de costo depende del grupo (cascada AJAX): se espera
-                    # a que su opción cargue tras elegir el grupo.
-                    es_centro = "CentroCosto" in ng_model and "Grupo" not in ng_model
+                    # Cascada AJAX: el grupo cuelga de la sucursal y el centro del
+                    # grupo, así que en ambos hay que esperar a que sus opciones
+                    # carguen; si no, el combo queda vacío y el cambio se pierde.
+                    cascada = "Sucursal" in ng_model or "CentroCosto" in ng_model
                     try:
-                        await self.set_combo(ng_model, valor, esperar=es_centro)
+                        await self.set_combo(ng_model, valor, esperar=cascada)
                     except ErrorSipp:
                         await self.set_input(ng_model, valor)
                     if "GrupoCentroCosto" in ng_model:
@@ -1318,16 +1382,30 @@ class SesionSipp:
     async def _primer_visible(
         self, candidatos: list[Locator], descripcion: str, timeout: int | None = None,
     ) -> Locator:
-        """Devuelve el primer locator de `candidatos` que esté visible dentro del
-        timeout. Lanza ErrorSipp si ninguno aparece."""
+        """Devuelve el primer elemento VISIBLE de `candidatos` dentro del timeout.
+        Lanza ErrorSipp si ninguno aparece.
+
+        Mira TODAS las coincidencias de cada candidato, no solo la primera: el
+        portal es una SPA que monta a la vez los formularios de alta, edición,
+        reasignación… y repite el mismo `ng-click` en todos. Quedarse con `.first`
+        devolvía el del formulario OCULTO —el de arriba en el DOM— y hacía fallar
+        el buscador de insumos de la edición con un «no se encontró el botón»
+        aunque estuviera ahí, a la vista.
+
+        El barrido se topa a `_MAX_COINCIDENCIAS` porque algún candidato es un
+        selector amplio (p. ej. `[ng-click*='insumos']`) que puede casar con
+        decenas de nodos, y esto se paga por cada activo del lote."""
         page = self._exigir_pagina()
         limite = (timeout or self.TIMEOUT_ELEMENTO) / 1000
         fin = asyncio.get_event_loop().time() + limite
         while asyncio.get_event_loop().time() < fin:
             for loc in candidatos:
                 try:
-                    if await loc.first.is_visible():
-                        return loc.first
+                    cuantos = min(await loc.count(), self._MAX_COINCIDENCIAS)
+                    for i in range(cuantos):
+                        elemento = loc.nth(i)
+                        if await elemento.is_visible():
+                            return elemento
                 except Exception:  # noqa: BLE001 — candidato inexistente; se prueba el siguiente
                     continue
             await page.wait_for_timeout(150)

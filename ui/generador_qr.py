@@ -2,15 +2,14 @@
 
 Genera códigos QR (etiquetas imprimibles en PDF) para los activos de una empresa.
 Cada QR codifica un enlace `URL_base/etiqueta`; al escanearlo, el PWA/API móvil
-resuelve la etiqueta y muestra la información del activo. La URL base se configura
-aquí (se guarda como preferencia) para poder apuntarla al PWA cuando esté publicado.
+resuelve la etiqueta y muestra la información del activo. La URL base es un AJUSTE
+GLOBAL: se captura en Configuración (ver core/qr.base_url), no aquí, porque la usan
+por igual la etiqueta suelta, la carpeta y el PDF.
 
-Flujo:
-  1. Elegir la empresa y (opcional) fijar la URL base.
-  2. "Actualizar información del SIPP": trae del SIPP los activos e insumos de esa
-     empresa (y los empleados, global) y los cachea (ver ui/actualizar_sipp).
-  3. "Generar etiquetas (PDF)": arma la hoja de etiquetas con QR + datos y la
-     exporta a PDF para imprimir y pegar.
+La pantalla está partida en tres bloques, que son tres decisiones distintas:
+  1. Activos: empresa, sucursal y traer/actualizar su caché desde el SIPP.
+  2. Etiqueta individual: buscar UN activo y guardar su PNG.
+  3. Etiquetas por lote: carpeta por departamento o la hoja en PDF.
 """
 
 from __future__ import annotations
@@ -19,14 +18,13 @@ import asyncio
 
 import flet as ft
 
-from core import db, preferencias
+from core import db
 from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
-from ui.comun import GRIS, NARANJA, ROJO, VERDE
-from ui.componentes import (Modal, boton_primario, boton_secundario, buscador,
-                            campo_opciones, campo_texto, fila_resultado,
-                            lista_resultados, tarjeta_seccion)
+from ui.comun import GRIS, NARANJA, ROJO, VERDE, error_al_guardar
+from ui.componentes import (Modal, boton_herramienta, boton_primario,
+                            boton_secundario, buscador, campo_opciones,
+                            fila_resultado, lista_resultados, tarjeta_seccion)
 
-_CLAVE_URL = "qr_base_url"
 # Opción "todas las sucursales": se trata como "sin filtro".
 _TODAS = "Todas las sucursales"
 
@@ -39,6 +37,18 @@ class SeccionGeneradorQR:
         self.page = app.page
         self._construir()
 
+    @staticmethod
+    def _encabezado(icono, titulo: str, ayuda: str) -> ft.Control:
+        """Título + explicación de un bloque de la pantalla."""
+        return ft.Column(
+            [ft.Row([ft.Icon(icono, size=18, color=ft.Colors.PRIMARY),
+                     ft.Text(titulo, size=15, weight=ft.FontWeight.BOLD,
+                             color=ft.Colors.ON_SURFACE)],
+                    spacing=8, tight=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
+             ft.Text(ayuda, size=13, color=GRIS, no_wrap=False)],
+            spacing=4, tight=True)
+
     def _construir(self) -> None:
         self.blq_empresa, self.dd_empresa = campo_opciones(
             "Empresa", list(NOMBRES_EMPRESAS), width=320,
@@ -46,13 +56,12 @@ class SeccionGeneradorQR:
         self.blq_sucursal, self.dd_sucursal = campo_opciones(
             "Sucursal", [], width=280,
             on_change=lambda _e: self._actualizar_estado())
-        self.blq_base, self.tf_base = campo_texto(
-            "URL base del QR", width=420,
-            hint="https://activos.petroil.app/a/",
-            valor=preferencias.cargar_valor(_CLAVE_URL) or "",
-            on_submit=self._guardar_base, on_blur=self._guardar_base)
         self.progreso = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)
         self.txt_estado = ft.Text("", size=13, color=GRIS)
+        # La URL base ya no se edita aquí (vive en Configuración): se muestra para
+        # que se vea QUÉ va a codificar el QR antes de imprimir cientos.
+        self.txt_url = ft.Text(size=12, no_wrap=False)
+        self._pintar_url()
 
         # Búsqueda de UN activo (Enter genera directo). Se busca por etiqueta,
         # serie o insumo porque en campo no siempre se tiene el número legible.
@@ -61,63 +70,78 @@ class SeccionGeneradorQR:
             on_submit=self._generar_individual)
 
         # El botón rápido solo tiene sentido con la API configurada; sin ella la
-        # única vía es la descarga completa por navegador, que pasa a ser la
-        # acción principal.
+        # única vía es la descarga completa por navegador (botón del encabezado).
         from core import activos_sipp
         self._con_api = activos_sipp.hay_api()
-        acciones = []
+        fila_datos = [self.blq_empresa, self.blq_sucursal]
         if self._con_api:
-            acciones.append(
+            # Junto a empresa/sucursal: actualizar es lo que se hace JUSTO DESPUÉS
+            # de elegirlas, y tenerlo abajo con las de generar mezclaba dos cosas
+            # distintas (traer datos vs. producir etiquetas).
+            fila_datos.append(
                 boton_primario("Actualizar activos (rápido)", ft.Icons.BOLT,
                                self._actualizar_activos_api,
                                tooltip="Trae del SIPP solo los activos de la empresa, "
                                        "por API y sin abrir el navegador"))
+        fila_datos.append(self.progreso)
 
-        panel = ft.Column(
-            [
-                ft.Text("Genera etiquetas QR para los activos de una empresa. Cada QR "
-                        "abre la ficha del activo en el PWA (URL base + etiqueta).",
-                        size=13, color=GRIS),
-                ft.Divider(),
-                self.blq_base,
-                ft.Text("El QR llevará: URL base + la etiqueta del activo.",
-                        size=11, color=GRIS),
-                ft.Row([self.blq_empresa, self.blq_sucursal, self.progreso], spacing=14,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
-                ft.Divider(),
-                # Etiqueta suelta: lo habitual en campo es tener UN activo enfrente
-                # (se despegó o se dañó su etiqueta) y no querer reimprimir la hoja
-                # completa de su departamento.
-                ft.Text("¿Solo necesitas una? Busca el activo y genera su etiqueta.",
-                        size=13, color=GRIS),
-                ft.Row([self.tf_buscar,
-                        boton_secundario("Generar etiqueta", ft.Icons.QR_CODE,
-                                         self._generar_individual,
-                                         tooltip="Genera el PNG de la etiqueta de ese "
-                                                 "activo (QR + número)")],
-                       spacing=12, wrap=True,
-                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                ft.Row(
-                    # Con API, la descarga completa (que además trae insumos y
-                    # empleados, y exige navegador) pasa a segundo plano: para las
-                    # etiquetas solo hacen falta los ACTIVOS.
-                    acciones + [
-                        boton_secundario(
-                            "Generar carpeta por departamento", ft.Icons.FOLDER_ZIP,
-                            self._generar_carpeta,
-                            tooltip="Un PNG por activo (QR + etiqueta) en subcarpetas "
-                                    "por departamento"),
-                        boton_secundario("Generar etiquetas (PDF)", ft.Icons.QR_CODE_2,
-                                         self._generar_pdf),
-                    ],
-                    spacing=12, wrap=True),
-                self.txt_estado,
-            ],
-            spacing=14, tight=True,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        )
-        self.contenido = ft.Column([tarjeta_seccion(panel)], expand=True,
-                                   scroll=ft.ScrollMode.AUTO)
+        activos = tarjeta_seccion(ft.Column(
+            [self._encabezado(
+                ft.Icons.INVENTORY_2, "Activos",
+                "Elige de qué empresa y sucursal se generarán las etiquetas."),
+             ft.Row(fila_datos, spacing=14, wrap=True,
+                    # Los campos llevan rótulo arriba y el botón no: sin alinear
+                    # abajo, el botón queda flotando a media altura de los campos.
+                    vertical_alignment=ft.CrossAxisAlignment.END),
+             self.txt_estado],
+            spacing=12, tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
+
+        # Etiqueta suelta: lo habitual en campo es tener UN activo enfrente (se
+        # despegó o se dañó su etiqueta) y no querer reimprimir la hoja completa
+        # de su departamento.
+        individual = tarjeta_seccion(ft.Column(
+            [self._encabezado(
+                ft.Icons.QR_CODE, "Etiqueta individual",
+                "¿Solo necesitas una? Busca el activo y guarda su etiqueta en PNG."),
+             ft.Row([self.tf_buscar,
+                     boton_secundario("Generar etiqueta", ft.Icons.QR_CODE,
+                                      self._generar_individual,
+                                      tooltip="Genera el PNG de la etiqueta de ese "
+                                              "activo (QR + número)")],
+                    spacing=12, wrap=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+            spacing=12, tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
+
+        lote = tarjeta_seccion(ft.Column(
+            [self._encabezado(
+                ft.Icons.LIBRARY_BOOKS, "Etiquetas por lote",
+                "Genera de una vez las etiquetas de la empresa y sucursal elegidas "
+                "arriba: en carpetas por departamento o en una hoja para imprimir."),
+             ft.Row([boton_secundario(
+                         "Generar carpeta por departamento", ft.Icons.FOLDER_ZIP,
+                         self._generar_carpeta,
+                         tooltip="Un PNG por activo (QR + etiqueta) en subcarpetas "
+                                 "por departamento"),
+                     boton_secundario("Generar etiquetas (PDF)", ft.Icons.QR_CODE_2,
+                                      self._generar_pdf)],
+                    spacing=12, wrap=True)],
+            spacing=12, tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH))
+
+        pie = ft.Row(
+            [self.txt_url,
+             boton_herramienta("Configurar", ft.Icons.SETTINGS_OUTLINED,
+                               self._abrir_configuracion,
+                               tooltip="Cambiar la URL base en Configuración")],
+            spacing=8, wrap=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        self.contenido = ft.Column(
+            [activos, individual, lote, pie],
+            spacing=16, expand=True, scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         self._actualizar_estado()
 
     # ------------------------------------------------------ estado
@@ -154,8 +178,32 @@ class SeccionGeneradorQR:
                           "Usa «Actualizar información del SIPP».")
         self._safe_update()
 
-    def _guardar_base(self, _e=None) -> None:
-        preferencias.guardar_valor(_CLAVE_URL, (self.tf_base.value or "").strip())
+    def _url_base(self) -> str:
+        """URL base de los QR, LEÍDA AL VUELO desde la configuración.
+
+        Nunca se guarda en un atributo: si se cambia entre una generación y otra,
+        imprimir con la anterior manda los QR a una ruta muerta, y eso se descubre
+        con las etiquetas ya pegadas."""
+        from core import qr
+        return qr.base_url()
+
+    def _pintar_url(self) -> None:
+        base = self._url_base()
+        if base:
+            self.txt_url.value = f"El QR llevará: {base} + la etiqueta del activo."
+            self.txt_url.color = GRIS
+        else:
+            self.txt_url.value = ("Sin URL base configurada: el QR llevará solo el "
+                                  "número de etiqueta.")
+            self.txt_url.color = NARANJA
+
+    def _abrir_configuracion(self, _e=None) -> None:
+        self.app.config.abrir()
+
+    def tras_configurar(self) -> None:
+        """Gancho del shell: la configuración cambió (p. ej. la URL base)."""
+        self._pintar_url()
+        self._safe_update()
 
     # ------------------------------------------------ etiqueta individual
     async def _generar_individual(self, _e=None) -> None:
@@ -219,7 +267,7 @@ class SeccionGeneradorQR:
         if not destino:
             return
         ruta = destino if destino.lower().endswith(".png") else destino + ".png"
-        base = (self.tf_base.value or "").strip()
+        base = self._url_base()
 
         def escribir() -> None:
             with open(ruta, "wb") as fh:
@@ -228,7 +276,7 @@ class SeccionGeneradorQR:
         try:
             await asyncio.to_thread(escribir)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            self.app.avisar(f"No se pudo generar la etiqueta: {exc}", ROJO)
+            self.app.avisar(error_al_guardar(exc, ruta), ROJO, duracion=10000)
             return
         self.app.avisar(
             f"Etiqueta {etq} generada.", VERDE, accion="Abrir",
@@ -341,7 +389,7 @@ class SeccionGeneradorQR:
                 modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
-        base = (self.tf_base.value or "").strip()
+        base = self._url_base()
         # Sin sucursal fija (Todas): se agrupa además por sucursal
         # (raíz / Sucursal / Departamento). Con una sucursal elegida, solo por depto.
         por_sucursal = not self._sucursal_sel()
@@ -384,7 +432,7 @@ class SeccionGeneradorQR:
 
         self.progreso.visible = True
         self._safe_update()
-        base = (self.tf_base.value or "").strip()
+        base = self._url_base()
         # El PDF se genera con Chromium (Playwright), que en Windows necesita el
         # loop Proactor de BucleRpa para lanzar el subproceso del navegador.
         from core import qr
@@ -394,7 +442,7 @@ class SeccionGeneradorQR:
             n = await asyncio.wrap_future(
                 bucle.enviar(qr.generar_pdf_etiquetas(activos, ruta, base)))
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            self.app.avisar(f"No se pudo generar el PDF: {exc}", ROJO)
+            self.app.avisar(error_al_guardar(exc, ruta), ROJO, duracion=10000)
             return
         finally:
             bucle.cerrar()

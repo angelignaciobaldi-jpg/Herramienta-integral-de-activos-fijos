@@ -234,6 +234,22 @@ class AppActivosFijos:
 
         DialogoActualizarSipp(self, set_empresa=_fijar, al_terminar=_tras).abrir()
 
+    def notificar_configuracion(self) -> None:
+        """Avisa a las pantallas que la configuración cambió (gancho OPCIONAL
+        `tras_configurar`).
+
+        Se difunde a TODAS, no solo a la activa como en `_actualizar_sipp`: la
+        configuración es global y las demás pantallas están montadas —solo
+        ocultas—, así que mostrarían el valor viejo al volver a ellas."""
+        for pantalla in getattr(self, "_pantallas", []):
+            gancho = getattr(pantalla, "tras_configurar", None)
+            if not callable(gancho):
+                continue
+            try:
+                gancho()
+            except Exception:  # noqa: BLE001 — refrescar una vista no puede
+                pass          # tumbar un guardado que ya ocurrió
+
     def _construir_nav(self) -> ft.Control:
         self._nav_activa = 0
         self._nav_items: list[dict] = []

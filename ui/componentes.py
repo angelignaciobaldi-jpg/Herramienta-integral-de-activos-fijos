@@ -319,8 +319,23 @@ def campo_opciones(etiqueta: str | None, opciones: Iterable[str], *,
         # más angosto que su celda por mucho STRETCH que llevara el padre.
         # Solo aplica cuando no se pidió un ancho fijo.
         expanded_insets=ft.Padding.all(0) if width is None else None,
-        options=[ft.DropdownOption(key=o, text=o) for o in opciones],
-        on_select=on_change))
+        options=[ft.DropdownOption(key=o, text=o) for o in opciones]))
+
+    def _al_seleccionar(e) -> None:
+        """Fija el valor ANTES de avisar al llamador.
+
+        `on_select` puede dispararse antes de que el Dropdown actualice su
+        `value`, así que un manejador que lea `campo.value` obtiene el valor
+        ANTERIOR: la pantalla no reacciona hasta que se elige la opción por
+        segunda vez. El evento sí trae la clave elegida, y se aplica aquí para que
+        ningún llamador tenga que saberlo."""
+        dato = getattr(e, "data", None)
+        if dato and dato in {o.key for o in (campo.options or [])}:
+            campo.value = dato
+        if callable(on_change):
+            on_change(e)
+
+    campo.on_select = _al_seleccionar
     if etiqueta is None or flotante:
         return campo, campo
     bloque = _bloque_etiquetado(etiqueta, campo, width)
