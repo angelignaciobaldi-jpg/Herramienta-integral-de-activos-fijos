@@ -954,6 +954,8 @@ class SeccionRegistroActivos:
             nueva_serie = None
             n_push = 0
             no_empujables: list[str] = []
+            insumo_con_id = False
+            insumo_sin_catalogo = False
             for d in distintos:
                 c = d.campo
                 gana_excel = eleccion[c.clave] == "excel"
@@ -964,13 +966,26 @@ class SeccionRegistroActivos:
                     datos[c.clave_datos] = valor
                 if c.columna == "nombre_insumo":
                     nuevo_insumo = valor or None
+                    # El insumo no viaja como texto: el RPA lo elige por ID en el
+                    # modal de la edición. Aquí se deja fijado ese ID —el del
+                    # catálogo si ganó el Excel, el del portal si ganó el SIPP—
+                    # para que después no se empuje un insumo que nadie eligió.
+                    insumo_con_id = self._fijar_insumo_origen(
+                        datos, valor, reg, gana_excel)
                 elif c.columna == "no_serie":
                     nueva_serie = valor
                 elif c.columna:            # empresa / sucursal / departamento
                     cambios_col[c.columna] = valor
                 # ¿se enviará al SIPP? Solo lo empujable elegido como Excel.
                 if gana_excel:
-                    if c.empujable and c.ng_model:
+                    puede = bool(c.empujable and (c.ng_model or c.modal))
+                    # Insumo elegido del Excel pero sin equivalente EXACTO en el
+                    # catálogo: no se empuja. Mandar el parecido cambiaría el
+                    # activo por otro, que es peor que dejarlo como está.
+                    if puede and c.modal == "insumo" and not insumo_con_id:
+                        puede = False
+                        insumo_sin_catalogo = True
+                    if puede:
                         n_push += 1
                     else:
                         no_empujables.append(c.etiqueta)
@@ -990,10 +1005,27 @@ class SeccionRegistroActivos:
                 msg = "Levantamiento actualizado con los datos del SIPP."
             self.app.avisar(msg, VERDE, duracion=7000)
             if no_empujables:
+                # El empleado merece su propia explicación: no es que haya que
+                # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
+                # portal lo mueve a su flujo de Reasignación). Decir «se elige a
+                # mano allá» mandaba al usuario a buscar un botón que no existe.
+                # El empleado merece su propia explicación: no es que haya que
+                # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
+                # portal lo manda a su flujo de Reasignación). Decir «se elige a
+                # mano allá» mandaba al usuario a buscar un botón que no existe.
+                partes = []
+                if any("mpleado" in c for c in no_empujables):
+                    partes.append("El empleado de resguardo se cambia con "
+                                  "«Reasignación», no en la edición del activo.")
+                if insumo_sin_catalogo:
+                    partes.append("El insumo no está en el catálogo del SIPP con "
+                                  "ese nombre exacto: elígelo en la ficha del "
+                                  "activo (botón 📋) para poder enviarlo.")
+                detalle = " ".join(partes) or "Se eligen a mano en el portal."
                 self.app.avisar(
-                    "Estos campos no se envían automáticamente al SIPP (se eligen "
-                    f"a mano allá): {', '.join(no_empujables)}.", NARANJA,
-                    duracion=8000)
+                    f"Estos campos no se envían automáticamente al SIPP: "
+                    f"{', '.join(no_empujables)}. {detalle}", NARANJA,
+                    duracion=9000)
 
         modal.set_acciones([
             boton_secundario("Cancelar", on_click=lambda _e: modal.cerrar()),
@@ -2373,12 +2405,51 @@ class SeccionRegistroActivos:
             return ng_model + "_EDITAR"
         return ng_model
 
+    @staticmethod
+    def _fijar_insumo_origen(datos: dict, nombre: str, reg: "db.Levantamiento",
+                             gana_excel: bool) -> bool:
+        """Deja en `datos['id_InsumoOrigen']` el ID del insumo que debe quedar.
+        Devuelve si quedó un ID utilizable para empujar al SIPP.
+
+        Es lo que separa «el usuario eligió este insumo» de «el nombre se parece a
+        este»: el RPA solo cambia el insumo cuando hay un ID puesto aquí. Si ganó el
+        SIPP se copia el ID del portal —así el RPA no intenta corregir nada—; si
+        ganó el Excel se exige que el nombre resuelva a UN insumo EXACTO del
+        catálogo, porque empujar el parecido cambiaría el activo por otro.
+        """
+        if not gana_excel:
+            id_sipp = str((reg.info_sipp() or {}).get("id_insumo_origen") or "").strip()
+            if id_sipp:
+                datos["id_InsumoOrigen"] = id_sipp
+            else:
+                datos.pop("id_InsumoOrigen", None)
+            return False        # ganó el SIPP: no hay nada que empujar
+        from core.insumos import resolver
+        elegido, exacto = resolver((nombre or "").strip(),
+                                   ID_POR_EMPRESA.get((reg.empresa or "").strip()))
+        if elegido is not None and exacto:
+            datos["id_InsumoOrigen"] = str(elegido.id_insumo)
+            return True
+        datos.pop("id_InsumoOrigen", None)
+        return False
+
     def _payload_modificacion(self, r: "db.Levantamiento") -> tuple:
         """Igual que _payload_alta pero con los localizadores del formulario de
-        edición. (La modificación no cambia el insumo, así que su id no se usa.)"""
-        tipo, campos, detalles, _insumo_id, _empleado_id = self._payload_alta(r)
+        edición. Devuelve (tipo, campos, detalles, insumo_id).
+
+        El `insumo_id` va aparte porque no es un campo de texto: el RPA lo elige en
+        el modal «Buscar Insumo» de la edición.
+
+        Se toma SOLO de `id_InsumoOrigen`, que es un insumo ELEGIDO (en la ficha del
+        activo o al reconciliar), y no del nombre como hace el alta. La diferencia
+        importa: aquí ya hay un activo vivo en el portal, y resolver por nombre
+        cambiaría su insumo por el parecido en cada modificación, aunque el usuario
+        solo hubiera venido a corregir la ubicación. El empleado, en cambio, no se
+        puede cambiar ahí de ninguna forma."""
+        tipo, campos, detalles, _insumo_alta, _empleado_id = self._payload_alta(r)
         campos_edicion = [(self._a_ng_model_edicion(ng), v, c) for ng, v, c in campos]
-        return tipo, campos_edicion, detalles
+        insumo_id = (r.datos().get("id_InsumoOrigen") or "").strip()
+        return tipo, campos_edicion, detalles, insumo_id
 
     async def _refrescar_sipp_de(self, sipp: "SesionSipp", registros: list) -> list:
         """Vuelve a bajar del SIPP los activos de las empresas tocadas y REESCRIBE
@@ -2989,11 +3060,11 @@ class SeccionRegistroActivos:
                         "serie": r.no_serie or "", "ok": False, "observacion": "",
                         "cambios": [], "_empresa": r.empresa or "",
                         "_sucursal": r.sucursal or "", "_id": r.id}
-                _tipo, campos, detalles = self._payload_modificacion(r)
+                _tipo, campos, detalles, insumo_id = self._payload_modificacion(r)
                 try:
                     resultado = await sipp.modificar_activo(
                         r.etiqueta, r.no_serie, campos, detalles,
-                        punto_control=ctrl.punto_control)
+                        punto_control=ctrl.punto_control, insumo_id=insumo_id)
                     no_aplicados = resultado["no_aplicados"]
                     db.actualizar_datos_levantamiento(r.id, modificado=False)
                     fila["ok"] = True
