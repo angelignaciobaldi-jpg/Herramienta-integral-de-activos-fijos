@@ -18,8 +18,9 @@ resalta las diferencias y deja al usuario elegir, por campo, qué valor prevalec
   SIPP. Barato y sin riesgo.
 - **Excel → SIPP** (sobrescribir el SIPP): empuja el valor del Excel al catálogo
   vía el RPA de modificación (`SesionSipp.modificar_activo`). Solo aplica a los
-  campos con `ng_model`; insumo y empleado se eligen por modal en el SIPP, así que
-  no se empujan como texto (`empujable=False`).
+  campos con `ng_model`, más el INSUMO, que viaja por su modal (`modal="insumo"`).
+  El empleado NO se empuja (`empujable=False`) y no es lo mismo: la edición del
+  portal no permite cambiarlo (ver el comentario de `nb_Empleado` más abajo).
 
 Sin Flet ni navegador: la comparación trabaja sobre datos ya persistidos tras
 «Buscar en SIPP». Solo el empuje Excel → SIPP usa el RPA.
@@ -48,14 +49,20 @@ class CampoComparable:
     columna: str = ""       # atributo del registro ("" si no aplica)
     control: str = "text"   # text | number | date | select (normalización)
     ng_model: str = ""      # filtrosAgregar.* para empujar Excel→SIPP ("" = no)
-    empujable: bool = True  # False: se elige por modal/combo en el SIPP (no texto)
+    empujable: bool = True  # False: el portal no deja cambiarlo desde la edición
+    modal: str = ""         # se empuja por un MODAL, no escribiendo ("insumo")
 
 
 # Orden = orden en que se muestran. Mantiene paridad con core/tipos_activo.
 CAMPOS: list[CampoComparable] = [
+    # El insumo SÍ se empuja, pero por MODAL: su campo en la edición es `readonly`
+    # y lleva al lado el botón «Buscar Insumo». El RPA lo elige por ID exacto; si
+    # el nombre local no resuelve a un insumo exacto del catálogo, no se toca (más
+    # vale no cambiarlo que cambiarlo por el que no era). No confundir con el
+    # empleado, que la edición del portal no permite cambiar en absoluto.
     CampoComparable("nb_NombreInsumo", "Insumo", "insumo",
                     clave_datos="nb_NombreInsumo", columna="nombre_insumo",
-                    empujable=False),
+                    modal="insumo"),
     CampoComparable("empresa", "Empresa", "empresa", columna="empresa",
                     empujable=False),
     # La sucursal SÍ viaja al SIPP: el RPA la fija en el RESGUARDO del activo
@@ -79,16 +86,30 @@ CAMPOS: list[CampoComparable] = [
                     control="number", ng_model="filtrosAgregar.im_Costo"),
     CampoComparable("id_GrupoCentroCosto", "Grupo centro de costo",
                     "grupo_centro_costo", clave_datos="id_GrupoCentroCosto",
-                    control="select", ng_model="filtrosAgregar.id_GrupoCentroCosto"),
+                    control="select", ng_model="filtrosAgregar.id_GrupoCentroCostoResguardo"),
     CampoComparable("id_CentroCosto", "Centro de costo", "centro_costo",
                     clave_datos="id_CentroCosto", control="select",
-                    ng_model="filtrosAgregar.id_CentroCosto"),
+                    ng_model="filtrosAgregar.id_CentroCostoResguardo"),
     CampoComparable("id_Departamento", "Departamento", "departamento",
                     clave_datos="id_Departamento", columna="departamento",
-                    control="select", ng_model="filtrosAgregar.id_Departamento"),
+                    control="select", ng_model="filtrosAgregar.id_DepartamentoResguardo"),
     CampoComparable("de_Ubicacion", "Ubicación", "ubicacion",
                     clave_datos="de_Ubicacion",
                     ng_model="filtrosAgregar.de_Ubicacion"),
+    # No es una limitación del RPA: el formulario de EDICIÓN del portal no deja
+    # cambiar el empleado. Verificado en el DOM real (`Pagina de edicion de activo
+    # fijo.html`): `filtrosEditar.nb_Empleado` es `readonly`,
+    # `filtrosEditar.id_EmpleadoResguardo` lleva `ng-disabled="true"`, y de los seis
+    # botones «Buscar Empleado» del portal (`abrirModal('empleados', 2..7)`) ninguno
+    # pertenece a la edición —el más cercano, a 46 mil caracteres, es el del alta—.
+    #
+    # El SIPP trata el cambio de resguardo como un MOVIMIENTO aparte, no como una
+    # edición: lo resuelve con su flujo de REASIGNACIÓN (acción por fila del
+    # listado, `abrirModal('reasignacion', 0, row.entity)` -> `guardarReasignacion`),
+    # cuyo modal cubre empleado, empresa, sucursal, grupo/centro de costo,
+    # departamento y ubicación. Automatizarlo es viable —`seleccionar_empleado` ya
+    # opera ese buscador— pero es otro flujo, con sus propias consecuencias en el
+    # portal (de ahí salen las cartas responsivas). Ver docs/SIPP_Modulo_Activos_Fijos.md, B.5.
     CampoComparable("nb_Empleado", "Empleado resguardo", "empleado",
                     clave_datos="nb_Empleado", empujable=False),
     CampoComparable("FH_ADQUISICION", "Fecha de adquisición", "fecha_adquisicion",

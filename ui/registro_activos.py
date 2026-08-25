@@ -32,15 +32,25 @@ from core import archivos, comparacion_sipp, compras_sipp, credenciales, db, rut
 from core.empresas import ID_POR_EMPRESA
 from core.rpa_sipp import (BucleRpa, ControlRpa, ErrorSipp, RpaDetenido,
                            SesionSipp, mensaje_amigable, serie_para_alta)
-from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
+from core.tipos_activo import (ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo,
+                               faltantes_obligatorios, nombre_tipo)
 from ui.captura_activo import DialogoCapturaActivo
 from ui.carga_masiva import DialogoCargaMasiva
-from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
-from ui.componentes import (GUTTER_SCROLL, Modal, Pestanas, boton_herramienta,
-                            boton_primario, boton_secundario, buscador,
+from ui.comun import (GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE,
+                      error_al_guardar, parse_fecha)
+from ui.componentes import (GUTTER_SCROLL, CampoFecha, Modal, Pestanas,
+                            boton_herramienta, boton_primario,
+                            boton_secundario, buscador,
                             campo_opciones, campo_tabla_opciones,
                             campo_tabla_texto, campo_texto, tarjeta_seccion)
-from ui.tabla_responsiva import ColumnaTabla, FilaDatos, TablaResponsiva
+from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
+                                 TablaResponsiva)
+
+# Lado (px) de cada botón de acción de la tabla. Es el área táctil que Material
+# reserva para un IconButton: fijarle un `width` menor NO lo encoge —el widget
+# conserva su tamaño y se desborda—, así que la columna se dimensiona con este
+# valor real. Fija el ancho mínimo de «Acciones», que debe caber las 6 posibles.
+_LADO_ACCION = 40
 
 # Extensiones de imagen aceptadas para el levantamiento (sin PDF: son fotos).
 IMG_EXT = ["png", "jpg", "jpeg", "tif", "tiff", "bmp"]
@@ -77,18 +87,6 @@ _TAB_TODOS = "todos"
 # bajos a propósito: cada fila lleva controles editables (el combo de Empresa
 # solo tiene ~58 opciones) y todo eso viaja al cliente en cada repintado.
 _POR_PAGINA = [25, 50, 100]
-
-
-def parsear_nombre(nombre_archivo: str) -> tuple[str, str]:
-    """Separa 'NombreInsumo_NoSerie.ext' en (nombre_insumo, no_serie).
-
-    La serie es lo que va DESPUÉS del último '_' (sin la extensión). Si no hay '_',
-    todo es el nombre del insumo y la serie queda vacía."""
-    base = os.path.splitext(os.path.basename(nombre_archivo))[0]
-    if "_" in base:
-        nombre, serie = base.rsplit("_", 1)
-        return nombre.strip(), serie.strip()
-    return base.strip(), ""
 
 
 def _fecha_corta(sello: str) -> str:
@@ -276,14 +274,22 @@ class SeccionRegistroActivos:
         self._chk_general = ft.Checkbox(value=False, on_change=self._on_chk_general)
         columnas = [
             ColumnaTabla("", 4, encabezado_control=self._chk_general, ancho_min_px=40),
-            ColumnaTabla("Empresa", 13, ancho_min_px=155),
-            ColumnaTabla("Sucursal", 13, ancho_min_px=155),
+            ColumnaTabla("Empresa", 12, ancho_min_px=155),
+            ColumnaTabla("Sucursal", 12, ancho_min_px=155),
             ColumnaTabla("Departamento", 13, ancho_min_px=155),
             ColumnaTabla("Nombre insumo", 17, ancho_min_px=140),
             ColumnaTabla("Etiqueta", 10, ancho_min_px=100),
             ColumnaTabla("No. de serie", 10, ancho_min_px=100),
             ColumnaTabla("Estatus", 9, ancho_min_px=95),
-            ColumnaTabla("Acciones", 11, ancho_min_px=145),
+            # 6 acciones x _LADO_ACCION + holgura: es el MÁXIMO que puede tener
+            # una fila (dada de alta y con serie válida), no el caso promedio.
+            # `alineacion=IZQ`: las acciones arrancan pegadas al borde izquierdo y
+            # crecen hacia la derecha, así todas las filas comparten el punto de
+            # partida aunque tengan distinto número de botones. La alineación de la
+            # Row interna NO sirve para esto: al ser `tight` se encoge a su
+            # contenido y manda el contenedor de la celda.
+            ColumnaTabla("Acciones", 13, ancho_min_px=6 * _LADO_ACCION + 8,
+                         alineacion=IZQ),
         ]
         self.tabla = TablaResponsiva(self.page, columnas)
         # SIN scroll ni expand: la tabla se pinta a su alto natural (el de todas
@@ -580,8 +586,19 @@ class SeccionRegistroActivos:
                 icon_color=ft.Colors.ERROR,
                 on_click=lambda _e, i=r.id: self._eliminar_uno(i)),
         ]
+        # Tamaño uniforme y explícito: con las 6 acciones posibles (info,
+        # comparar, factura, captura, imagen, eliminar) la fila mide
+        # 6 x _LADO_ACCION, que es justo lo que reserva la columna. Antes la
+        # columna era más angosta y recortaba en silencio los últimos botones.
+        for boton in controles_accion:
+            boton.width = boton.height = _LADO_ACCION
+        # Alineadas a la IZQUIERDA, no centradas: cada fila tiene un número
+        # distinto de acciones (la de factura y las del SIPP son condicionales) y
+        # al centrarlas cada renglón arrancaba en otra posición, con los íconos
+        # bailando en zigzag al recorrer la tabla.
         acciones = ft.Row(controles_accion, spacing=0,
-                          alignment=ft.MainAxisAlignment.CENTER, tight=True)
+                          alignment=ft.MainAxisAlignment.START, tight=True,
+                          wrap=False)
         return FilaDatos([
             chk,
             emp,
@@ -937,6 +954,8 @@ class SeccionRegistroActivos:
             nueva_serie = None
             n_push = 0
             no_empujables: list[str] = []
+            insumo_con_id = False
+            insumo_sin_catalogo = False
             for d in distintos:
                 c = d.campo
                 gana_excel = eleccion[c.clave] == "excel"
@@ -947,13 +966,26 @@ class SeccionRegistroActivos:
                     datos[c.clave_datos] = valor
                 if c.columna == "nombre_insumo":
                     nuevo_insumo = valor or None
+                    # El insumo no viaja como texto: el RPA lo elige por ID en el
+                    # modal de la edición. Aquí se deja fijado ese ID —el del
+                    # catálogo si ganó el Excel, el del portal si ganó el SIPP—
+                    # para que después no se empuje un insumo que nadie eligió.
+                    insumo_con_id = self._fijar_insumo_origen(
+                        datos, valor, reg, gana_excel)
                 elif c.columna == "no_serie":
                     nueva_serie = valor
                 elif c.columna:            # empresa / sucursal / departamento
                     cambios_col[c.columna] = valor
                 # ¿se enviará al SIPP? Solo lo empujable elegido como Excel.
                 if gana_excel:
-                    if c.empujable and c.ng_model:
+                    puede = bool(c.empujable and (c.ng_model or c.modal))
+                    # Insumo elegido del Excel pero sin equivalente EXACTO en el
+                    # catálogo: no se empuja. Mandar el parecido cambiaría el
+                    # activo por otro, que es peor que dejarlo como está.
+                    if puede and c.modal == "insumo" and not insumo_con_id:
+                        puede = False
+                        insumo_sin_catalogo = True
+                    if puede:
                         n_push += 1
                     else:
                         no_empujables.append(c.etiqueta)
@@ -973,10 +1005,27 @@ class SeccionRegistroActivos:
                 msg = "Levantamiento actualizado con los datos del SIPP."
             self.app.avisar(msg, VERDE, duracion=7000)
             if no_empujables:
+                # El empleado merece su propia explicación: no es que haya que
+                # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
+                # portal lo mueve a su flujo de Reasignación). Decir «se elige a
+                # mano allá» mandaba al usuario a buscar un botón que no existe.
+                # El empleado merece su propia explicación: no es que haya que
+                # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
+                # portal lo manda a su flujo de Reasignación). Decir «se elige a
+                # mano allá» mandaba al usuario a buscar un botón que no existe.
+                partes = []
+                if any("mpleado" in c for c in no_empujables):
+                    partes.append("El empleado de resguardo se cambia con "
+                                  "«Reasignación», no en la edición del activo.")
+                if insumo_sin_catalogo:
+                    partes.append("El insumo no está en el catálogo del SIPP con "
+                                  "ese nombre exacto: elígelo en la ficha del "
+                                  "activo (botón 📋) para poder enviarlo.")
+                detalle = " ".join(partes) or "Se eligen a mano en el portal."
                 self.app.avisar(
-                    "Estos campos no se envían automáticamente al SIPP (se eligen "
-                    f"a mano allá): {', '.join(no_empujables)}.", NARANJA,
-                    duracion=8000)
+                    f"Estos campos no se envían automáticamente al SIPP: "
+                    f"{', '.join(no_empujables)}. {detalle}", NARANJA,
+                    duracion=9000)
 
         modal.set_acciones([
             boton_secundario("Cancelar", on_click=lambda _e: modal.cerrar()),
@@ -1104,43 +1153,73 @@ class SeccionRegistroActivos:
             _opcion(ft.Icons.TABLE_VIEW, "Carga masiva con Excel",
                     "Plantilla de Excel con los datos del alta (empresa/sucursal en "
                     "las columnas).", _ir_excel),
+            _opcion(ft.Icons.ADD_PHOTO_ALTERNATE, "Relacionar imágenes con activos",
+                    "Para activos ya cargados (p. ej. por Excel): empareja las fotos "
+                    "por etiqueta, serie o nombre del archivo.",
+                    lambda _e: self.page.run_task(self._relacionar_imagenes, modal)),
         ]
         modal.set_acciones([boton_herramienta(
             "Cancelar", on_click=lambda _e: modal.cerrar())])
         modal.abrir()
 
     def _pedir_contexto(self, modal, metodo: str) -> None:
-        """Para carpeta/ZIP: pide empresa y sucursal antes de procesar."""
-        _, dd_emp = campo_opciones("Empresa", list(NOMBRES_EMPRESAS), flotante=True)
-        bloque_suc, dd_suc = campo_opciones("Sucursal", [], flotante=True)
+        """Para carpeta/ZIP: pide empresa, sucursal y departamento antes de procesar.
 
-        def _recargar_suc(_e=None):
+        Los tres se aplican a TODAS las imágenes de esa carga: el nombre del archivo
+        solo trae insumo y etiqueta, así que la ubicación se fija aquí una vez en
+        lugar de fila por fila."""
+        _, dd_suc = campo_opciones("Sucursal", [], flotante=True)
+        _, dd_dep = campo_opciones("Departamento", [], flotante=True)
+        aviso = ft.Text("", size=11, color=NARANJA, no_wrap=False, visible=False)
+
+        def _recargar_dependientes(_e=None):
+            """Sucursal y departamento salen del catálogo de la empresa elegida."""
             idemp = ID_POR_EMPRESA.get(dd_emp.value or "")
             sucs = db.listar_sucursales_sipp(idemp) if idemp is not None else []
-            dd_suc.options = [ft.DropdownOption(key=s, text=s) for s in sucs]
+            deps = db.listar_departamentos(idemp) if idemp is not None else []
+            dd_suc.options = [ft.DropdownOption(key=x, text=x) for x in sucs]
+            dd_dep.options = [ft.DropdownOption(key=x, text=x) for x in deps]
+            # Lo elegido antes puede no existir en la empresa nueva.
+            dd_suc.value = None
+            dd_dep.value = None
+            faltan = [t for t, n in (("sucursales", len(sucs)),
+                                     ("departamentos", len(deps))) if not n]
+            aviso.value = (
+                f"Esta empresa no tiene {' ni '.join(faltan)} en la caché. "
+                "Descárgalos con «Actualizar SIPP» (arriba) y vuelve a abrir esta "
+                "ventana." if faltan else "")
+            aviso.visible = bool(faltan)
             modal.refrescar()
-        dd_emp.on_change = _recargar_suc
+
+        # Se engancha por el parámetro del componente (no asignando el evento a
+        # mano): `campo_opciones` traduce `on_change` al `on_select` real del
+        # Dropdown y, de paso, fija el valor antes de llamar al manejador.
+        _, dd_emp = campo_opciones("Empresa", list(NOMBRES_EMPRESAS), flotante=True,
+                                   on_change=_recargar_dependientes)
 
         modal.cuerpo.controls = [
-            ft.Text("¿A qué empresa y sucursal corresponde "
+            ft.Text("¿A qué empresa, sucursal y departamento corresponde "
                     + ("la carpeta?" if metodo == "carpeta" else "el ZIP?"),
                     size=13, weight=ft.FontWeight.W_600),
-            dd_emp, dd_suc,
-            ft.Text("La sucursal ofrece las cacheadas del SIPP; si no aparece, usa "
-                    "«Actualizar información del SIPP» o escríbela.", size=11, color=GRIS),
+            dd_emp, dd_suc, dd_dep, aviso,
+            ft.Text("Sucursal y departamento salen del catálogo del SIPP de la "
+                    "empresa elegida. Se aplican a todas las imágenes de esta carga "
+                    "(después se pueden cambiar fila por fila).",
+                    size=11, color=GRIS),
         ]
 
         async def _continuar(_e=None):
             empresa = (dd_emp.value or "").strip()
             sucursal = (dd_suc.value or "").strip()
+            departamento = (dd_dep.value or "").strip()
             if not empresa:
                 self.app.avisar("Elige una empresa.", NARANJA)
                 return
             modal.cerrar()
             if metodo == "carpeta":
-                await self._subir_carpeta(empresa, sucursal)
+                await self._subir_carpeta(empresa, sucursal, departamento)
             else:
-                await self._subir_zip(empresa, sucursal)
+                await self._subir_zip(empresa, sucursal, departamento)
 
         modal.set_acciones([
             boton_herramienta("Cancelar", on_click=lambda _e: modal.cerrar()),
@@ -1148,7 +1227,8 @@ class SeccionRegistroActivos:
         ])
         modal.refrescar()
 
-    async def _subir_carpeta(self, empresa: str = "", sucursal: str = "") -> None:
+    async def _subir_carpeta(self, empresa: str = "", sucursal: str = "",
+                             departamento: str = "") -> None:
         """Carga una carpeta de imágenes, incluyendo sus SUBCARPETAS (los
         levantamientos suelen venir organizados por área)."""
         carpeta = await self.app.picker.get_directory_path(
@@ -1163,9 +1243,10 @@ class SeccionRegistroActivos:
         if not entradas:
             self.app.avisar("La carpeta no contiene imágenes compatibles.", NARANJA)
             return
-        self._registrar_imagenes(entradas, empresa, sucursal)
+        await self._registrar_imagenes(entradas, empresa, sucursal, departamento)
 
-    async def _subir_zip(self, empresa: str = "", sucursal: str = "") -> None:
+    async def _subir_zip(self, empresa: str = "", sucursal: str = "",
+                         departamento: str = "") -> None:
         """Carga un levantamiento comprimido (.zip): lo extrae y sigue el proceso
         normal. Las imágenes se guardan en la carpeta de datos de la app para que
         se puedan seguir abriendo desde la tabla."""
@@ -1190,31 +1271,405 @@ class SeccionRegistroActivos:
         if not extraidas:
             self.app.avisar("El ZIP no contiene imágenes compatibles.", NARANJA)
             return
-        self._registrar_imagenes(archivos.listar_imagenes(carpeta), empresa, sucursal)
+        await self._registrar_imagenes(
+            archivos.listar_imagenes(carpeta), empresa, sucursal, departamento)
 
-    def _registrar_imagenes(self, entradas: list[tuple[str, str]], empresa: str = "",
-                            sucursal: str = "", departamento: str = "") -> None:
-        """Da de alta un registro por imagen (parseando su nombre) etiquetándolo con
-        la empresa/sucursal indicadas en el modal. Cuenta cuántas se agregaron y
-        cuántas se omitieron por estar repetidas (misma serie+insumo)."""
-        agregadas, omitidas = 0, 0
-        for nombre, ruta in entradas:
-            nombre_insumo, no_serie = parsear_nombre(nombre)
-            if not nombre_insumo:
+    async def _relacionar_imagenes(self, modal_origen=None) -> None:
+        """Empareja imágenes de una carpeta con activos YA cargados.
+
+        Pensado para la carga por Excel, que crea los registros sin foto: aquí se
+        suben las del levantamiento y se asignan por lo que dice el nombre del
+        archivo (etiqueta, serie o insumo). Lo que no se pueda emparejar solo, lo
+        resuelve el usuario a mano."""
+        if modal_origen is not None:
+            modal_origen.cerrar()
+        carpeta = await self.app.picker.get_directory_path(
+            dialog_title="Carpeta con las imágenes de los activos")
+        if not carpeta:
+            return
+        try:
+            entradas = archivos.listar_imagenes(carpeta)
+        except OSError as exc:
+            self.app.avisar(f"No se pudo leer la carpeta: {exc}", ROJO)
+            return
+        if not entradas:
+            self.app.avisar("La carpeta no contiene imágenes compatibles.", NARANJA)
+            return
+
+        # Solo los que NO tienen foto: relacionar no debe pisar una ya asignada.
+        disponibles = [r for r in db.listar_levantamiento()
+                       if not (r.ruta_imagen or "").strip()]
+        if not disponibles:
+            self.app.avisar("Todos los activos del levantamiento ya tienen imagen.",
+                            NARANJA, duracion=7000)
+            return
+
+        pares = archivos.emparejar_imagenes(entradas, disponibles)
+        await self._modal_relacion(pares, disponibles)
+
+    async def _modal_relacion(self, pares: list, disponibles: list) -> None:
+        """Muestra el emparejamiento en tres pestañas y deja resolver lo suelto.
+
+        La separación no es decorativa: cada grupo pide una acción distinta.
+        «Emparejados» solo se revisa, «Posibles coincidencias» se confirma con un
+        clic y «Sin coincidencia» exige buscar el activo. Mezclados en una sola
+        lista, lo que necesita atención se pierde entre lo que ya está resuelto.
+        """
+        from ui.componentes import Pestanas
+
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+        por_id = {r.id: r for r in disponibles}
+        manuales: dict = {}      # archivo -> id_registro elegido a mano
+        textos: dict = {}        # archivo -> ft.Text con la relación
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        def _describir(rid: int) -> str:
+            r = por_id.get(rid)
+            if r is None:
+                return ""
+            partes = [r.nombre_insumo or ""]
+            if r.etiqueta:
+                partes.append(f"etiqueta {r.etiqueta}")
+            if r.no_serie:
+                partes.append(f"serie {r.no_serie}")
+            return "  ·  ".join(p for p in partes if p)
+
+        def _asignados() -> list:
+            """[(id_registro, ruta)] de todo lo relacionado (automático + manual)."""
+            items = [(p.id_registro, p.ruta) for p in pares if p.emparejado]
+            items += [(rid, next(p.ruta for p in pares if p.archivo == arch))
+                      for arch, rid in manuales.items()]
+            return items
+
+        def _refrescar_boton() -> None:
+            btn.content = f"Relacionar ({len(_asignados())})"
+
+        def elegir_para(par):
+            async def _abrir(_e=None) -> None:
+                usados = {p.id_registro for p in pares if p.emparejado}
+                usados |= set(manuales.values())
+                rid = await self._elegir_activo_para(
+                    par.archivo, [r for r in disponibles if r.id not in usados])
+                if rid is None:
+                    return
+                manuales[par.archivo] = rid
+                textos[par.archivo].value = f"Se relacionará con {_describir(rid)}"
+                textos[par.archivo].color = VERDE
+                # Si la fila tiene casilla, queda marcada: el estado visible no
+                # puede contradecir lo que se va a guardar.
+                if par.archivo in casillas:
+                    casillas[par.archivo].value = True
+                _refrescar_boton()
+                modal.refrescar()
+            return lambda _e: self.page.run_task(_abrir)
+
+        casillas: dict = {}      # archivo -> ft.Checkbox (solo las candidatas)
+
+        def _marcar(par, rid: int):
+            """Casilla de «Posibles coincidencias»: al marcar una, se desmarcan las
+            demás del grupo. Un activo solo puede quedarse con UNA foto, así que se
+            comporta como opción única aunque el control sea una casilla (que es lo
+            que la gente espera para elegir de una lista)."""
+            def _cambiar(_e=None) -> None:
+                if casillas[par.archivo].value:
+                    manuales[par.archivo] = rid
+                    textos[par.archivo].value = f"Se relacionará con {_describir(rid)}"
+                    textos[par.archivo].color = VERDE
+                    for otro in pares:
+                        if otro is par or otro.candidato_de != rid:
+                            continue
+                        manuales.pop(otro.archivo, None)
+                        if otro.archivo in casillas:
+                            casillas[otro.archivo].value = False
+                        if otro.archivo in textos:
+                            textos[otro.archivo].value = "Sin relacionar"
+                            textos[otro.archivo].color = NARANJA
+                else:
+                    manuales.pop(par.archivo, None)
+                    textos[par.archivo].value = "Sin relacionar"
+                    textos[par.archivo].color = NARANJA
+                _refrescar_boton()
+                modal.refrescar()
+            return _cambiar
+
+        def _fila(par, con_atajo: bool) -> ft.Control:
+            """Renglón de una imagen pendiente, con sus acciones."""
+            txt = ft.Text("Sin relacionar", size=11, color=NARANJA, no_wrap=False)
+            textos[par.archivo] = txt
+            izquierda = [ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=NARANJA)]
+            if con_atajo and par.candidato_de is not None:
+                chk = ft.Checkbox(value=False)
+                chk.on_change = _marcar(par, par.candidato_de)
+                casillas[par.archivo] = chk
+                izquierda = [chk]
+            return ft.Row(
+                izquierda
+                + [ft.Column([ft.Text(par.archivo, size=12, no_wrap=False,
+                                      color=ft.Colors.ON_SURFACE), txt],
+                             spacing=0, tight=True, expand=True),
+                   boton_secundario("Elegir activo", ft.Icons.SEARCH,
+                                    elegir_para(par))],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        emparejados = [p for p in pares if p.emparejado]
+        posibles = [p for p in pares if not p.emparejado and p.candidato_de is not None]
+        sueltas = [p for p in pares if not p.emparejado and p.candidato_de is None]
+
+        # --- Pestaña 1: ya relacionadas -----------------------------------
+        lista_ok = ft.ListView(spacing=6, expand=True)
+        for p in emparejados:
+            lista_ok.controls.append(ft.Row(
+                [ft.Icon(ft.Icons.CHECK_CIRCLE, size=16, color=VERDE),
+                 ft.Column([ft.Text(p.archivo, size=12, no_wrap=False,
+                                    color=ft.Colors.ON_SURFACE),
+                            ft.Text(f"{_describir(p.id_registro)}  ({p.motivo})",
+                                    size=11, color=GRIS, no_wrap=False)],
+                           spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+        if not emparejados:
+            lista_ok.controls.append(ft.Container(
+                ft.Text("Ninguna imagen se pudo relacionar sola.", size=12, color=GRIS),
+                padding=12))
+
+        # --- Pestaña 2: varias fotos compiten por el mismo activo ---------
+        lista_posibles = ft.ListView(spacing=6, expand=True)
+        grupo = object()
+        for p in sorted(posibles, key=lambda x: (x.candidato_de or 0, x.archivo)):
+            if p.candidato_de != grupo:
+                grupo = p.candidato_de
+                cuantas = sum(1 for x in posibles if x.candidato_de == grupo)
+                # El nombre del activo va en el color primario y en negrita: es
+                # el dato que hay que leer para decidir, y en un bloque todo del
+                # mismo color se perdía entre el resto de la frase.
+                lista_posibles.controls.append(ft.Container(
+                    ft.Text(spans=[
+                        ft.TextSpan(f"{cuantas} imágenes podrían ser de ",
+                                    ft.TextStyle(size=12,
+                                                 color=ft.Colors.ON_SURFACE)),
+                        ft.TextSpan(_describir(grupo),
+                                    ft.TextStyle(size=13,
+                                                 weight=ft.FontWeight.BOLD,
+                                                 color=ft.Colors.PRIMARY)),
+                        ft.TextSpan(".  Marca cuál es la correcta:",
+                                    ft.TextStyle(size=12,
+                                                 color=ft.Colors.ON_SURFACE)),
+                    ], no_wrap=False),
+                    padding=ft.Padding.only(top=10, bottom=2)))
+            lista_posibles.controls.append(_fila(p, con_atajo=True))
+        if not posibles:
+            lista_posibles.controls.append(ft.Container(
+                ft.Text("Sin ambigüedades: ninguna imagen compite por el mismo activo.",
+                        size=12, color=GRIS), padding=12))
+
+        # --- Pestaña 3: hay que buscarlas a mano --------------------------
+        lista_manual = ft.ListView(spacing=6, expand=True)
+        for p in sueltas:
+            lista_manual.controls.append(_fila(p, con_atajo=False))
+        if not sueltas:
+            lista_manual.controls.append(ft.Container(
+                ft.Text("Todas las imágenes tienen al menos un candidato.", size=12,
+                        color=GRIS), padding=12))
+
+        paneles = {"ok": lista_ok, "posibles": lista_posibles, "manual": lista_manual}
+        for clave, panel in paneles.items():
+            panel.visible = clave == "ok"
+
+        def cambiar(clave: str) -> None:
+            for c, panel in paneles.items():
+                panel.visible = c == clave
+            modal.refrescar()
+
+        tabs = Pestanas(
+            [("ok", "Emparejados", ft.Icons.CHECK_CIRCLE),
+             ("posibles", "Posibles coincidencias", ft.Icons.HELP_OUTLINE),
+             ("manual", "Sin coincidencia", ft.Icons.SEARCH)],
+            al_cambiar=cambiar)
+        tabs.set_conteo("ok", len(emparejados))
+        tabs.set_conteo("posibles", len(posibles))
+        tabs.set_conteo("manual", len(sueltas))
+
+        btn = boton_primario(f"Relacionar ({len(emparejados)})", ft.Icons.LINK,
+                             lambda _e: responder(_asignados()))
+        modal = Modal(self.page, "Relacionar imágenes con activos", ancho=800,
+                      subtitulo=f"{len(pares)} imagen(es)",
+                      al_cerrar=lambda: responder(None))
+        modal.cuerpo.controls = [
+            ft.Text("Se empareja por lo que dice el nombre del archivo: primero la "
+                    "etiqueta, luego la serie y, si no, el nombre del insumo.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Row([tabs.control]),
+            ft.Container(ft.Column(list(paneles.values()), expand=True), height=320)]
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder(None)), btn])
+        modal.abrir()
+
+        asignados = await decision
+        if not asignados:
+            return
+        for rid, ruta in asignados:
+            db.fijar_imagen_levantamiento(rid, ruta)
+        self._refrescar()
+        self.app.avisar(f"{len(asignados)} imagen(es) relacionada(s) con su activo.",
+                        VERDE, duracion=7000)
+
+    async def _elegir_activo_para(self, archivo: str, candidatos: list):
+        """Selector con buscador para asignar `archivo` a un activo. Devuelve su id."""
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = lista_resultados()
+
+        def pintar(filtro: str = "") -> None:
+            f = (filtro or "").strip().casefold()
+            vistos = [r for r in candidatos
+                      if not f or f in " ".join(
+                          (r.nombre_insumo or "", r.etiqueta or "",
+                           r.no_serie or "")).casefold()]
+            lista.controls = [
+                fila_resultado(
+                    r.etiqueta or "—", r.nombre_insumo or "(sin insumo)",
+                    " · ".join(p for p in (
+                        f"serie {r.no_serie}" if r.no_serie else "",
+                        r.empresa or "", r.sucursal or "") if p),
+                    on_click=lambda _e, rid=r.id: responder(rid))
+                for r in vistos[:100]]
+            if not vistos:
+                lista.controls = [ft.Container(
+                    ft.Text("Sin coincidencias.", size=12, color=GRIS), padding=12)]
+            modal.refrescar()
+
+        tf = buscador("Buscar por insumo, etiqueta o serie…", expand=True,
+                      autofocus=True)
+        tf.on_change = lambda e: pintar(e.control.value)
+        modal = Modal(self.page, "¿A qué activo corresponde?", ancho=680,
+                      subtitulo=archivo, al_cerrar=lambda: responder(None))
+        modal.cuerpo.controls = [tf, lista]
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder(None))])
+        pintar()
+        modal.abrir()
+        return await decision
+
+    async def _registrar_imagenes(self, entradas: list[tuple[str, str]],
+                                 empresa: str = "", sucursal: str = "",
+                                 departamento: str = "") -> None:
+        """Da de alta un registro por imagen, deduciendo insumo y ETIQUETA de su
+        nombre (ver core.archivos.parsear_nombre).
+
+        Si un archivo termina en un número que NO tiene largo de etiqueta se
+        pregunta antes de registrar: casi siempre es el número de serie, pero el
+        nombre por sí solo no lo distingue, y meterlo como etiqueta arruinaría la
+        búsqueda en el SIPP."""
+        leidas = [(nombre, ruta, archivos.parsear_nombre(nombre))
+                  for nombre, ruta in entradas]
+        ambiguos = [(nombre, datos) for nombre, _r, datos in leidas
+                    if datos.necesita_confirmar]
+        es_serie = {}
+        if ambiguos:
+            es_serie = await self._confirmar_numeros_ambiguos(ambiguos)
+            if es_serie is None:
+                return                      # el usuario canceló la carga
+
+        agregadas, omitidas, con_etiqueta, con_serie = 0, 0, 0, 0
+        for nombre, ruta, datos in leidas:
+            insumo, etiqueta, serie = datos.insumo, datos.etiqueta, datos.serie
+            if datos.necesita_confirmar:
+                if es_serie.get(nombre):
+                    serie = datos.numero_ambiguo
+                else:
+                    # No era serie: el número es parte del nombre, así que se
+                    # restaura el original en vez de perderlo al cortar.
+                    insumo = datos.base
+            if not insumo:
                 omitidas += 1
                 continue
             nuevo = db.guardar_levantamiento(
-                nombre_insumo, no_serie, ruta,
-                empresa=empresa, sucursal=sucursal, departamento=departamento)
+                insumo, serie, ruta, empresa=empresa, sucursal=sucursal,
+                departamento=departamento, etiqueta=etiqueta)
             if nuevo is None:
                 omitidas += 1
             else:
                 agregadas += 1
+                con_etiqueta += bool(etiqueta)
+                con_serie += bool(serie)
         self._refrescar()
-        msg = f"{agregadas} imagen(es) agregada(s)."
+        msg = f"{agregadas} imagen(es) agregada(s)"
+        detalle = []
+        if con_etiqueta:
+            detalle.append(f"{con_etiqueta} con etiqueta")
+        if con_serie:
+            detalle.append(f"{con_serie} con serie")
+        if detalle:
+            msg += " (" + ", ".join(detalle) + ")"
+        msg += "."
         if omitidas:
             msg += f" {omitidas} omitida(s) (repetidas o sin nombre válido)."
-        self.app.avisar(msg, VERDE if agregadas else NARANJA)
+        self.app.avisar(msg, VERDE if agregadas else NARANJA, duracion=8000)
+
+    async def _confirmar_numeros_ambiguos(self, ambiguos: list):
+        """Pregunta, archivo por archivo, si el número final es el No. de serie.
+
+        Devuelve {nombre_archivo: es_serie} o None si se cancela. Vienen marcados
+        que SÍ porque es lo habitual: la convención anterior de nombres era
+        INSUMO_SERIE, así que los levantamientos viejos caen todos aquí."""
+        decision = asyncio.get_running_loop().create_future()
+        checks = {}
+
+        def responder(valor) -> None:
+            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
+            # que vuelve a entrar aquí. Sin esto se recursan mutuamente hasta
+            # reventar (RecursionError con solo cerrar el diálogo).
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=4, expand=True)
+        for nombre, datos in ambiguos:
+            chk = ft.Checkbox(value=True)
+            checks[nombre] = chk
+            lista.controls.append(ft.Row(
+                [chk,
+                 ft.Column(
+                     [ft.Text(nombre, size=12, color=ft.Colors.ON_SURFACE,
+                              no_wrap=False),
+                      ft.Text(f"insumo: «{datos.insumo}» · número: "
+                              f"{datos.numero_ambiguo} "
+                              f"({len(datos.numero_ambiguo)} dígitos)",
+                              size=11, color=GRIS, no_wrap=False)],
+                     spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER))
+
+        largos = ", ".join(str(n) for n in archivos.LARGOS_ETIQUETA)
+        modal = Modal(self.page, "¿Estos números son el No. de serie?", ancho=640,
+                      subtitulo=f"{len(ambiguos)} archivo(s)",
+                      al_cerrar=lambda: responder(None))
+        modal.cuerpo.controls = [
+            ft.Text(f"Una etiqueta del SIPP tiene {largos} dígitos. Estos archivos "
+                    "terminan en un número de otro largo, así que no se tomó como "
+                    "etiqueta.", size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Text("Marcado = se guarda como No. de serie. Sin marcar = el número "
+                    "es parte del nombre del insumo.", size=11, color=GRIS,
+                    no_wrap=False),
+            ft.Container(lista, height=300)]
+        modal.set_acciones([
+            boton_herramienta("Cancelar carga", on_click=lambda _e: responder(None)),
+            boton_primario(
+                "Continuar", ft.Icons.CHECK,
+                lambda _e: responder({n: c.value for n, c in checks.items()})),
+        ])
+        modal.abrir()
+        return await decision
 
     # ------------------------------------------------------ búsqueda en SIPP
     async def _buscar(self, _e=None) -> None:
@@ -1340,14 +1795,42 @@ class SeccionRegistroActivos:
                     serie_sipp = str(datos_sipp.get("serie") or "").strip()
                     serie_nueva = (serie_sipp if serie_sipp
                                    and not (r.no_serie or "").strip() else None)
+                    # Si se adopta la serie del SIPP, el nombre no debe seguir
+                    # arrastrándola pegada al final.
+                    limpio = (archivos.nombre_sin_serie(
+                        r.nombre_insumo, serie_nueva, r.etiqueta or "")
+                        if serie_nueva else None)
+                    if limpio == r.nombre_insumo:
+                        limpio = None
                     if id_tipo_nuevo is not None or prefill or serie_nueva:
                         db.actualizar_datos_levantamiento(
                             r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill,
-                            no_serie=serie_nueva)
+                            no_serie=serie_nueva, nombre_insumo=limpio)
                 hechos += 1
         return hechos, sin_cache
 
     # ------------------------------------------------ RPA: alta en el SIPP
+    @staticmethod
+    def _imagenes_para_alta(r: "db.Levantamiento") -> list:
+        """Fotos que el RPA sube al dar de alta (el SIPP admite hasta 3).
+
+        Salen de `imagenes_insumo` —lo adjuntado en la ficha— y, si ahí no hay,
+        de la FOTO del levantamiento: es la imagen con la que se creó el registro
+        (o la que se le relacionó después), y se espera que suba aunque nadie haya
+        abierto la ficha. Sin este respaldo, un alta hecha directo desde la tabla
+        llegaba al portal sin fotografía.
+
+        Se descartan las rutas que ya no existen: subir un archivo borrado aborta
+        el alta entera en el portal.
+        """
+        datos = r.datos()
+        imagenes = [p for p in (datos.get("imagenes_insumo") or [])
+                    if p and os.path.exists(p)]
+        if imagenes:
+            return imagenes[:3]
+        ruta = (r.ruta_imagen or "").strip()
+        return [ruta] if ruta and os.path.exists(ruta) else []
+
     def _payload_alta(self, r: "db.Levantamiento") -> tuple:
         """Traduce lo capturado en el formulario dinámico a lo que espera el RPA:
         (tipo, [(ng_model, valor, control)], {etiqueta: valor}, insumo_id).
@@ -1385,6 +1868,17 @@ class SeccionRegistroActivos:
             else:
                 campos.append((campo.ng_model, valor, campo.control))
         insumo_id = (datos.get("id_InsumoOrigen") or "").strip()
+        if not insumo_id:
+            # Se resuelve por NOMBRE, pero SOLO si el catálogo tiene ese nombre
+            # exacto. Con varias variantes ('NVR 32 CANALES', 'NVR DE 4 CANALES'…)
+            # se deja vacío a propósito: el flujo de alta lo apartará para que el
+            # usuario elija, en vez de registrar una que quizá no es.
+            from core.insumos import resolver
+            elegido, exacto = resolver(
+                (datos.get("nb_NombreInsumo") or r.nombre_insumo or "").strip(),
+                ID_POR_EMPRESA.get((r.empresa or "").strip()))
+            if elegido is not None and exacto:
+                insumo_id = str(elegido.id_insumo)
         empleado_id = (datos.get("id_EmpleadoResguardo") or "").strip()
         return nombre_tipo(r.id_tipo_activo), campos, detalles, insumo_id, empleado_id
 
@@ -1403,6 +1897,11 @@ class SeccionRegistroActivos:
             self.app.avisar(
                 "Ningún activo tiene datos capturados. Usa el botón de captura "
                 "(📋) en cada fila para definir el tipo y sus campos.", NARANJA)
+            return
+
+        # Nada de abrir el portal con datos incompletos: se valida primero.
+        pendientes = await self._validar_obligatorios(pendientes)
+        if not pendientes:
             return
 
         total = len(pendientes)
@@ -1458,6 +1957,7 @@ class SeccionRegistroActivos:
 
         from core import reporte_altas
         resultados: list[dict] = []      # una fila por activo (para el reporte)
+        faltan_insumo: list = []         # (registro, fila) sin insumo claro
         errores_generales: list[str] = []
 
         # El navegador NO se cierra al terminar: queda abierto para que el usuario
@@ -1487,51 +1987,70 @@ class SeccionRegistroActivos:
                 fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
                         "serie": r.no_serie or "", "estatus": reporte_altas.PENDIENTE,
                         "observacion": "", "_empresa": r.empresa or "",
-                        "_sucursal": r.sucursal or "", "_id": r.id}
-                tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
-                # Sin insumo resuelto: no se puede dar de alta -> se salta y se
-                # anota, sin intentar (el alta fallaría en el SIPP).
-                if not insumo_id:
-                    fila["observacion"] = ("No se encontró el insumo en el catálogo "
-                                           "del SIPP; captúralo en la ficha.")
-                    resultados.append(fila)
-                    continue
-                try:
-                    # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
-                    # en el registro (id del activo = su etiqueta).
-                    etiqueta_gen = await sipp.alta_activo(
-                        tipo, campos, detalles, insumo_id, empleado_id,
-                        serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
-                        empresa=r.empresa or "", sucursal=r.sucursal or "",
-                        empleado_nombre=(r.datos().get("nb_Empleado")
-                                         or r.responsable or ""),
-                        imagenes=r.datos().get("imagenes_insumo") or [])
-                    db.actualizar_estatus_levantamiento(
-                        r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
-                    if etiqueta_gen:
-                        db.fijar_etiqueta_levantamiento(r.id, etiqueta_gen)
-                        fila["etiqueta"] = etiqueta_gen
-                    # El activo pudo quedar registrado con su ETIQUETA como No. de
-                    # serie (el SIPP lo exige). Se refleja aquí o la herramienta
-                    # seguiría mostrando «—» sobre un dato que el portal sí tiene.
-                    serie_sipp = serie_para_alta(r.no_serie or "", etiqueta_gen or "",
-                                                 r.etiqueta or "")
-                    if serie_sipp and serie_sipp != (r.no_serie or "").strip():
-                        # `datos` REEMPLAZA datos_json, así que se parte de lo ya
-                        # capturado en vez de mandar solo la serie.
-                        datos_act = dict(r.datos())
-                        datos_act["nu_Serie"] = serie_sipp
-                        db.actualizar_datos_levantamiento(
-                            r.id, datos=datos_act, no_serie=serie_sipp)
-                        fila["serie"] = serie_sipp
-                    fila["estatus"] = reporte_altas.ALTA
-                    fila["observacion"] = (f"Etiqueta generada: {etiqueta_gen}"
-                                           if etiqueta_gen else "Alta registrada")
-                # Un registro con error (insumo no hallado en el modal, campo, red…)
-                # NO aborta el lote: se anota y se sigue con el siguiente.
-                except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
-                    fila["observacion"] = mensaje_amigable(exc)
+                        "_sucursal": r.sucursal or "", "_id": r.id,
+                        # Para deshacer si el alta no se confirma en el portal.
+                        "_etiqueta_previa": r.etiqueta or "",
+                        "_serie_previa": r.no_serie or ""}
                 resultados.append(fila)
+                if not await dar_alta(sipp, r, fila):
+                    # Sin insumo claro: NO se intenta. Se aparta para preguntarle
+                    # al usuario al terminar el resto (ver _elegir_insumos_faltantes).
+                    fila["observacion"] = ("Sin coincidencia exacta en el catálogo; "
+                                           "se elegirá al terminar.")
+                    faltan_insumo.append((r, fila))
+
+        async def dar_alta(sipp, r, fila, insumo_forzado: str = "") -> bool:
+            """Da de alta UN activo y vuelca el resultado en `fila`.
+
+            Devuelve False si no hay insumo con el que intentarlo (ni resuelto ni
+            forzado): el llamador decide qué hacer con ese caso."""
+            tipo, campos, detalles, insumo_id, empleado_id = self._payload_alta(r)
+            insumo_id = (insumo_forzado or insumo_id or "").strip()
+            if not insumo_id:
+                return False
+            try:
+                # El alta devuelve la ETIQUETA que el SIPP generó; se guarda
+                # en el registro (id del activo = su etiqueta).
+                etiqueta_gen = await sipp.alta_activo(
+                    tipo, campos, detalles, insumo_id, empleado_id,
+                    serie=r.no_serie or "", etiqueta_actual=r.etiqueta or "",
+                    empresa=r.empresa or "", sucursal=r.sucursal or "",
+                    empleado_nombre=(r.datos().get("nb_Empleado")
+                                     or r.responsable or ""),
+                    imagenes=self._imagenes_para_alta(r))
+                db.actualizar_estatus_levantamiento(
+                    r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
+                if etiqueta_gen:
+                    db.fijar_etiqueta_levantamiento(r.id, etiqueta_gen)
+                    fila["etiqueta"] = etiqueta_gen
+                # El activo pudo quedar registrado con su ETIQUETA como No. de
+                # serie (el SIPP lo exige). Se refleja aquí o la herramienta
+                # seguiría mostrando «—» sobre un dato que el portal sí tiene.
+                serie_sipp = serie_para_alta(r.no_serie or "", etiqueta_gen or "",
+                                             r.etiqueta or "")
+                if serie_sipp and serie_sipp != (r.no_serie or "").strip():
+                    # `datos` REEMPLAZA datos_json, así que se parte de lo ya
+                    # capturado en vez de mandar solo la serie.
+                    datos_act = dict(r.datos())
+                    datos_act["nu_Serie"] = serie_sipp
+                    db.actualizar_datos_levantamiento(
+                        r.id, datos=datos_act, no_serie=serie_sipp)
+                    fila["serie"] = serie_sipp
+                fila["estatus"] = reporte_altas.ALTA
+                fila["observacion"] = (f"Etiqueta generada: {etiqueta_gen}"
+                                       if etiqueta_gen else "Alta registrada")
+            # Un registro con error (insumo no hallado en el modal, campo, red…)
+            # NO aborta el lote: se anota y se sigue con el siguiente.
+            except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
+                fila["observacion"] = mensaje_amigable(exc)
+            return True
+
+        async def flujo_elegidos(elegidos: list, avanzar) -> None:
+            """Segunda vuelta: da de alta lo que el usuario resolvió a mano."""
+            for n, (r, fila, id_insumo) in enumerate(elegidos, 1):
+                await ctrl.punto_control()
+                avanzar(n, r.nombre_insumo)
+                await dar_alta(sipp, r, fila, insumo_forzado=id_insumo)
 
         detenido = False
         try:
@@ -1540,25 +2059,61 @@ class SeccionRegistroActivos:
             detenido = True
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             errores_generales.append(mensaje_amigable(exc))
-        finally:
-            # Confirmación final: por cada empresa se trae su listado del SIPP, se
-            # verifica que las etiquetas generadas estén (que el alta realmente
-            # quedó) y se guarda la foto del activo. Va FUERA del flujo para que
-            # también corra al DETENER: si no, las altas ya hechas se quedaban sin
-            # confirmar y sin foto solo por haber parado el proceso.
-            if any(f.get("estatus") == reporte_altas.ALTA for f in resultados):
-                avance(total, "Confirmando altas…")
+
+        # Los activos sin insumo claro se resuelven AHORA, con el resto ya dado de
+        # alta y el navegador todavía abierto: el usuario elige y se registran en
+        # la misma sesión, sin volver a entrar al portal.
+        if faltan_insumo and not detenido and self._navegador_vivo(sipp):
+            modal.cerrar()
+            elegidos = await self._elegir_insumos_faltantes(faltan_insumo)
+            if elegidos:
+                # Modal de progreso NUEVO para la segunda vuelta. Reabrir el
+                # anterior con `abrir()` reventaba con "Dialog is already opened":
+                # una vez cerrado, esa instancia no se puede volver a mostrar.
+                txt2 = ft.Text(f"Dando de alta {len(elegidos)} activo(s)…", size=13)
+                barra2 = ft.ProgressBar(value=0)
+                modal2 = Modal(self.page, "Registrando los insumos elegidos",
+                               ancho=460)
+                modal2.cuerpo.controls = [txt2, barra2]
+                modal2.abrir()
+
+                def avance2(hechos: int, nombre: str) -> None:
+                    def aplicar() -> None:
+                        txt2.value = f"({hechos}/{len(elegidos)}) {nombre}"
+                        barra2.value = hechos / len(elegidos)
+                        modal2.refrescar()
+                    ui_loop.call_soon_threadsafe(aplicar)
+
                 try:
                     await asyncio.wrap_future(
-                        bucle.enviar(self._confirmar_altas(sipp, resultados)))
-                except Exception as exc:  # noqa: BLE001 — las altas ya se hicieron
-                    errores_generales.append(
-                        f"No se pudieron confirmar las altas: {mensaje_amigable(exc)}")
-            # Ojo: aquí NO se apaga el bucle. Sigue vivo porque es el único hilo
-            # desde el que se puede cerrar el navegador que queda abierto; lo
-            # apaga el reporte al cerrarlo.
-            modal.cerrar()
-            self._refrescar()
+                        bucle.enviar(flujo_elegidos(elegidos, avance2)))
+                except RpaDetenido:
+                    detenido = True
+                except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                    errores_generales.append(mensaje_amigable(exc))
+                finally:
+                    modal2.cerrar()
+
+        # Confirmación final: por cada empresa se trae su listado del SIPP, se
+        # verifica que las etiquetas generadas estén (que el alta realmente quedó)
+        # y se guarda la foto del activo. Va FUERA del flujo para que también corra
+        # al DETENER: si no, las altas ya hechas se quedaban sin confirmar y sin
+        # foto solo por haber parado el proceso.
+        if any(f.get("estatus") == reporte_altas.ALTA for f in resultados):
+            # `avance` pinta sobre el modal principal; si ya se cerró (hubo segunda
+            # vuelta) no pasa nada: refrescar un modal cerrado es inofensivo.
+            avance(total, "Confirmando altas…")
+            try:
+                await asyncio.wrap_future(
+                    bucle.enviar(self._confirmar_altas(sipp, resultados)))
+            except Exception as exc:  # noqa: BLE001 — las altas ya se hicieron
+                errores_generales.append(
+                    f"No se pudieron confirmar las altas: {mensaje_amigable(exc)}")
+        # Ojo: aquí NO se apaga el bucle. Sigue vivo porque es el único hilo desde
+        # el que se puede cerrar el navegador que queda abierto; lo apaga el
+        # reporte al cerrarlo.
+        modal.cerrar()
+        self._refrescar()
 
         self._guardar_historial(db.MOV_ALTA, resultados)
         self._mostrar_reporte_altas(resultados, detenido, errores_generales,
@@ -1574,7 +2129,7 @@ class SeccionRegistroActivos:
         (`datos_sipp`), que es el lado «SIPP» de «Comparar SIPP vs Excel»: sin ella,
         un activo recién dado de alta no tenía contra qué compararse y la pantalla
         exigía volver a correr «Buscar en SIPP»."""
-        from collections import defaultdict
+        from collections import Counter, defaultdict
 
         from core import activos_sipp, reporte_altas
         from core.proveedor_activos import ProveedorSipp
@@ -1596,20 +2151,55 @@ class SeccionRegistroActivos:
                     [f["etiqueta"].strip() for f in filas_e])
             except Exception:  # noqa: BLE001 — si falla la descarga, no se confirma
                 hallados = None
+            # La ETIQUETA es un consecutivo GLOBAL que el portal entrega ANTES de
+            # guardar y solo avanza cuando el alta se completa: si varias altas
+            # comparten etiqueta, todas menos una fallaron. Con la etiqueta
+            # repetida, buscarla en el listado daba "confirmado" a todas.
+            repetidas = {e for e, n in Counter(
+                (f.get("etiqueta") or "").strip() for f in filas_e).items()
+                if e and n > 1}
             for fila in filas_e:
                 if hallados is None:
                     fila["observacion"] += "  ·  No se pudo confirmar en el SIPP."
                     continue
-                res = hallados.get(fila["etiqueta"].strip())
-                if res is not None and res.dado_de_alta:
+                etq = (fila.get("etiqueta") or "").strip()
+                res = hallados.get(etq)
+                datos_sipp = (res.datos if res is not None else None) or {}
+                # El desempate real es la SERIE: es el dato que la herramienta
+                # envía y que identifica al activo dentro de esa etiqueta.
+                serie_portal = (datos_sipp.get("serie") or "").strip().upper()
+                serie_fila = (fila.get("serie") or "").strip().upper()
+                coincide = bool(serie_portal) and serie_portal == serie_fila
+                if res is not None and res.dado_de_alta and coincide:
                     fila["observacion"] += "  ·  Confirmado en el SIPP."
-                    if fila.get("_id") is not None and res.datos:
+                    if fila.get("_id") is not None and datos_sipp:
                         db.actualizar_estatus_levantamiento(
                             fila["_id"], db.EST_DADO_ALTA, res.id_activo_sipp,
-                            res.datos)
+                            datos_sipp)
+                    continue
+                # No cuajó: se explica POR QUÉ y se deshace lo que la herramienta
+                # había dado por hecho (etiqueta y estatus), o el activo quedaría
+                # marcado como dado de alta con la etiqueta de otro.
+                fila["estatus"] = reporte_altas.PENDIENTE
+                if etq in repetidas:
+                    motivo = (f"El SIPP no guardó el alta: la etiqueta {etq} quedó "
+                              "asignada a otro activo del mismo lote.")
+                elif res is None or not res.dado_de_alta:
+                    motivo = "No aparece en el listado del SIPP (revisar)."
                 else:
-                    fila["estatus"] = reporte_altas.PENDIENTE
-                    fila["observacion"] += "  ·  No aparece en el listado del SIPP (revisar)."
+                    motivo = (f"En el SIPP la etiqueta {etq} corresponde a otro "
+                              f"activo (serie {serie_portal or '—'}): el alta no se "
+                              "guardó.")
+                fila["observacion"] += "  ·  " + motivo
+                if fila.get("_id") is not None:
+                    db.actualizar_estatus_levantamiento(
+                        fila["_id"], db.EST_NO_DADO_ALTA, None, None)
+                    db.fijar_etiqueta_levantamiento(
+                        fila["_id"], fila.get("_etiqueta_previa") or "")
+                    db.actualizar_datos_levantamiento(
+                        fila["_id"], no_serie=fila.get("_serie_previa") or "")
+                fila["etiqueta"] = fila.get("_etiqueta_previa") or ""
+                fila["serie"] = fila.get("_serie_previa") or ""
 
     # ------------------------------ navegador que el RPA deja abierto al final
     @staticmethod
@@ -1785,17 +2375,17 @@ class SeccionRegistroActivos:
                 reporte_altas.generar_reporte_altas, ruta, filas, detenido,
                 errores_generales)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-            self.app.avisar(f"No se pudo generar el reporte: {exc}", ROJO)
+            self.app.avisar(error_al_guardar(exc, ruta), ROJO, duracion=10000)
             return
         self.app.avisar("Reporte exportado.", VERDE, accion="Abrir",
                         on_accion=lambda _e, x=ruta: self.app.abrir_en_sistema(x),
                         duracion=8000)
 
     # --------------------------------------------- RPA: modificación en SIPP
-    # El alta tiene DOS juegos de estos campos (compra y resguardo) y usa el de
-    # compra; la edición solo expone el de RESGUARDO —verificado en el DOM real del
-    # portal—, así que sin este puente el cambio no encontraba dónde aplicarse y se
-    # perdía en silencio. En la edición no hay ambigüedad: es el único de cada uno.
+    # Red de seguridad: alta y edición ya declaran los localizadores de RESGUARDO,
+    # pero si alguno se declarara con el nombre de compra la edición no lo
+    # encontraría (allí solo existe el de resguardo) y el cambio se perdería en
+    # silencio. Traducirlo aquí cuesta nada y evita ese fallo mudo.
     _RENOMBRES_EDICION = {
         "filtrosEditar.id_GrupoCentroCosto": "filtrosEditar.id_GrupoCentroCostoResguardo",
         "filtrosEditar.id_CentroCosto": "filtrosEditar.id_CentroCostoResguardo",
@@ -1815,12 +2405,51 @@ class SeccionRegistroActivos:
             return ng_model + "_EDITAR"
         return ng_model
 
+    @staticmethod
+    def _fijar_insumo_origen(datos: dict, nombre: str, reg: "db.Levantamiento",
+                             gana_excel: bool) -> bool:
+        """Deja en `datos['id_InsumoOrigen']` el ID del insumo que debe quedar.
+        Devuelve si quedó un ID utilizable para empujar al SIPP.
+
+        Es lo que separa «el usuario eligió este insumo» de «el nombre se parece a
+        este»: el RPA solo cambia el insumo cuando hay un ID puesto aquí. Si ganó el
+        SIPP se copia el ID del portal —así el RPA no intenta corregir nada—; si
+        ganó el Excel se exige que el nombre resuelva a UN insumo EXACTO del
+        catálogo, porque empujar el parecido cambiaría el activo por otro.
+        """
+        if not gana_excel:
+            id_sipp = str((reg.info_sipp() or {}).get("id_insumo_origen") or "").strip()
+            if id_sipp:
+                datos["id_InsumoOrigen"] = id_sipp
+            else:
+                datos.pop("id_InsumoOrigen", None)
+            return False        # ganó el SIPP: no hay nada que empujar
+        from core.insumos import resolver
+        elegido, exacto = resolver((nombre or "").strip(),
+                                   ID_POR_EMPRESA.get((reg.empresa or "").strip()))
+        if elegido is not None and exacto:
+            datos["id_InsumoOrigen"] = str(elegido.id_insumo)
+            return True
+        datos.pop("id_InsumoOrigen", None)
+        return False
+
     def _payload_modificacion(self, r: "db.Levantamiento") -> tuple:
         """Igual que _payload_alta pero con los localizadores del formulario de
-        edición. (La modificación no cambia el insumo, así que su id no se usa.)"""
-        tipo, campos, detalles, _insumo_id, _empleado_id = self._payload_alta(r)
+        edición. Devuelve (tipo, campos, detalles, insumo_id).
+
+        El `insumo_id` va aparte porque no es un campo de texto: el RPA lo elige en
+        el modal «Buscar Insumo» de la edición.
+
+        Se toma SOLO de `id_InsumoOrigen`, que es un insumo ELEGIDO (en la ficha del
+        activo o al reconciliar), y no del nombre como hace el alta. La diferencia
+        importa: aquí ya hay un activo vivo en el portal, y resolver por nombre
+        cambiaría su insumo por el parecido en cada modificación, aunque el usuario
+        solo hubiera venido a corregir la ubicación. El empleado, en cambio, no se
+        puede cambiar ahí de ninguna forma."""
+        tipo, campos, detalles, _insumo_alta, _empleado_id = self._payload_alta(r)
         campos_edicion = [(self._a_ng_model_edicion(ng), v, c) for ng, v, c in campos]
-        return tipo, campos_edicion, detalles
+        insumo_id = (r.datos().get("id_InsumoOrigen") or "").strip()
+        return tipo, campos_edicion, detalles, insumo_id
 
     async def _refrescar_sipp_de(self, sipp: "SesionSipp", registros: list) -> list:
         """Vuelve a bajar del SIPP los activos de las empresas tocadas y REESCRIBE
@@ -1883,20 +2512,79 @@ class SeccionRegistroActivos:
                 "des de alta o modifiques activos en el SIPP.", NARANJA, duracion=8000)
             return
 
+        LIMITE = 300
         lista = ft.ListView(spacing=6, expand=True)
         estado = ft.Text("", size=12, color=GRIS)
         tf = buscador("Buscar por etiqueta, insumo o serie…", expand=True)
+        # Periodo: por calendario, como todas las fechas del proyecto. Vacío =
+        # sin tope por ese lado, para poder pedir "de tal día en adelante".
+        f_desde = CampoFecha(self.page, "Desde", flotante=True,
+                             on_change=lambda _v: pintar())
+        f_hasta = CampoFecha(self.page, "Hasta", flotante=True,
+                             on_change=lambda _v: pintar())
+
+        # Estado: el dato ya se pinta con ícono por renglón, pero encontrar los
+        # fallidos entre cientos de correctos obligaba a barrer la lista a ojo.
+        _ESTADOS = {"Todos": None, "Correctos": True, "Con problema": False}
+        _blq_estado, f_estado = campo_opciones(
+            "Estado", list(_ESTADOS), valor="Todos", flotante=True,
+            editable=False, on_change=lambda _v: pintar())
+
+        def _limpiar_filtros(_e=None) -> None:
+            f_desde.value = f_hasta.value = ""
+            f_estado.value = "Todos"
+            pintar()
+
+        def _periodo() -> "tuple[str | None, str | None, str]":
+            """(desde, hasta) en 'AAAA-MM-DD' + aviso si el rango está al revés."""
+            d, h = parse_fecha(f_desde.value), parse_fecha(f_hasta.value)
+            if d and h and d > h:
+                # Se respeta lo tecleado y solo se avisa: invertirlo en silencio
+                # haría creer que el filtro dice algo que no dice.
+                return None, None, "La fecha «Desde» es posterior a «Hasta»."
+            return (d.strftime("%Y-%m-%d") if d else None,
+                    h.strftime("%Y-%m-%d") if h else None, "")
 
         def pintar(_e=None) -> None:
             tipo = (db.MOV_ALTA if tabs.activa == "altas"
                     else db.MOV_MODIFICACION)
-            movs = db.listar_movimientos(tipo, tf.value or "")
+            desde, hasta, aviso = _periodo()
+            if aviso:
+                lista.controls = [ft.Container(ft.Text(aviso, size=12, color=NARANJA),
+                                               padding=12)]
+                estado.value = ""
+                modal.refrescar()
+                return
+            solo = _ESTADOS.get(f_estado.value or "Todos")
+            movs = db.listar_movimientos(tipo, tf.value or "", desde, hasta, solo,
+                                         LIMITE)
+            # Los conteos de las pestañas siguen a los filtros: si no, anunciarían
+            # más movimientos de los que la lista puede mostrar. El resumen ya trae
+            # total y exitosos por tipo, así que el estado se resuelve restando.
+            por_tipo = db.resumen_movimientos(desde, hasta)
+
+            def _cuantos(clave: str) -> int:
+                r = por_tipo.get(clave, {})
+                total, ok = r.get("total", 0), r.get("exitosos", 0)
+                return total if solo is None else (ok if solo else total - ok)
+
+            tabs.set_conteo("altas", _cuantos(db.MOV_ALTA))
+            tabs.set_conteo("modificaciones", _cuantos(db.MOV_MODIFICACION))
             lista.controls = [_fila_movimiento(m) for m in movs] or [
                 ft.Container(ft.Text("Sin movimientos con ese criterio.", size=12,
                                      color=GRIS), padding=12)]
             hechos = sum(1 for m in movs if m["exito"])
-            estado.value = (f"{len(movs)} movimiento(s) · {hechos} correcto(s) · "
-                            f"{len(movs) - hechos} con problema")
+            if solo is None:
+                estado.value = (f"{len(movs)} movimiento(s) · {hechos} correcto(s) · "
+                                f"{len(movs) - hechos} con problema")
+            else:
+                # Con el estado ya filtrado, el desglose sobra: repetiría el filtro.
+                estado.value = (f"{len(movs)} " + ("correcto(s)" if solo
+                                                   else "con problema"))
+            if len(movs) >= LIMITE:
+                # Sin esto, un periodo amplio se vería completo estando recortado.
+                estado.value += (f" · se muestran los {LIMITE} más recientes; "
+                                 f"acota el periodo para ver el resto")
             modal.refrescar()
 
         def _fila_movimiento(m: dict) -> ft.Control:
@@ -1946,14 +2634,20 @@ class SeccionRegistroActivos:
             [("altas", "Altas", ft.Icons.ADD_CIRCLE_OUTLINE),
              ("modificaciones", "Modificaciones", ft.Icons.EDIT_OUTLINED)],
             al_cambiar=lambda _clave: pintar())
-        tabs.set_conteo("altas", resumen.get(db.MOV_ALTA, {}).get("total", 0))
-        tabs.set_conteo("modificaciones",
-                        resumen.get(db.MOV_MODIFICACION, {}).get("total", 0))
         tf.on_change = lambda _e: pintar()
 
-        modal = Modal(self.page, "Movimientos realizados", ancho=760, alto_cuerpo=460)
-        modal.cuerpo.controls = [tabs.control, tf, estado,
-                                 ft.Container(lista, height=360)]
+        filtros = ft.Row(
+            [ft.Container(f_desde.control, expand=True),
+             ft.Container(f_hasta.control, expand=True),
+             ft.Container(_blq_estado, expand=True),
+             boton_herramienta("Limpiar", ft.Icons.FILTER_ALT_OFF_OUTLINED,
+                               _limpiar_filtros,
+                               tooltip="Quitar los filtros de fecha y estado")],
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        modal = Modal(self.page, "Movimientos realizados", ancho=840, alto_cuerpo=520)
+        modal.cuerpo.controls = [tabs.control, tf, filtros, estado,
+                                 ft.Container(lista, height=320)]
         modal.set_acciones([boton_herramienta("Cerrar",
                                               on_click=lambda _e: modal.cerrar())])
         pintar()
@@ -1987,6 +2681,178 @@ class SeccionRegistroActivos:
             db.registrar_movimientos(lote, tipo, registros)
         except Exception as exc:  # noqa: BLE001 — el envío ya ocurrió
             self.app.avisar(f"No se pudo guardar el historial: {exc}", NARANJA)
+
+    async def _elegir_insumos_faltantes(self, faltantes: list) -> list:
+        """Pide al usuario el insumo de los activos que el catálogo no resolvió.
+
+        `faltantes`: [(registro, fila_del_reporte)]. Devuelve
+        [(registro, fila, id_insumo)] SOLO de los que se eligieron: lo que no se
+        elija queda pendiente, que es preferible a registrarlo con un insumo
+        aproximado.
+
+        Se llama al FINAL del lote, no al tropezar con cada uno: así el usuario
+        resuelve todo de una vez en lugar de vigilar el proceso.
+        """
+        from core.insumos import elegir_mas_general
+        from ui.selector_insumo import DialogoSelectorInsumo
+
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+        elegidos: dict = {}      # id_registro -> (id_insumo, nombre)
+        textos: dict = {}        # id_registro -> ft.Text con la elección
+        en_curso: dict = {"id": None}
+
+        def _al_elegir(id_insumo, nombre: str) -> None:
+            rid = en_curso.get("id")
+            if rid is None:
+                return
+            elegidos[rid] = (str(id_insumo), nombre)
+            textos[rid].value = f"{nombre}  ·  clave {id_insumo}"
+            textos[rid].color = VERDE
+            btn_alta.content = f"Dar de alta ({len(elegidos)})"
+            btn_alta.disabled = not elegidos
+            modal.refrescar()
+
+        selector = DialogoSelectorInsumo(self.app, al_elegir=_al_elegir)
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        def abridor(registro, nombre_sugerido):
+            """Manejador del botón de una fila: marca cuál se está eligiendo y abre
+            el selector. El selector es UNO solo, así que hay que recordar a qué
+            activo pertenece la elección que devuelva."""
+            def _abrir(_e=None) -> None:
+                en_curso["id"] = registro.id
+                selector.abrir(sugerido=nombre_sugerido)
+            return _abrir
+
+        lista = ft.ListView(spacing=6, expand=True)
+        for r, _fila in faltantes:
+            nombre = (r.datos().get("nb_NombreInsumo") or r.nombre_insumo or "").strip()
+            sugerido = elegir_mas_general(
+                nombre, ID_POR_EMPRESA.get((r.empresa or "").strip()))
+            txt = ft.Text("Sin elegir", size=11, color=NARANJA, no_wrap=False,
+                          expand=True)
+            textos[r.id] = txt
+            pista = (f"El más parecido del catálogo: «{sugerido.nombre}»"
+                     if sugerido else "El catálogo no tiene nada parecido.")
+            lista.controls.append(ft.Container(
+                ft.Row([
+                    ft.Column(
+                        [ft.Text(f"{nombre}"
+                                 + (f"  ·  serie {r.no_serie}" if r.no_serie else ""),
+                                 size=12, weight=ft.FontWeight.W_500,
+                                 color=ft.Colors.ON_SURFACE, no_wrap=False),
+                         ft.Text(pista, size=11, color=GRIS, no_wrap=False),
+                         txt],
+                        spacing=1, tight=True, expand=True),
+                    boton_secundario("Elegir insumo", ft.Icons.SEARCH,
+                                     abridor(r, nombre)),
+                ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=8))
+
+        btn_alta = boton_primario(
+            "Dar de alta (0)", ft.Icons.PLAYLIST_ADD_CHECK,
+            lambda _e: responder([(r, f, elegidos[r.id][0])
+                                  for r, f in faltantes if r.id in elegidos]))
+        btn_alta.disabled = True
+
+        modal = Modal(self.page, "Elige el insumo de estos activos", ancho=760,
+                      subtitulo=f"{len(faltantes)} sin coincidencia exacta",
+                      al_cerrar=lambda: responder([]))
+        modal.cuerpo.controls = [
+            ft.Text("El catálogo del SIPP no tiene un insumo con ese nombre exacto, "
+                    "solo variantes con marca o capacidad. La herramienta NO elige "
+                    "por ti: indica cuál corresponde y se darán de alta con esa "
+                    "clave, en el navegador que sigue abierto.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Text("Lo que dejes sin elegir queda pendiente para otra corrida.",
+                    size=11, color=GRIS, no_wrap=False),
+            ft.Container(lista, height=320)]
+        modal.set_acciones([
+            boton_herramienta("Ahora no", on_click=lambda _e: responder([])),
+            btn_alta,
+        ])
+        modal.abrir()
+
+        seleccion = await decision
+        # La elección se guarda en la ficha: la próxima corrida ya no pregunta.
+        for r, _f, id_insumo in seleccion:
+            datos = dict(r.datos())
+            datos["id_InsumoOrigen"] = id_insumo
+            nombre_cat = elegidos.get(r.id, ("", ""))[1]
+            if nombre_cat:
+                datos["nb_NombreInsumo"] = nombre_cat
+            db.actualizar_datos_levantamiento(r.id, datos=datos)
+        return seleccion
+
+    @staticmethod
+    def _faltantes(r: "db.Levantamiento") -> list:
+        """Campos obligatorios del SIPP que le faltan a un registro."""
+        return faltantes_obligatorios(
+            r.id_tipo_activo, r.datos(), r.nombre_insumo or "", r.responsable or "",
+            r.empresa or "", r.sucursal or "")
+
+    async def _validar_obligatorios(self, pendientes: list) -> list:
+        """Aparta los registros incompletos ANTES de tocar el portal.
+
+        Devuelve los que sí se pueden enviar (lista vacía = no continuar). El SIPP
+        exige tipo de activo, insumo y empleado de resguardo: mandar un activo sin
+        ellos deja el alta a medias en el portal, y eso cuesta más de arreglar que
+        de prevenir.
+        """
+        incompletos = [(r, self._faltantes(r)) for r in pendientes]
+        incompletos = [(r, f) for r, f in incompletos if f]
+        if not incompletos:
+            return pendientes
+        ids_malos = {r.id for r, _f in incompletos}
+        completos = [r for r in pendientes if r.id not in ids_malos]
+
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=4, expand=True)
+        for r, faltan in incompletos:
+            lista.controls.append(ft.Row(
+                [ft.Icon(ft.Icons.ERROR_OUTLINE, size=16, color=NARANJA),
+                 ft.Column(
+                     [ft.Text(f"{r.nombre_insumo}"
+                              + (f"  ·  {r.etiqueta}" if r.etiqueta else ""),
+                              size=12, weight=ft.FontWeight.W_500,
+                              color=ft.Colors.ON_SURFACE, no_wrap=False),
+                      ft.Text("Falta: " + ", ".join(faltan), size=11, color=GRIS,
+                              no_wrap=False)],
+                     spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        acciones = [boton_herramienta("Cancelar", on_click=lambda _e: responder([]))]
+        if completos:
+            acciones.append(boton_primario(
+                f"Continuar con los {len(completos)} completos", ft.Icons.CHECK,
+                lambda _e: responder(completos)))
+        modal = Modal(self.page, "Faltan datos obligatorios del SIPP", ancho=680,
+                      subtitulo=f"{len(incompletos)} activo(s) sin completar",
+                      al_cerrar=lambda: responder([]))
+        modal.cuerpo.controls = [
+            ft.Text("Estos activos no se pueden registrar: el formulario del SIPP "
+                    "exige esos campos. Captúralos con el botón de la ficha (📋) en "
+                    "cada fila y vuelve a intentar.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Container(lista, height=300)]
+        modal.set_acciones(acciones)
+        modal.abrir()
+        return await decision
 
     async def _confirmar_etiquetas_repetidas(self, pendientes: list) -> "list | None":
         """Si alguna etiqueta por modificar está REPETIDA en el SIPP, lo consulta.
@@ -2032,8 +2898,12 @@ class SeccionRegistroActivos:
         decision: asyncio.Future = asyncio.get_running_loop().create_future()
 
         def responder(valor: str) -> None:
-            if not decision.done():
-                decision.set_result(valor)
+            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
+            # que vuelve a entrar aquí. Sin esto se recursan mutuamente hasta
+            # reventar (RecursionError con solo cerrar el diálogo).
+            if decision.done():
+                return
+            decision.set_result(valor)
             modal.cerrar()
 
         cuerpo = [ft.Text(
@@ -2190,11 +3060,11 @@ class SeccionRegistroActivos:
                         "serie": r.no_serie or "", "ok": False, "observacion": "",
                         "cambios": [], "_empresa": r.empresa or "",
                         "_sucursal": r.sucursal or "", "_id": r.id}
-                _tipo, campos, detalles = self._payload_modificacion(r)
+                _tipo, campos, detalles, insumo_id = self._payload_modificacion(r)
                 try:
                     resultado = await sipp.modificar_activo(
                         r.etiqueta, r.no_serie, campos, detalles,
-                        punto_control=ctrl.punto_control)
+                        punto_control=ctrl.punto_control, insumo_id=insumo_id)
                     no_aplicados = resultado["no_aplicados"]
                     db.actualizar_datos_levantamiento(r.id, modificado=False)
                     fila["ok"] = True

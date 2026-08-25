@@ -18,7 +18,7 @@ import asyncio
 
 import flet as ft
 
-from core import credenciales, preferencias
+from core import credenciales, db, preferencias
 from core.empresas import ID_POR_EMPRESA
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
 from ui.componentes import (Modal, boton_herramienta, boton_primario,
@@ -29,6 +29,8 @@ _ALTO_FILA = 40
 _ALTO_MAX_LISTA = 520
 _MAX_COLAB = 120  # tope de colaboradores pintados a la vez (se filtra para acotar)
 _CLAVE_FOLIO = "carta_folio_siguiente"
+# Opción "sin filtrar" del combo de sucursal (se trata como cadena vacía).
+_TODAS_SUC = "Todas las sucursales"
 
 
 class SeccionCartasResponsivas:
@@ -69,10 +71,45 @@ class SeccionCartasResponsivas:
         self._panel_masiva.visible = clave == "masiva"
         self._safe_update()
 
+    # ------------------------------------------------------------ sucursal
+    def _recargar_sucursales(self) -> None:
+        """Rellena AMBOS combos de sucursal con las de la empresa elegida.
+
+        Las dos pestañas comparten catálogo: el combo se arma con las sucursales
+        cacheadas del SIPP y siempre conserva la opción «todas» arriba."""
+        for dd, id_emp in ((self.dd_sucursal, self._empresa_id()),
+                           (self.m_dd_sucursal, self._m_empresa_id())):
+            sucs = db.listar_sucursales_sipp(id_emp) if id_emp is not None else []
+            dd.options = ([ft.DropdownOption(key=_TODAS_SUC, text=_TODAS_SUC)]
+                          + [ft.DropdownOption(key=x, text=x) for x in sucs])
+            dd.value = _TODAS_SUC
+        self._safe_update()
+
+    @staticmethod
+    def _sucursal_de(dd) -> str:
+        """Sucursal elegida en `dd`; '' cuando es «todas» (sin filtro)."""
+        valor = (dd.value or "").strip()
+        return "" if valor == _TODAS_SUC else valor
+
+    @staticmethod
+    def _filtrar_sucursal(activos: list, sucursal: str) -> list:
+        """Deja solo los activos de esa sucursal. Sin sucursal, no filtra."""
+        if not sucursal:
+            return activos
+        objetivo = sucursal.strip().casefold()
+        return [a for a in activos
+                if (a.sucursal or "").strip().casefold() == objetivo]
+
     # ---------------------------------------------------- panel INDIVIDUAL
     def _construir_individual(self) -> ft.Control:
         self.blq_empresa, self.dd_empresa = campo_opciones(
             "Empresa", list(NOMBRES_EMPRESAS), width=320,
+            on_change=lambda _e: (self._recargar_sucursales(), self._reset_activos()))
+        # Sucursal: acota los activos del colaborador dentro de la empresa. Sus
+        # opciones salen del catálogo de la empresa elegida, así que se rellenan
+        # al cambiarla.
+        self.blq_sucursal, self.dd_sucursal = campo_opciones(
+            "Sucursal", [_TODAS_SUC], valor=_TODAS_SUC, width=280,
             on_change=lambda _e: self._reset_activos())
         self.txt_empleado = ft.Text("Ningún empleado elegido.", size=13, color=GRIS,
                                     expand=True, no_wrap=False)
@@ -92,7 +129,7 @@ class SeccionCartasResponsivas:
                 ft.Text("Genera la carta responsiva de un colaborador con los activos "
                         "que tiene dados de alta en el SIPP.", size=13, color=GRIS),
                 ft.Divider(),
-                ft.Row([self.blq_empresa,
+                ft.Row([self.blq_empresa, self.blq_sucursal,
                         boton_secundario("Elegir empleado", ft.Icons.PERSON_SEARCH,
                                          self._elegir_empleado),
                         self.progreso], spacing=14, wrap=True,
@@ -141,8 +178,12 @@ class SeccionCartasResponsivas:
         # igual con `expand`.
         self.m_blq_empresa, self.m_dd_empresa = campo_opciones(
             "Empresa", list(NOMBRES_EMPRESAS), flotante=True,
+            on_change=lambda _e: (self._recargar_sucursales(), self._m_reset()))
+        self.m_blq_sucursal, self.m_dd_sucursal = campo_opciones(
+            "Sucursal", [_TODAS_SUC], valor=_TODAS_SUC, flotante=True,
             on_change=lambda _e: self._m_reset())
         self.m_dd_empresa.expand = True
+        self.m_dd_sucursal.expand = True
         self.m_progreso = ft.ProgressRing(width=22, height=22, stroke_width=3,
                                           visible=False)
         # Búsqueda por BOTÓN/Enter (no en cada tecla): repintar 120 secciones por
@@ -162,7 +203,8 @@ class SeccionCartasResponsivas:
                         "colaborador con al menos uno marcado se incluye.", size=13,
                         color=GRIS),
                 ft.Divider(),
-                ft.Row([self.m_dd_empresa, self.m_progreso], spacing=12,
+                ft.Row([self.m_dd_empresa, self.m_dd_sucursal, self.m_progreso],
+                       spacing=12,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([boton_primario("Cargar colaboradores", ft.Icons.GROUPS,
                                        self._cargar_colaboradores)], spacing=12,
@@ -227,6 +269,7 @@ class SeccionCartasResponsivas:
             return
         usuario, contrasena = creds
         id_empleado = self._id_empleado
+        sucursal = self._sucursal_de(self.dd_sucursal)
 
         self.progreso.visible = True
         self.txt_estado.value = "Consultando el SIPP…"
@@ -247,6 +290,7 @@ class SeccionCartasResponsivas:
                     # activos que sí tiene asignados hoy.
                     activos = await cr.listar_activos_empleado(
                         sipp, idemp, id_empleado)
+                    activos = self._filtrar_sucursal(activos, sucursal)
             except Exception as exc:  # noqa: BLE001
                 error = mensaje_amigable(exc)
 
@@ -470,6 +514,7 @@ class SeccionCartasResponsivas:
                 async with SesionSipp(headless=True) as sipp:
                     await sipp.login(usuario, contrasena)
                     activos = await cr.listar_activos_empresa(sipp, idemp)
+                    activos = self._filtrar_sucursal(activos, sucursal)
             except Exception as exc:  # noqa: BLE001
                 error = mensaje_amigable(exc)
 
@@ -642,6 +687,7 @@ class SeccionCartasResponsivas:
         creds = credenciales.cargar()
         usuario, contrasena = creds
         empresa = self.m_dd_empresa.value or ""
+        sucursal = self._sucursal_de(self.m_dd_sucursal)
         # Todas las cartas de la tanda van juntas en «EMPRESA AAAA-MM-DD».
         from core import carta_responsiva_local as _crl
         try:

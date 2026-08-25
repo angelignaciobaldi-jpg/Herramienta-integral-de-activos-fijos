@@ -308,6 +308,11 @@ def inicializar() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS ix_lev_estatus "
                     "ON levantamiento(estatus_registro)")
 
+    # Fuera del `with`: abre su propia conexión, y anidarla con la transacción de
+    # arriba se arriesga a un "database is locked". Es idempotente y barato, así
+    # que puede correr en cada arranque.
+    normalizar_nombres_con_serie()
+
 
 class InventarioDuplicado(Exception):
     """Ya existe un activo con ese número de inventario."""
@@ -502,6 +507,32 @@ def actualizar_ubicacion_levantamiento(id_lev: int, empresa: str | None = None,
         con.execute(f"UPDATE levantamiento SET {', '.join(sets)} WHERE id = ?", valores)
 
 
+def normalizar_nombres_con_serie() -> int:
+    """Quita la serie repetida al final del nombre del insumo. Devuelve cuántos
+    registros se corrigieron.
+
+    Es idempotente (los ya limpios no vuelven a tocarse), así que puede correr en
+    cada arranque: repara los registros creados antes de que el nombre de archivo
+    separara insumo y serie."""
+    from .archivos import nombre_sin_serie
+
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id, nombre_insumo, no_serie, etiqueta FROM levantamiento "
+            "WHERE IFNULL(no_serie,'') <> '' AND IFNULL(nombre_insumo,'') <> ''"
+        ).fetchall()
+        cambios = []
+        for f in filas:
+            limpio = nombre_sin_serie(f["nombre_insumo"], f["no_serie"],
+                                      f["etiqueta"] or "")
+            if limpio != f["nombre_insumo"]:
+                cambios.append((limpio, f["id"]))
+        if cambios:
+            con.executemany(
+                "UPDATE levantamiento SET nombre_insumo = ? WHERE id = ?", cambios)
+    return len(cambios)
+
+
 def listar_levantamiento() -> list[Levantamiento]:
     with _conectar() as con:
         filas = con.execute(
@@ -532,6 +563,13 @@ def listar_levantamiento_por_estatus(estatus: str) -> list[Levantamiento]:
             (estatus,),
         ).fetchall()
     return [Levantamiento(**dict(f)) for f in filas]
+
+
+def fijar_imagen_levantamiento(id_lev: int, ruta: str) -> None:
+    """Asocia la foto del activo a su registro (la que el RPA sube al dar de alta)."""
+    with _conectar() as con:
+        con.execute("UPDATE levantamiento SET ruta_imagen = ? WHERE id = ?",
+                    (ruta or None, id_lev))
 
 
 def actualizar_estatus_levantamiento(id_lev: int, estatus: str,
@@ -776,6 +814,36 @@ def buscar_insumos(texto: str = "", empresa_id: int | None = None,
     return [Insumo(**dict(f)) for f in filas]
 
 
+def obtener_insumo(id_insumo: int) -> "Insumo | None":
+    """Un insumo por su clave. Va por la PRIMARY KEY (id_insumo, empresa_id), así
+    que es inmediato: resolverlo con `buscar_insumos` costaba un LIKE sobre las
+    decenas de miles de filas del catálogo."""
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia, "
+            "subfamilia, activo_fijo, seriado FROM insumos_sipp "
+            "WHERE id_insumo = ? LIMIT 1", (id_insumo,)).fetchone()
+    return Insumo(**dict(fila)) if fila else None
+
+
+def pares_insumos() -> list[tuple[int, str]]:
+    """(id, nombre) de TODO el catálogo. Para armar índices en memoria sin cargar
+    el resto de columnas (son decenas de miles de filas)."""
+    with _conectar() as con:
+        return [(f[0], f[1]) for f in con.execute(
+            "SELECT id_insumo, nombre FROM insumos_sipp "
+            "WHERE IFNULL(nombre,'') <> ''").fetchall()]
+
+
+def firma_catalogo_insumos() -> tuple:
+    """(cuántos, última actualización). Sirve para saber si un índice cacheado
+    quedó viejo sin recorrer el catálogo entero."""
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT COUNT(*), MAX(actualizado_en) FROM insumos_sipp").fetchone()
+    return (fila[0], fila[1])
+
+
 def contar_insumos(texto: str = "", empresa_id: int | None = None,
                    solo_activo_fijo: bool = False) -> int:
     """Cuántos insumos DISTINTOS coinciden con el filtro (para saber cuántos hay más
@@ -904,12 +972,33 @@ def registrar_movimientos(lote: str, tipo: str, filas: list[dict]) -> int:
     return len(filas)
 
 
-def listar_movimientos(tipo: str | None = None, texto: str = "",
-                       limite: int = 300) -> list[dict]:
-    """Historial más reciente primero. `texto` busca en etiqueta, insumo y serie."""
+def _rango_fechas(desde: str | None, hasta: str | None) -> tuple[list, list]:
+    """Condiciones SQL para acotar `fecha` a un periodo (fechas 'AAAA-MM-DD').
+
+    `fecha` se guarda como 'AAAA-MM-DD HH:MM:SS' en hora LOCAL, así que comparar
+    como texto ordena igual que como fecha y el índice sigue sirviendo. El día
+    final se incluye completo: filtrar 'hasta el 20' y perder lo de esa mañana
+    sería una trampa silenciosa."""
     cond, params = [], []
+    if desde:
+        cond.append("fecha >= ?"); params.append(f"{desde} 00:00:00")
+    if hasta:
+        cond.append("fecha <= ?"); params.append(f"{hasta} 23:59:59")
+    return cond, params
+
+
+def listar_movimientos(tipo: str | None = None, texto: str = "",
+                       desde: str | None = None, hasta: str | None = None,
+                       exito: bool | None = None,
+                       limite: int = 300) -> list[dict]:
+    """Historial más reciente primero. `texto` busca en etiqueta, insumo y serie;
+    `desde`/`hasta` ('AAAA-MM-DD') acotan el periodo; `exito` deja solo los
+    correctos (True) o solo los que fallaron (False), None trae ambos."""
+    cond, params = _rango_fechas(desde, hasta)
     if tipo:
         cond.append("tipo = ?"); params.append(tipo)
+    if exito is not None:
+        cond.append("exito = ?"); params.append(1 if exito else 0)
     texto = (texto or "").strip().lower()
     if texto:
         cond.append("(LOWER(IFNULL(etiqueta,'')) LIKE ? OR "
@@ -933,12 +1022,19 @@ def listar_movimientos(tipo: str | None = None, texto: str = "",
     return movimientos
 
 
-def resumen_movimientos() -> dict:
-    """Cuántos movimientos hay por tipo (para los conteos de las pestañas)."""
+def resumen_movimientos(desde: str | None = None,
+                        hasta: str | None = None) -> dict:
+    """Cuántos movimientos hay por tipo (para los conteos de las pestañas).
+
+    Acepta el mismo periodo que `listar_movimientos` para que los conteos de las
+    pestañas cuadren con lo que se está viendo; sin él, el filtro de fechas dejaría
+    unas pestañas anunciando más de lo que muestran."""
+    cond, params = _rango_fechas(desde, hasta)
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
     with _conectar() as con:
         filas = con.execute(
-            "SELECT tipo, COUNT(*) AS n, SUM(exito) AS ok FROM movimientos_sipp "
-            "GROUP BY tipo").fetchall()
+            f"SELECT tipo, COUNT(*) AS n, SUM(exito) AS ok FROM movimientos_sipp"
+            f"{where} GROUP BY tipo", params).fetchall()
     return {f["tipo"]: {"total": f["n"], "exitosos": f["ok"] or 0} for f in filas}
 
 
@@ -1026,6 +1122,46 @@ def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
               actualizado_en)
              for r in filas])
     return len(filas)
+
+
+def fijar_costos_activos_sipp(id_empresa: int, costos: dict) -> int:
+    """Fija el costo de los activos cacheados de una empresa. Devuelve cuántos.
+
+    `costos` es {etiqueta -> precio}. El costo no tiene columna propia: vive en el
+    JSON de `extra` junto al resto del detalle del portal, así que cada fila se lee,
+    se le mete la clave `costo` y se vuelve a escribir. Solo se tocan las etiquetas
+    que YA están en la caché de esa empresa; las demás se ignoran (son activos de
+    otra empresa o dados de baja).
+
+    El precio se guarda con dos decimales COMO TEXTO, igual que el resto de `extra`
+    y que lo que trae el portal, para que la comparación no vea una diferencia
+    donde solo hay un formato distinto.
+    """
+    if not costos:
+        return 0
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT etiqueta, extra FROM activos_sipp WHERE id_empresa = ?",
+            [id_empresa]).fetchall()
+        cambios = []
+        for f in filas:
+            precio = costos.get((f["etiqueta"] or "").strip())
+            if precio is None:
+                continue
+            try:
+                extra = json.loads(f["extra"]) if f["extra"] else {}
+            except (ValueError, TypeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            extra["costo"] = f"{float(precio):.2f}"
+            cambios.append((json.dumps(extra, ensure_ascii=False), id_empresa,
+                            f["etiqueta"]))
+        if cambios:
+            con.executemany(
+                "UPDATE activos_sipp SET extra = ? WHERE id_empresa = ? "
+                "AND etiqueta = ?", cambios)
+    return len(cambios)
 
 
 def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[dict]:
