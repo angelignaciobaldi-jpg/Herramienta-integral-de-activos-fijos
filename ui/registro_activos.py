@@ -42,7 +42,8 @@ from ui.componentes import (GUTTER_SCROLL, CampoFecha, Modal, Pestanas,
                             boton_herramienta, boton_primario,
                             boton_secundario, buscador,
                             campo_opciones, campo_tabla_opciones,
-                            campo_tabla_texto, campo_texto, tarjeta_seccion)
+                            campo_tabla_texto, campo_texto, fila_resultado,
+                            lista_resultados, tarjeta_seccion)
 from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
                                  TablaResponsiva)
 
