@@ -16,7 +16,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from . import rutas
+from . import bitacora, rutas
 
 RUTA_DB = os.path.join(rutas.DATOS, "activos_fijos.db")
 
@@ -205,12 +205,55 @@ def inicializar() -> None:
                 exito        INTEGER NOT NULL DEFAULT 0,
                 observacion  TEXT,
                 cambios      TEXT,               -- JSON [(rótulo, antes, después)]
-                fecha        TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+                fecha        TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                id_evento    TEXT,               -- UUID del cliente (idempotencia)
+                ts_utc       TEXT,               -- ISO-8601 UTC del evento
+                equipo       TEXT,               -- nombre de la máquina
+                usuario_windows TEXT,
+                usuario_sipp TEXT,
+                version_app  TEXT,
+                enviado      INTEGER NOT NULL DEFAULT 0  -- 0 = pendiente de envío
             )
             """
         )
         con.execute("CREATE INDEX IF NOT EXISTS ix_movimientos_fecha "
                     "ON movimientos_sipp (fecha DESC)")
+        # Migración: las bases creadas antes de la bitácora no tienen la
+        # atribución. Las filas viejas se quedan con el equipo vacío —no hay de
+        # dónde deducirlo— y la pantalla las marca «(equipo sin registrar)».
+        existentes_mov = {f["name"] for f in con.execute(
+            "PRAGMA table_info(movimientos_sipp)")}
+        for col in _COLS_MOV_ORIGEN:
+            if col not in existentes_mov:
+                tipo_col = ("INTEGER NOT NULL DEFAULT 0" if col == "enviado"
+                            else "TEXT")
+                con.execute(
+                    f"ALTER TABLE movimientos_sipp ADD COLUMN {col} {tipo_col}")
+
+        # SESIONES DE USO: cada corrida de la app deja UNA fila, que el latido va
+        # actualizando mientras la ventana sigue abierta. Es lo que responde «¿se
+        # está usando la herramienta?» cuando NO hay altas ni modificaciones: sin
+        # esto, una semana sin movimientos se ve igual que una semana sin abrir la
+        # app. Una fila por sesión —no una por latido— acota el crecimiento: ocho
+        # horas de trabajo son un renglón, no noventa y seis.
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sesiones_uso (
+                id_sesion    TEXT    PRIMARY KEY,   -- UUID; agrupa la corrida
+                inicio_utc   TEXT    NOT NULL,
+                ultimo_utc   TEXT    NOT NULL,      -- último latido recibido
+                inicio       TEXT    NOT NULL,      -- hora local, para leerla aquí
+                minutos      INTEGER NOT NULL DEFAULT 0,
+                equipo       TEXT,
+                usuario_windows TEXT,
+                usuario_sipp TEXT,
+                version_app  TEXT,
+                enviado      INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        con.execute("CREATE INDEX IF NOT EXISTS ix_sesiones_inicio "
+                    "ON sesiones_uso (inicio DESC)")
 
         # Caché del catálogo de EMPLEADOS del SIPP (global, para el resguardo).
         con.execute(
@@ -947,6 +990,12 @@ def estado_catalogo_empleados() -> dict:
 MOV_ALTA = "alta"
 MOV_MODIFICACION = "modificacion"
 
+# Columnas de ATRIBUCIÓN del movimiento (de dónde salió). Fuente única para el
+# INSERT y para la migración de arriba: agregar un dato de origen es agregarlo
+# aquí y en `core/bitacora.identidad()`, no en tres lugares.
+_COLS_MOV_ORIGEN = ["id_evento", "ts_utc", "equipo", "usuario_windows",
+                    "usuario_sipp", "version_app", "enviado"]
+
 
 def registrar_movimientos(lote: str, tipo: str, filas: list[dict]) -> int:
     """Guarda en el historial lo que una corrida del RPA envió al SIPP.
@@ -954,22 +1003,151 @@ def registrar_movimientos(lote: str, tipo: str, filas: list[dict]) -> int:
     `lote` agrupa la corrida (para poder mostrarla junta). Cada fila: etiqueta,
     insumo, serie, empresa, sucursal, exito, observacion, cambios
     ([(rótulo, antes, después)]) e id_levantamiento.
+
+    La ATRIBUCIÓN (equipo, usuario, versión, UUID e instante UTC) se sella aquí,
+    no la pasa el llamador: es la misma para toda la corrida y dejarla en manos de
+    cada pantalla garantizaría que alguna la olvide. `enviado` queda en 0 —la
+    fila nace pendiente de subir al microservicio (fase 2)—; hoy nadie la drena,
+    pero el registro se lleva desde ya para no tener que rellenarlo después.
     """
     if not filas:
         return 0
+    ident = bitacora.identidad()
+    ts_utc = bitacora.ahora_utc()
     with _conectar() as con:
         con.executemany(
             """INSERT INTO movimientos_sipp
                (lote, tipo, id_levantamiento, etiqueta, insumo, serie, empresa,
-                sucursal, exito, observacion, cambios)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sucursal, exito, observacion, cambios,
+                id_evento, ts_utc, equipo, usuario_windows, usuario_sipp,
+                version_app, enviado)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
             [(lote, tipo, f.get("id_levantamiento"), f.get("etiqueta"),
               f.get("insumo"), f.get("serie"), f.get("empresa"), f.get("sucursal"),
               1 if f.get("exito") else 0, f.get("observacion"),
               json.dumps(f.get("cambios"), ensure_ascii=False)
-              if f.get("cambios") else None)
+              if f.get("cambios") else None,
+              # Un UUID POR FILA, no por corrida: el envío es fila a fila, así que
+              # un id compartido haría que el servidor descartara 39 altas como
+              # repetidas de la primera.
+              bitacora.nuevo_id(), ts_utc, ident["equipo"],
+              ident["usuario_windows"], ident["usuario_sipp"],
+              ident["version_app"])
              for f in filas])
     return len(filas)
+
+
+def equipos_registrados() -> list[str]:
+    """Equipos que aparecen en la bitácora, para el filtro de la pantalla.
+
+    Une movimientos y sesiones: un equipo puede haber abierto la herramienta sin
+    dar de alta nada, y dejarlo fuera del filtro escondería justo el caso que
+    interesa vigilar («se abre pero no se usa»).
+
+    Omite los vacíos: son las filas anteriores a la bitácora, y ofrecerlos como
+    una opción más sugeriría que existe un equipo llamado "" en vez de un dato
+    que nunca se registró."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT DISTINCT equipo FROM ("
+            "  SELECT equipo FROM movimientos_sipp"
+            "  UNION SELECT equipo FROM sesiones_uso) "
+            "WHERE IFNULL(equipo,'') <> '' ORDER BY equipo").fetchall()
+    return [f["equipo"] for f in filas]
+
+
+# ------------------------------------------------- sesiones de uso de la app
+def abrir_sesion_uso() -> str:
+    """Registra que la herramienta se abrió. Devuelve el id de la sesión.
+
+    Se llama UNA vez por arranque; el id que devuelve es el que el latido usa
+    después para actualizar esta misma fila."""
+    ident = bitacora.identidad()
+    id_sesion = bitacora.nuevo_id()
+    ahora = bitacora.ahora_utc()
+    with _conectar() as con:
+        con.execute(
+            """INSERT INTO sesiones_uso
+               (id_sesion, inicio_utc, ultimo_utc, inicio, minutos, equipo,
+                usuario_windows, usuario_sipp, version_app, enviado)
+               VALUES (?, ?, ?, datetime('now','localtime'), 0, ?, ?, ?, ?, 0)""",
+            (id_sesion, ahora, ahora, ident["equipo"], ident["usuario_windows"],
+             ident["usuario_sipp"], ident["version_app"]))
+    return id_sesion
+
+
+def latir_sesion_uso(id_sesion: str) -> None:
+    """Confirma que la app sigue abierta: mueve el último latido y los minutos.
+
+    `usuario_sipp` se refresca en cada latido porque la sesión pudo empezar antes
+    de que se capturaran las credenciales; sin esto, quien configura la
+    herramienta el primer día aparecería para siempre como sesión anónima.
+
+    `enviado` vuelve a 0 en cada latido: la fila cambió, así que lo que ya se
+    hubiera subido quedó viejo y hay que reenviarlo. Como el id de la sesión es
+    estable, el servidor la reconoce y actualiza en vez de duplicarla.
+    """
+    ident = bitacora.identidad()
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT inicio_utc FROM sesiones_uso WHERE id_sesion = ?",
+            (id_sesion,)).fetchone()
+        if fila is None:
+            return
+        con.execute(
+            """UPDATE sesiones_uso
+               SET ultimo_utc = ?, minutos = ?, usuario_sipp = ?, enviado = 0
+               WHERE id_sesion = ?""",
+            (bitacora.ahora_utc(), bitacora.minutos_desde(fila["inicio_utc"]),
+             ident["usuario_sipp"], id_sesion))
+
+
+def listar_sesiones_uso(desde: str | None = None, hasta: str | None = None,
+                        equipo: str | None = None, texto: str = "",
+                        limite: int = 300) -> list[dict]:
+    """Sesiones más recientes primero. `texto` busca en equipo y usuarios."""
+    cond, params = [], []
+    # `inicio` es hora local 'AAAA-MM-DD HH:MM:SS', igual que `fecha` en
+    # movimientos, así que el mismo criterio de periodo aplica sobre esta columna.
+    if desde:
+        cond.append("inicio >= ?"); params.append(f"{desde} 00:00:00")
+    if hasta:
+        cond.append("inicio <= ?"); params.append(f"{hasta} 23:59:59")
+    if equipo:
+        cond.append("equipo = ?"); params.append(equipo)
+    texto = (texto or "").strip().lower()
+    if texto:
+        cond.append("(LOWER(IFNULL(equipo,'')) LIKE ? OR "
+                    "LOWER(IFNULL(usuario_sipp,'')) LIKE ? OR "
+                    "LOWER(IFNULL(usuario_windows,'')) LIKE ?)")
+        params += [f"%{texto}%"] * 3
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        filas = con.execute(
+            f"SELECT * FROM sesiones_uso{where} ORDER BY inicio DESC LIMIT ?",
+            [*params, limite]).fetchall()
+    return [dict(f) for f in filas]
+
+
+def resumen_sesiones_uso(desde: str | None = None, hasta: str | None = None,
+                         equipo: str | None = None) -> dict:
+    """{sesiones, equipos, minutos} del periodo. Alimenta el conteo de la pestaña
+    y la línea de estado, que es donde se lee la adopción de un vistazo."""
+    cond, params = [], []
+    if desde:
+        cond.append("inicio >= ?"); params.append(f"{desde} 00:00:00")
+    if hasta:
+        cond.append("inicio <= ?"); params.append(f"{hasta} 23:59:59")
+    if equipo:
+        cond.append("equipo = ?"); params.append(equipo)
+    where = (" WHERE " + " AND ".join(cond)) if cond else ""
+    with _conectar() as con:
+        f = con.execute(
+            f"SELECT COUNT(*) AS sesiones, COUNT(DISTINCT equipo) AS equipos, "
+            f"IFNULL(SUM(minutos),0) AS minutos FROM sesiones_uso{where}",
+            params).fetchone()
+    return {"sesiones": f["sesiones"], "equipos": f["equipos"],
+            "minutos": f["minutos"]}
 
 
 def _rango_fechas(desde: str | None, hasta: str | None) -> tuple[list, list]:
@@ -990,15 +1168,22 @@ def _rango_fechas(desde: str | None, hasta: str | None) -> tuple[list, list]:
 def listar_movimientos(tipo: str | None = None, texto: str = "",
                        desde: str | None = None, hasta: str | None = None,
                        exito: bool | None = None,
-                       limite: int = 300) -> list[dict]:
+                       limite: int = 300, equipo: str | None = None) -> list[dict]:
     """Historial más reciente primero. `texto` busca en etiqueta, insumo y serie;
     `desde`/`hasta` ('AAAA-MM-DD') acotan el periodo; `exito` deja solo los
-    correctos (True) o solo los que fallaron (False), None trae ambos."""
+    correctos (True) o solo los que fallaron (False), None trae ambos; `equipo`
+    acota a una máquina.
+
+    `equipo` va al final aunque acompañe a los demás filtros: `limite` ya estaba
+    en esa posición y moverlo habría cambiado en silencio el significado de las
+    llamadas posicionales que ya existen."""
     cond, params = _rango_fechas(desde, hasta)
     if tipo:
         cond.append("tipo = ?"); params.append(tipo)
     if exito is not None:
         cond.append("exito = ?"); params.append(1 if exito else 0)
+    if equipo:
+        cond.append("equipo = ?"); params.append(equipo)
     texto = (texto or "").strip().lower()
     if texto:
         cond.append("(LOWER(IFNULL(etiqueta,'')) LIKE ? OR "
@@ -1023,13 +1208,16 @@ def listar_movimientos(tipo: str | None = None, texto: str = "",
 
 
 def resumen_movimientos(desde: str | None = None,
-                        hasta: str | None = None) -> dict:
+                        hasta: str | None = None,
+                        equipo: str | None = None) -> dict:
     """Cuántos movimientos hay por tipo (para los conteos de las pestañas).
 
-    Acepta el mismo periodo que `listar_movimientos` para que los conteos de las
-    pestañas cuadren con lo que se está viendo; sin él, el filtro de fechas dejaría
-    unas pestañas anunciando más de lo que muestran."""
+    Acepta los mismos filtros que `listar_movimientos` para que los conteos de las
+    pestañas cuadren con lo que se está viendo; sin ellos, el filtro de fechas o el
+    de equipo dejaría unas pestañas anunciando más de lo que muestran."""
     cond, params = _rango_fechas(desde, hasta)
+    if equipo:
+        cond.append("equipo = ?"); params.append(equipo)
     where = (" WHERE " + " AND ".join(cond)) if cond else ""
     with _conectar() as con:
         filas = con.execute(

@@ -480,6 +480,36 @@ async def _revisar_actualizacion_2do_plano(page: ft.Page, app: "AppActivosFijos"
         app.marcar_actualizacion_disponible(tag)
 
 
+async def _bitacora_uso_2do_plano(page: ft.Page) -> None:
+    """Deja constancia de que la herramienta estuvo abierta, y por cuánto.
+
+    Es la única señal de uso cuando NO se dan de alta ni se modifican activos:
+    sin ella, una semana en la que nadie abrió la app y una en la que se usó a
+    diario para consultar se ven exactamente igual en la bitácora.
+
+    Mide la ventana ABIERTA, no el trabajo efectivo: nadie distingue aquí a quien
+    opera de quien dejó la app de fondo. Sirve para adopción («¿este equipo la
+    usa?»), no para medir productividad.
+
+    Todo best-effort y en un hilo aparte: es un registro auxiliar y no puede
+    frenar la interfaz ni tumbar el arranque. Si el primer registro falla se
+    abandona la sesión —sin id no hay a qué latirle—, pero un latido perdido no
+    interrumpe los siguientes: puede ser la base ocupada un instante.
+    """
+    from core import bitacora, db
+
+    try:
+        id_sesion = await asyncio.to_thread(db.abrir_sesion_uso)
+    except Exception:  # noqa: BLE001 — la bitácora no es crítica para operar
+        return
+    while True:
+        await asyncio.sleep(bitacora.INTERVALO_LATIDO_SEG)
+        try:
+            await asyncio.to_thread(db.latir_sesion_uso, id_sesion)
+        except Exception:  # noqa: BLE001 — se reintenta en el siguiente latido
+            pass
+
+
 _CLAVE_VENTANA = "ventana"
 _CLAVE_TEMA = "tema"
 
@@ -600,6 +630,7 @@ async def main(page: ft.Page) -> None:
         return
 
     page.run_task(_revisar_actualizacion_2do_plano, page, app)
+    page.run_task(_bitacora_uso_2do_plano, page)
 
 
 def _configurar_taskbar(page: ft.Page) -> None:
