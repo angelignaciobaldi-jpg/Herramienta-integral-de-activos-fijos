@@ -98,6 +98,84 @@ class DialogoActualizarSipp:
                                    al_terminar=self.al_terminar)
 
 
+async def descargar_catalogos_empresa(app, id_empresa, empresa: str) -> bool:
+    """Descarga SOLO los catálogos contables de una empresa (departamentos,
+    sucursales, grupos y centros de costo). Devuelve True si quedaron cacheados.
+
+    Es el recorte de `actualizar_info_sipp` que necesita la plantilla de carga
+    masiva: sus desplegables se arman con esos catálogos y nada más. Bajar además
+    insumos, activos, empleados y costos —lo que hace la actualización completa—
+    multiplicaría la espera por algo que la plantilla no usa.
+
+    Se descarga con la empresa como ARGUMENTO, sin cambiar la empresa activa de la
+    sesión: `catalogos_sipp` está escrito así, y de paso evita dejar al RPA
+    apuntando a una empresa distinta de la que el usuario tiene en pantalla.
+    """
+    creds = credenciales.cargar()
+    if not creds or not creds[0]:
+        app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+        return False
+    usuario, contrasena = creds
+
+    page = app.page
+    ui_loop = asyncio.get_running_loop()
+    txt = ft.Text("Conectando al SIPP…", size=13)
+    barra = ft.ProgressBar()
+    modal = Modal(page, "Descargando catálogos del SIPP",
+                  subtitulo=f"Empresa: {empresa}", ancho=460)
+    modal.cuerpo.controls = [
+        txt, barra,
+        # El tiempo se anuncia porque el costo real no se ve: son cientos de
+        # consultas (una por sucursal y otra por cada grupo de centro de costo),
+        # y una barra sin contexto parece atorada.
+        ft.Text("Se consulta sucursal por sucursal y grupo por grupo, así que "
+                "puede tardar varios minutos. Solo hace falta la primera vez por "
+                "empresa.", size=11, color=GRIS, no_wrap=False)]
+    modal.abrir()
+
+    def avance(hechos: int, total: int) -> None:
+        def aplicar() -> None:
+            barra.value = (hechos / total) if total else None
+            txt.value = f"Descargando centros de costo… ({hechos} de {total} sucursales)"
+            modal.refrescar()
+        ui_loop.call_soon_threadsafe(aplicar)
+
+    def mensaje(texto: str) -> None:
+        def aplicar() -> None:
+            txt.value = texto
+            barra.value = None
+            modal.refrescar()
+        ui_loop.call_soon_threadsafe(aplicar)
+
+    error = None
+
+    async def flujo() -> None:
+        nonlocal error
+        from core import catalogos_sipp
+        from core.rpa_sipp import SesionSipp, mensaje_amigable
+        try:
+            async with SesionSipp(headless=True) as sipp:
+                await sipp.login(usuario, contrasena)
+                await catalogos_sipp.descargar_catalogos(
+                    sipp, id_empresa, progreso=avance, mensaje=mensaje)
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            error = mensaje_amigable(exc)
+
+    from core.rpa_sipp import BucleRpa
+    bucle = BucleRpa()
+    try:
+        await asyncio.wrap_future(bucle.enviar(flujo()))
+    finally:
+        bucle.cerrar()
+        modal.cerrar()
+
+    if error:
+        app.avisar(f"No se pudieron descargar los catálogos: {error}", ROJO,
+                   duracion=9000)
+        return False
+    return True
+
+
 async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) -> None:
     """Descarga insumos+activos (de `id_empresa`) y empleados (global) del SIPP.
 

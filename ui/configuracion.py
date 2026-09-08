@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import flet as ft
 
-from core import ajustes_api, credenciales, qr
+from core import ajustes_api, bitacora, credenciales, qr
 from ui.comun import GRIS, VERDE
 from ui.componentes import (boton_herramienta, boton_primario, campo_texto,
                             tarjeta_seccion)
@@ -127,6 +127,10 @@ class SeccionConfiguracion:
         preferencia; token cifrado con DPAPI solo si se capturó uno nuevo)."""
         usuario, contrasena = self.credenciales()
         credenciales.guardar(usuario, contrasena)
+        # La bitácora cachea el usuario del SIPP al arrancar; sin refrescarla,
+        # los movimientos que se hagan tras cambiarlo se seguirían atribuyendo a
+        # la persona anterior hasta reiniciar la app.
+        bitacora.identidad(refrescar=True)
         ajustes_api.guardar_base_url(self.tf_api_url.value or "")
         token = (self.tf_api_token.value or "").strip()
         if token:  # vacío -> se conserva el token guardado (no se borra al guardar)

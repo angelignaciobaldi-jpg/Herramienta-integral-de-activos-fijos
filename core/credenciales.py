@@ -37,6 +37,21 @@ def cargar() -> tuple[str, str] | None:
         return None
 
 
+def usuario() -> str:
+    """Solo el nombre de usuario, sin tocar la contraseña.
+
+    `cargar()` descifra con DPAPI para devolver el par completo; la bitácora solo
+    necesita saber quién opera, y descifrar un secreto que no se va a usar es
+    exponerlo sin motivo. Devuelve "" si no hay credenciales guardadas."""
+    if not os.path.exists(RUTA):
+        return ""
+    try:
+        with open(RUTA, encoding="utf-8") as fh:
+            return json.load(fh).get("usuario", "") or ""
+    except (OSError, ValueError):
+        return ""
+
+
 def borrar() -> None:
     """Elimina las credenciales guardadas."""
     try:

@@ -196,10 +196,10 @@ class SeccionRegistroActivos:
             [
                 boton_herramienta("Seleccionar todos", ft.Icons.SELECT_ALL,
                                   self._seleccionar_todos),
-                boton_herramienta("Consultar movimientos", ft.Icons.HISTORY,
+                boton_herramienta("Consultar bitácora", ft.Icons.HISTORY,
                                   self._abrir_movimientos,
-                                  tooltip="Historial de altas y modificaciones "
-                                          "enviadas al SIPP"),
+                                  tooltip="Altas y modificaciones enviadas al "
+                                          "SIPP, y uso de la herramienta"),
                 boton_herramienta("Eliminar seleccionados", ft.Icons.DELETE_OUTLINE,
                                   self._eliminar_seleccionados, destructivo=True),
             ],
@@ -2502,15 +2502,21 @@ class SeccionRegistroActivos:
 
     # ------------------------------------------------ historial de movimientos
     def _abrir_movimientos(self, _e=None) -> None:
-        """Historial de lo enviado al SIPP, separado en Altas y Modificaciones.
+        """Bitácora: Altas, Modificaciones y Sesiones de uso de la herramienta.
 
-        Responde la pregunta de operación «¿qué se hizo y cuándo?», que antes solo
-        vivía en el reporte de la corrida y se perdía al cerrarlo."""
+        Las dos primeras responden la pregunta de operación «¿qué se hizo y
+        cuándo?», que antes solo vivía en el reporte de la corrida y se perdía al
+        cerrarlo. La tercera responde la de adopción —«¿se está usando?»—, que las
+        otras dos no pueden: un equipo que abre la herramienta a diario para
+        consultar no deja NINGÚN movimiento.
+        """
         resumen = db.resumen_movimientos()
-        if not resumen:
+        uso = db.resumen_sesiones_uso()
+        if not resumen and not uso["sesiones"]:
             self.app.avisar(
-                "Todavía no hay movimientos registrados. Se van guardando conforme "
-                "des de alta o modifiques activos en el SIPP.", NARANJA, duracion=8000)
+                "Todavía no hay nada en la bitácora. Se va llenando conforme se "
+                "abra la herramienta y se den de alta o modifiquen activos.",
+                NARANJA, duracion=8000)
             return
 
         LIMITE = 300
@@ -2531,9 +2537,20 @@ class SeccionRegistroActivos:
             "Estado", list(_ESTADOS), valor="Todos", flotante=True,
             editable=False, on_change=lambda _v: pintar())
 
+        # Equipo: es la pregunta de fondo de la bitácora («¿desde qué máquinas se
+        # está usando la herramienta?»). Las opciones salen de lo REGISTRADO, no
+        # de un catálogo: un equipo que nunca movió nada no tiene por qué ocupar
+        # un renglón del filtro.
+        _TODOS_EQUIPOS = "Todos"
+        _blq_equipo, f_equipo = campo_opciones(
+            "Equipo", [_TODOS_EQUIPOS] + db.equipos_registrados(),
+            valor=_TODOS_EQUIPOS, flotante=True,
+            on_change=lambda _v: pintar())
+
         def _limpiar_filtros(_e=None) -> None:
             f_desde.value = f_hasta.value = ""
             f_estado.value = "Todos"
+            f_equipo.value = _TODOS_EQUIPOS
             pintar()
 
         def _periodo() -> "tuple[str | None, str | None, str]":
@@ -2547,8 +2564,6 @@ class SeccionRegistroActivos:
                     h.strftime("%Y-%m-%d") if h else None, "")
 
         def pintar(_e=None) -> None:
-            tipo = (db.MOV_ALTA if tabs.activa == "altas"
-                    else db.MOV_MODIFICACION)
             desde, hasta, aviso = _periodo()
             if aviso:
                 lista.controls = [ft.Container(ft.Text(aviso, size=12, color=NARANJA),
@@ -2556,13 +2571,25 @@ class SeccionRegistroActivos:
                 estado.value = ""
                 modal.refrescar()
                 return
+            equipo = (f_equipo.value or _TODOS_EQUIPOS)
+            equipo = None if equipo == _TODOS_EQUIPOS else equipo
+            # Los conteos de las tres pestañas se recalculan SIEMPRE, se esté en
+            # la que se esté: si solo se actualizara la activa, las otras dos
+            # seguirían anunciando el total sin filtrar.
+            tabs.set_conteo("sesiones",
+                            db.resumen_sesiones_uso(desde, hasta, equipo)["sesiones"])
+            if tabs.activa == "sesiones":
+                _pintar_sesiones(desde, hasta, equipo)
+                return
+            tipo = (db.MOV_ALTA if tabs.activa == "altas"
+                    else db.MOV_MODIFICACION)
             solo = _ESTADOS.get(f_estado.value or "Todos")
             movs = db.listar_movimientos(tipo, tf.value or "", desde, hasta, solo,
-                                         LIMITE)
+                                         LIMITE, equipo)
             # Los conteos de las pestañas siguen a los filtros: si no, anunciarían
             # más movimientos de los que la lista puede mostrar. El resumen ya trae
             # total y exitosos por tipo, así que el estado se resuelve restando.
-            por_tipo = db.resumen_movimientos(desde, hasta)
+            por_tipo = db.resumen_movimientos(desde, hasta, equipo)
 
             def _cuantos(clave: str) -> int:
                 r = por_tipo.get(clave, {})
@@ -2588,12 +2615,67 @@ class SeccionRegistroActivos:
                                  f"acota el periodo para ver el resto")
             modal.refrescar()
 
+        def _duracion(minutos: int) -> str:
+            """«2 h 15 min». En minutos sueltos, una jornada («487 min») obliga a
+            hacer la división mentalmente para saber si es mucho o poco."""
+            if minutos < 60:
+                return f"{minutos} min"
+            horas, resto = divmod(minutos, 60)
+            return f"{horas} h" + (f" {resto} min" if resto else "")
+
+        def _pintar_sesiones(desde, hasta, equipo) -> None:
+            """Pestaña de uso: una línea por vez que se abrió la herramienta."""
+            sesiones = db.listar_sesiones_uso(desde, hasta, equipo,
+                                              tf.value or "", LIMITE)
+            res = db.resumen_sesiones_uso(desde, hasta, equipo)
+            lista.controls = [_fila_sesion(x) for x in sesiones] or [
+                ft.Container(ft.Text("Sin sesiones con ese criterio.", size=12,
+                                     color=GRIS), padding=12)]
+            # Equipos y tiempo total van juntos porque es el par que se lee para
+            # juzgar adopción: cuántas máquinas y cuánto se trabajó en ellas.
+            estado.value = (f"{res['sesiones']} sesión(es) · "
+                            f"{res['equipos']} equipo(s) · "
+                            f"{_duracion(res['minutos'])} en total")
+            if len(sesiones) >= LIMITE:
+                estado.value += (f" · se listan las {LIMITE} más recientes; "
+                                 f"acota el periodo para ver el resto")
+            modal.refrescar()
+
+        def _fila_sesion(x: dict) -> ft.Control:
+            quien = " · ".join(p for p in (
+                x.get("equipo") or "(equipo sin registrar)",
+                x.get("usuario_sipp") or x.get("usuario_windows") or "") if p)
+            detalle = [
+                ft.Row([ft.Text(quien, size=12, weight=ft.FontWeight.W_500,
+                                color=ft.Colors.ON_SURFACE, expand=True),
+                        ft.Text(_fecha_corta(x.get("inicio")), size=11, color=GRIS)],
+                       spacing=8),
+                ft.Text(f"Abierta {_duracion(x.get('minutos') or 0)}"
+                        + (f"  ·  versión {x['version_app']}"
+                           if x.get("version_app") else ""),
+                        size=11, color=GRIS)]
+            return ft.Container(
+                ft.Row([ft.Icon(ft.Icons.LAPTOP_CHROMEBOOK, size=16,
+                                color=ft.Colors.PRIMARY),
+                        ft.Column(detalle, spacing=2, tight=True, expand=True)],
+                       spacing=8, vertical_alignment=ft.CrossAxisAlignment.START),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=8)
+
         def _fila_movimiento(m: dict) -> ft.Control:
             ok = m["exito"]
             titulo = m.get("insumo") or "(sin insumo)"
             if m.get("etiqueta"):
                 titulo += f"  ·  {m['etiqueta']}"
             ubic = " · ".join(p for p in (m.get("empresa"), m.get("sucursal")) if p)
+            # Origen: equipo y quién operó. Va en su propio renglón y no mezclado
+            # con la ubicación del activo, porque responde otra pregunta («quién
+            # lo hizo») y confundir ambas al leer sería fácil.
+            origen = " · ".join(p for p in (
+                m.get("equipo") or "(equipo sin registrar)",
+                m.get("usuario_sipp") or m.get("usuario_windows") or "") if p)
             detalle = ft.Column(
                 [ft.Row([ft.Text(titulo, size=12, weight=ft.FontWeight.W_500,
                                  color=ft.Colors.ON_SURFACE, expand=True),
@@ -2602,7 +2684,14 @@ class SeccionRegistroActivos:
                          ft.Text(_fecha_corta(m.get("fecha")), size=11, color=GRIS)],
                         spacing=8),
                  ft.Text(" · ".join(p for p in (ubic, m.get("observacion") or "") if p),
-                         size=11, color=GRIS, no_wrap=False)],
+                         size=11, color=GRIS, no_wrap=False),
+                 ft.Row([ft.Icon(ft.Icons.COMPUTER, size=12,
+                                 color=ft.Colors.ON_SURFACE_VARIANT),
+                         ft.Text(origen, size=11,
+                                 color=ft.Colors.ON_SURFACE_VARIANT,
+                                 no_wrap=False, expand=True)],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER)],
                 spacing=2, tight=True, expand=True)
             # Las modificaciones muestran su antes -> después, igual que el reporte.
             for cambio in (m.get("cambios") or []):
@@ -2631,24 +2720,45 @@ class SeccionRegistroActivos:
                 border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
                 border_radius=8)
 
+        def _cambiar_pestana(clave: str) -> None:
+            """Los filtros que no aplican se OCULTAN, no se dejan inertes.
+
+            En «Sesiones» no hay correcto/con problema que filtrar, y un
+            desplegable que no hace nada al moverlo se lee como un defecto. El
+            buscador sí sirve, pero busca otra cosa, así que cambia de rótulo."""
+            es_uso = clave == "sesiones"
+            caja_estado.visible = not es_uso
+            tf.hint_text = ("Buscar por equipo o usuario…" if es_uso
+                            else "Buscar por etiqueta, insumo o serie…")
+            pintar()
+
         tabs = Pestanas(
             [("altas", "Altas", ft.Icons.ADD_CIRCLE_OUTLINE),
-             ("modificaciones", "Modificaciones", ft.Icons.EDIT_OUTLINED)],
-            al_cambiar=lambda _clave: pintar())
+             ("modificaciones", "Modificaciones", ft.Icons.EDIT_OUTLINED),
+             ("sesiones", "Sesiones de uso", ft.Icons.LAPTOP_CHROMEBOOK)],
+            al_cambiar=_cambiar_pestana)
         tf.on_change = lambda _e: pintar()
 
+        # El contenedor se guarda aparte porque es LO QUE SE OCULTA en la pestaña
+        # de sesiones: esconder solo el desplegable dejaría su hueco reservado por
+        # el `expand` del contenedor, y los otros dos filtros no se recorrerían.
+        caja_estado = ft.Container(_blq_estado, expand=True)
         filtros = ft.Row(
             [ft.Container(f_desde.control, expand=True),
              ft.Container(f_hasta.control, expand=True),
-             ft.Container(_blq_estado, expand=True),
+             caja_estado,
              boton_herramienta("Limpiar", ft.Icons.FILTER_ALT_OFF_OUTLINED,
                                _limpiar_filtros,
-                               tooltip="Quitar los filtros de fecha y estado")],
+                               tooltip="Quitar los filtros de fecha, estado y equipo")],
             spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        modal = Modal(self.page, "Movimientos realizados", ancho=840, alto_cuerpo=520)
-        modal.cuerpo.controls = [tabs.control, tf, filtros, estado,
-                                 ft.Container(lista, height=320)]
+        modal = Modal(self.page, "Bitácora de la herramienta", ancho=840,
+                      alto_cuerpo=520)
+        modal.cuerpo.controls = [
+            tabs.control,
+            ft.Row([tf, ft.Container(_blq_equipo, width=240)], spacing=8,
+                   vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            filtros, estado, ft.Container(lista, height=320)]
         modal.set_acciones([boton_herramienta("Cerrar",
                                               on_click=lambda _e: modal.cerrar())])
         pintar()
