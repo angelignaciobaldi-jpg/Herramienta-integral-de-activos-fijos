@@ -1570,6 +1570,60 @@ def listar_centros_cc(id_empresa: int, id_grupo: int) -> list[str]:
     return [f["nb_centro"] for f in filas]
 
 
+def catalogo_cc_empresa(id_empresa: int) -> list[dict]:
+    """Árbol sucursal -> grupos -> centros de costo de una empresa, en 3 consultas.
+
+    [{"sucursal": nb, "grupos": [{"nb_grupo": nb, "centros": [nb, ...]}, ...]}, ...]
+
+    Existe para la plantilla de carga masiva, que necesita el catálogo COMPLETO de
+    una vez: pedirlo con `listar_grupos_cc` + `listar_centros_cc` serían cientos de
+    consultas (Abastecedora tiene 145 grupos y 10,499 centros).
+
+    Se listan TODAS las sucursales de la empresa, incluso las que no tienen grupos:
+    la sucursal es la ubicación del activo, y esconderla porque su catálogo contable
+    esté vacío impediría registrar activos que sí están ahí.
+    """
+    with _conectar() as con:
+        sucursales = [f["nb_sucursal"] for f in con.execute(
+            "SELECT nb_sucursal FROM sucursales_sipp WHERE id_empresa = ? "
+            "AND IFNULL(nb_sucursal,'') <> '' ORDER BY nb_sucursal", (id_empresa,))]
+        grupos = con.execute(
+            "SELECT id_grupo, nb_grupo, sucursal_norm FROM grupos_cc_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_grupo,'') <> '' "
+            "ORDER BY nb_grupo", (id_empresa,)).fetchall()
+        centros = con.execute(
+            "SELECT id_grupo, nb_centro FROM centros_cc_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_centro,'') <> '' "
+            "ORDER BY nb_centro", (id_empresa,)).fetchall()
+
+    por_grupo: dict = {}
+    for c in centros:
+        por_grupo.setdefault(c["id_grupo"], []).append(c["nb_centro"])
+    # Los grupos se indexan por la sucursal NORMALIZADA porque es como los guarda
+    # el SIPP; el nombre que se muestra sale de `sucursales_sipp`, que puede
+    # diferir en acentos o espacios.
+    por_sucursal: dict = {}
+    for g in grupos:
+        por_sucursal.setdefault(g["sucursal_norm"], []).append(
+            {"nb_grupo": g["nb_grupo"], "centros": por_grupo.get(g["id_grupo"], [])})
+    return [{"sucursal": nb, "grupos": por_sucursal.get(_norm_suc(nb), [])}
+            for nb in sucursales]
+
+
+def empresas_con_catalogo() -> list[int]:
+    """Ids de empresa que ya tienen catálogo de centros de costo descargado.
+
+    La plantilla de carga masiva lo consulta para saber si puede generarse de
+    inmediato o si antes hay que bajar los catálogos del SIPP. NO limita qué
+    empresas se ofrecen: se ofrecen todas, y la que no tenga catálogo lo descarga
+    en el momento."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT DISTINCT id_empresa FROM grupos_cc_sipp ORDER BY id_empresa"
+        ).fetchall()
+    return [f["id_empresa"] for f in filas]
+
+
 def eliminar_levantamientos(ids: list[int]) -> None:
     """Elimina varios registros del levantamiento en una sola transacción."""
     if not ids:

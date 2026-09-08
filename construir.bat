@@ -20,6 +20,10 @@ if exist "Imagenes\" set DATAARGS=%DATAARGS% --add-data "Imagenes:Imagenes"
 rem  Tipografia Inter (opcional): si la carpeta no esta, la app usa la fuente
 rem  del sistema. Ver ui\tema.py -> registrar_fuente().
 if exist "Fuentes\" set DATAARGS=%DATAARGS% --add-data "Fuentes:Fuentes"
+rem  Catalogos curados que la app lee de solo lectura (insumos depurados para la
+rem  plantilla de carga masiva). Sin esta carpeta la plantilla sale sin ese
+rem  desplegable, pero se genera igual.
+if exist "Catalogos\" set DATAARGS=%DATAARGS% --add-data "Catalogos:Catalogos"
 
 flet pack app.py -n "ActivosFijos" -D ^
   --icon "Imagenes\icon.ico" ^

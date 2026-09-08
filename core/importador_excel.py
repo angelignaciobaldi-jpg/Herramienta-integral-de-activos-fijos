@@ -179,13 +179,93 @@ def columnas_obligatorias() -> list[str]:
     return columnas
 
 
-def generar_plantilla(ruta: str) -> str:
-    """Crea en `ruta` un Excel plantilla de carga masiva: hoja «Activos» con TODOS
-    los campos del alta y una hoja «Instrucciones». Devuelve la ruta escrita.
+# Hasta qué fila alcanzan las listas desplegables y el sombreado de la plantilla.
+# Es el tope de activos por archivo; más que eso conviene partir el levantamiento.
+_FILAS_PLANTILLA = 1000
 
-    Se deja SIN filas de datos para no importar ejemplos por error; el formato y el
-    truco de varias etiquetas por fila se explican en la hoja de instrucciones.
-    TIPO DE ACTIVO y SITUACION traen lista desplegable con los valores válidos."""
+# Colores de la plantilla. Van como literales —y no como roles de Material, que es
+# la regla dentro de la herramienta— porque este archivo se ve en Excel, fuera de
+# la app y de su tema.
+_AZUL_ENCABEZADO = "1F3A5F"
+_AMBAR_ENCABEZADO = "B26A00"
+_AMBAR_CUERPO = "FFF3E0"      # relleno tenue de la columna obligatoria
+
+
+def _hoja_listas(wb, empresa: str):
+    """Crea la hoja OCULTA con los catálogos y define sus rangos con nombre.
+
+    Devuelve `(nombres, arbol)`: los rangos creados y el árbol
+    sucursal->grupos->centros con que se armaron, para que el llamador escriba las
+    fórmulas de validación.
+
+    Los catálogos van en una hoja y no escritos dentro de la validación porque
+    Excel limita esas listas a 255 caracteres: con 10,499 centros de costo no hay
+    otra forma. Se oculta para que nadie la edite creyendo que es parte de la
+    captura.
+
+    Los rangos de centros se nombran por POSICIÓN (`CC_<i>_<j>`) y no por el
+    nombre del grupo: dentro de una misma empresa hay grupos homónimos en
+    distintas sucursales —«NOMINAS» aparece en 33 de Abastecedora—, así que un
+    nombre derivado del texto colisionaría y ofrecería los centros de la sucursal
+    equivocada.
+    """
+    from openpyxl.utils import get_column_letter
+    from openpyxl.workbook.defined_name import DefinedName
+
+    from core import db, insumos_depurados
+
+    ws = wb.create_sheet("Listas")
+    ws.sheet_state = "hidden"
+    nombres: dict = {}
+    col = 1
+
+    def _volcar(titulo: str, valores: list, nombre_rango: str) -> None:
+        """Escribe una lista en la siguiente columna libre y le pone nombre."""
+        nonlocal col
+        letra = get_column_letter(col)
+        ws.cell(row=1, column=col, value=titulo)
+        for i, v in enumerate(valores, 2):
+            ws.cell(row=i, column=col, value=v)
+        if valores:
+            ref = f"Listas!${letra}$2:${letra}${len(valores) + 1}"
+            wb.defined_names.add(DefinedName(nombre_rango, attr_text=ref))
+            nombres[nombre_rango] = ref
+        col += 1
+
+    _volcar("INSUMOS DEPURADOS", insumos_depurados.nombres(), "INSUMOS")
+
+    id_empresa = ID_POR_EMPRESA.get(empresa) if empresa else None
+    arbol = db.catalogo_cc_empresa(id_empresa) if id_empresa is not None else []
+    if arbol:
+        _volcar("SUCURSALES", [s["sucursal"] for s in arbol], "SUCURSALES")
+        for i, suc in enumerate(arbol, 1):
+            _volcar(f"GRUPOS {suc['sucursal']}",
+                    [g["nb_grupo"] for g in suc["grupos"]], f"GRP_{i}")
+            for j, grupo in enumerate(suc["grupos"], 1):
+                _volcar(f"CC {suc['sucursal']} / {grupo['nb_grupo']}",
+                        grupo["centros"], f"CC_{i}_{j}")
+    if id_empresa is not None:
+        _volcar("DEPARTAMENTOS", db.listar_departamentos(id_empresa), "DEPARTAMENTOS")
+    return nombres, arbol
+
+
+def generar_plantilla(ruta: str, empresa: str = "") -> str:
+    """Crea en `ruta` un Excel plantilla de carga masiva. Devuelve la ruta escrita.
+
+    `empresa` (nombre del catálogo de Grupo Petroil) mete en el archivo los
+    catálogos contables DE ESA EMPRESA. Sin ella sale la plantilla genérica, solo
+    con los desplegables que no dependen de la empresa.
+
+    Hoja «Activos» con todos los campos del alta, hoja «Instrucciones» y hoja
+    oculta «Listas» con los catálogos. Se deja SIN filas de datos para no importar
+    ejemplos por error.
+
+    Las tres columnas contables ENCADENAN: la sucursal acota los grupos y el grupo
+    acota los centros de costo. Es lo único que vuelve capturable esa parte
+    —Abastecedora tiene 10,499 centros— y de paso evita la combinación imposible
+    (un centro que no pertenece al grupo capturado), que hoy no se descubre hasta
+    que el alta falla en el portal.
+    """
     from openpyxl.comments import Comment
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -196,48 +276,114 @@ def generar_plantilla(ruta: str) -> str:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Activos"
+    nombres, arbol = _hoja_listas(wb, empresa)
+
+    def _letra(encabezado: str) -> str:
+        return get_column_letter(PLANTILLA_ENCABEZADOS.index(encabezado) + 1)
+
     # Los obligatorios llevan «*» en el rótulo, como en los formularios de la
     # herramienta, y color propio: el asterisco solo se ve de cerca y la fila de
     # encabezados es ancha.
     ws.append([f"{h} *" if h in obligatorias else h for h in PLANTILLA_ENCABEZADOS])
+    relleno_cuerpo = PatternFill("solid", fgColor=_AMBAR_CUERPO)
     for i, celda in enumerate(ws[1], 1):
         encabezado = PLANTILLA_ENCABEZADOS[i - 1]
         es_obligatorio = encabezado in obligatorias
         celda.font = Font(bold=True, color="FFFFFF")
-        celda.fill = PatternFill("solid",
-                                 fgColor="B26A00" if es_obligatorio else "1F3A5F")
+        celda.fill = PatternFill(
+            "solid", fgColor=_AMBAR_ENCABEZADO if es_obligatorio else _AZUL_ENCABEZADO)
         celda.alignment = Alignment(horizontal="center", vertical="center")
         if es_obligatorio:
             celda.comment = Comment(
                 "Campo OBLIGATORIO del alta en el SIPP: sin él el activo no se "
                 "puede dar de alta.", "Herramienta de Activos Fijos")
+            # El cuerpo de la columna también se tiñe: capturando en la fila 40 el
+            # encabezado ya se salió de la pantalla, y el color era justo la pista
+            # de que ese dato no se puede dejar en blanco.
+            for fila in range(2, _FILAS_PLANTILLA + 1):
+                ws.cell(row=fila, column=i).fill = relleno_cuerpo
         ws.column_dimensions[get_column_letter(i)].width = min(
             40, max(14, len(encabezado) + 4))
     ws.freeze_panes = "A2"
 
-    # Listas desplegables para TIPO DE ACTIVO y SITUACION (valores válidos del SIPP).
-    def _validacion(valores, col_header):
-        formula = '"' + ",".join(valores) + '"'
-        if len(formula) > 255:  # límite de Excel para listas embebidas
-            return
-        col = get_column_letter(PLANTILLA_ENCABEZADOS.index(col_header) + 1)
-        dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+    def _validar(encabezado: str, formula: str, *, bloquear: bool,
+                 mensaje: str = "") -> None:
+        # La fórmula va SIN el «=» inicial: así la escribe Excel y así la pide el
+        # OOXML. Con el signo, algunas versiones descartan la validación en
+        # silencio y la columna queda sin desplegable sin decir por qué.
+        formula = formula.lstrip("=")
+        col = _letra(encabezado)
+        dv = DataValidation(type="list", formula1=formula, allow_blank=True,
+                            showErrorMessage=bloquear)
+        if bloquear and mensaje:
+            dv.errorTitle, dv.error = "Valor fuera del catálogo", mensaje
         ws.add_data_validation(dv)
-        dv.add(f"{col}2:{col}1000")
+        dv.add(f"{col}2:{col}{_FILAS_PLANTILLA}")
 
-    _validacion(list(TIPOS_ACTIVO.values()), "TIPO DE ACTIVO")
-    _validacion(list(SITUACIONES.values()), "SITUACION")
+    def _validar_embebida(valores: list, encabezado: str) -> None:
+        """Lista escrita dentro de la validación; solo si cabe en 255 caracteres."""
+        formula = '"' + ",".join(valores) + '"'
+        if len(formula) <= 255:
+            _validar(encabezado, formula, bloquear=True,
+                     mensaje="Elige uno de los valores de la lista.")
+
+    _validar_embebida(list(TIPOS_ACTIVO.values()), "TIPO DE ACTIVO")
+    _validar_embebida(list(SITUACIONES.values()), "SITUACION")
+
+    # INSUMO sugiere, no obliga: el catálogo depurado es un recorte de genéricos y
+    # un activo legítimo puede quedar fuera. Bloquear dejaría al capturista sin
+    # salida dentro del archivo.
+    if "INSUMOS" in nombres:
+        _validar("INSUMO", "=INSUMOS", bloquear=False)
+    if "DEPARTAMENTOS" in nombres:
+        _validar("DEPARTAMENTO", "=DEPARTAMENTOS", bloquear=False)
+
+    if arbol:
+        col_suc, col_grupo = _letra("SUCURSAL"), _letra("GRUPO CENTRO DE COSTO")
+        # `$X2` es relativo a la FILA: Excel lo corre solo en cada renglón del
+        # rango, así que cada fila consulta su propia sucursal y su propio grupo.
+        idx_suc = f'MATCH(${col_suc}2,SUCURSALES,0)'
+        idx_grupo = f'MATCH(${col_grupo}2,INDIRECT("GRP_"&{idx_suc}),0)'
+        _validar("SUCURSAL", "=SUCURSALES", bloquear=True,
+                 mensaje="Elige una sucursal del catálogo del SIPP de esta empresa.")
+        # Grupo y centro NO bloquean: su fórmula depende de lo capturado arriba y,
+        # mientras la sucursal esté vacía o mal escrita, INDIRECT devuelve error.
+        # Bloqueando, ese error volvería la celda imposible de llenar; así el
+        # desplegable ayuda cuando puede y nunca estorba.
+        _validar("GRUPO CENTRO DE COSTO", f'=INDIRECT("GRP_"&{idx_suc})',
+                 bloquear=False)
+        _validar("CENTRO DE COSTO",
+                 f'=INDIRECT("CC_"&{idx_suc}&"_"&{idx_grupo})', bloquear=False)
+        # La empresa del archivo es UNA: el desplegable de un solo valor lo deja
+        # explícito y evita que se capture otra por costumbre.
+        for encabezado in ("EMPRESA", "EMPRESA COMPRA"):
+            _validar_embebida([empresa], encabezado)
 
     ins = wb.create_sheet("Instrucciones")
     ins.column_dimensions["A"].width = 100
     guia = [
         "CARGA MASIVA DE ACTIVOS — INSTRUCCIONES",
         "",
-        "COLUMNAS OBLIGATORIAS (encabezado en ÁMBAR y con «*»): "
-        + ", ".join(obligatorias) + ".",
+        (f"Plantilla de {empresa.upper()}: los desplegables de sucursal, grupo y "
+         f"centro de costo traen el catálogo de esta empresa, así que no sirve "
+         f"para otra." if empresa else
+         "Plantilla genérica: sin empresa elegida no trae los catálogos contables "
+         "(sucursal, grupo y centro de costo se capturan a mano)."),
+        "",
+        "COLUMNAS OBLIGATORIAS (encabezado en ÁMBAR y con «*», y la columna "
+        "sombreada): " + ", ".join(obligatorias) + ".",
         "Son los campos que el alta del SIPP exige para CUALQUIER tipo de activo. "
         "Sin ellos el activo no se puede dar de alta: el registro se importa igual, "
         "pero queda pendiente hasta completarlos en la ficha.",
+        "",
+        "CELDAS CON LISTA DESPLEGABLE",
+        "• INSUMO: catálogo depurado (los genéricos que sí son activo fijo). "
+        "Sugiere, pero acepta otro nombre si el que necesitas no está en la lista.",
+        "• SUCURSAL, GRUPO CENTRO DE COSTO y CENTRO DE COSTO están ENCADENADOS: "
+        "elige primero la sucursal y el desplegable de grupo se limita a los de "
+        "esa sucursal; al elegir el grupo, el de centro de costo se limita a los "
+        "suyos. Si capturas el grupo antes que la sucursal, la lista sale vacía.",
+        "• TIPO DE ACTIVO, SITUACION y DEPARTAMENTO también traen lista.",
         "",
         "Captura un activo por fila en la hoja «Activos». El Excel es la base del "
         "registro: lo que llenes aquí es lo que usará el alta automática (RPA); lo "
@@ -252,13 +398,12 @@ def generar_plantilla(ruta: str) -> str:
         "• ETIQUETA: número(s) de inventario (identificador principal).",
         "• SERIE: número de serie (opcional). Si hay varias, sepáralas por «/» en el "
         "mismo orden que las etiquetas.",
-        "• TIPO DE ACTIVO: elige de la lista desplegable.",
-        "• DESCRIPCION, SITUACION (lista desplegable).",
+        "• TIPO DE ACTIVO y SITUACION: elige de sus listas. DESCRIPCION es libre.",
         "",
         "COMPRA",
         "• COSTO, FACTURA (folio), PROVEEDOR, EMPRESA COMPRA, SUCURSAL COMPRA.",
-        "• GRUPO CENTRO DE COSTO, CENTRO DE COSTO, DEPARTAMENTO: tal como aparecen en "
-        "el catálogo del SIPP de la empresa.",
+        "• GRUPO CENTRO DE COSTO y CENTRO DE COSTO: elígelos de sus desplegables "
+        "(dependen de la SUCURSAL capturada). DEPARTAMENTO, del suyo.",
         "• FECHAS (ADQUISICION / GARANTIA / ASIGNACION): formato DD/MM/AAAA.",
         "",
         "RESGUARDO",
@@ -270,6 +415,7 @@ def generar_plantilla(ruta: str) -> str:
         "CARACTERÍSTICAS (según el tipo): MARCA, MODELO, CLIENTE, PLACA.",
         "",
         "No cambies los nombres de los encabezados de la hoja «Activos».",
+        "No borres la hoja oculta «Listas»: es de donde salen los desplegables.",
     ]
     for i, linea in enumerate(guia, 1):
         ins.cell(row=i, column=1, value=linea)
@@ -290,6 +436,15 @@ def analizar(ruta: str) -> list[HojaDetectada]:
 
 
 def _analizar_hoja(ws) -> HojaDetectada:
+    # Las hojas OCULTAS no se importan. La «Listas» de nuestra propia plantilla
+    # cae en el detector —sus títulos «INSUMOS DEPURADOS», «SUCURSALES» y
+    # «DEPARTAMENTOS» contienen los encabezados que busca— y ofrecería importar
+    # 1,693 renglones de catálogo como si fueran activos. Una hoja escondida no
+    # es captura del usuario, sea de esta plantilla o de cualquier otro archivo.
+    if getattr(ws, "sheet_state", "visible") != "visible":
+        return HojaDetectada(
+            ws.title, 0, {}, 0, 0, importable=False,
+            motivo="Hoja oculta: contiene catálogos de apoyo, no activos.")
     fila_hdr, columnas = _detectar_encabezado(ws)
     if not columnas or "insumo" not in columnas:
         return HojaDetectada(
