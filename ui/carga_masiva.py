@@ -17,9 +17,11 @@ import asyncio
 
 import flet as ft
 
-from core import importador_excel
+from core import db, importador_excel
+from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, error_al_guardar
-from ui.componentes import boton_herramienta, boton_primario, boton_secundario
+from ui.componentes import (boton_herramienta, boton_primario, boton_secundario,
+                            campo_opciones)
 
 _ANCHO = 640
 
@@ -56,6 +58,10 @@ class DialogoCargaMasiva:
         self._ruta: str | None = None
         self._hojas: list = []
         self._checks: dict = {}
+        # Los crea `_panel_inicio`; se declaran aquí para que
+        # `_descargar_plantilla` no dependa de que esa vista se haya pintado antes.
+        self._dd_empresa = None
+        self._aviso_empresa = None
         self._construir()
 
     # ------------------------------------------------------------ UI
@@ -74,8 +80,24 @@ class DialogoCargaMasiva:
             actions_alignment=ft.MainAxisAlignment.END,
         )
 
+    def _tiene_catalogo(self, empresa: str) -> bool:
+        """Si los catálogos contables de esa empresa ya están en la caché local."""
+        id_empresa = ID_POR_EMPRESA.get(empresa or "")
+        return id_empresa is not None and id_empresa in db.empresas_con_catalogo()
+
     def _panel_inicio(self) -> ft.Control:
         """Vista inicial del modal: descargar plantilla o subir el Excel lleno."""
+        # Se ofrecen TODAS las empresas, tenga o no catálogo la herramienta: si
+        # falta, se descarga en el momento. Limitar la lista a lo cacheado obligaba
+        # a adivinar que había que ir a «Actualizar SIPP» primero, y escondía
+        # empresas que sí se pueden trabajar.
+        actual = (self.contexto() or ("", "", ""))[0]
+        self._aviso_empresa = ft.Text("", size=11, no_wrap=False)
+        _blq_empresa, self._dd_empresa = campo_opciones(
+            "Empresa de la plantilla", list(NOMBRES_EMPRESAS),
+            valor=actual if actual in ID_POR_EMPRESA else None, flotante=True,
+            on_change=lambda _e: self._actualizar_aviso_empresa())
+        self._actualizar_aviso_empresa()
         return ft.Container(
             ft.Column(
                 [
@@ -85,6 +107,8 @@ class DialogoCargaMasiva:
                             "2) Súbela aquí para registrarlos en la herramienta.",
                             size=12, color=GRIS),
                     ft.Divider(),
+                    _blq_empresa,
+                    self._aviso_empresa,
                     ft.Row(
                         [boton_secundario("Descargar plantilla", ft.Icons.FILE_DOWNLOAD,
                                           self._descargar_plantilla),
@@ -97,6 +121,31 @@ class DialogoCargaMasiva:
                 ],
                 spacing=12, tight=True),
             width=_ANCHO)
+
+    def _actualizar_aviso_empresa(self) -> None:
+        """Adelanta si la descarga va a tardar, ANTES de que el usuario pulse.
+
+        Enterarse de una espera de varios minutos cuando ya arrancó es la peor
+        forma de enterarse: aquí se dice al elegir la empresa, que es cuando
+        todavía se puede decidir otra cosa."""
+        empresa = (self._dd_empresa.value or "").strip() if self._dd_empresa else ""
+        if not empresa:
+            self._aviso_empresa.value = (
+                "La plantilla trae los desplegables de sucursal, grupo y centro de "
+                "costo de la empresa que elijas.")
+            self._aviso_empresa.color = GRIS
+        elif self._tiene_catalogo(empresa):
+            self._aviso_empresa.value = (
+                f"Los catálogos de «{empresa}» ya están descargados: la plantilla "
+                f"se genera al instante.")
+            self._aviso_empresa.color = GRIS
+        else:
+            self._aviso_empresa.value = (
+                f"«{empresa}» todavía no tiene catálogos en la herramienta: se "
+                f"descargarán del SIPP antes de generar la plantilla (puede tardar "
+                f"varios minutos, solo la primera vez).")
+            self._aviso_empresa.color = NARANJA
+        self._safe_update()
 
     def _mostrar_inicio(self, _e=None) -> None:
         self.dialogo.content = self._panel_inicio()
@@ -129,19 +178,52 @@ class DialogoCargaMasiva:
 
     # --------------------------------------------------- descargar plantilla
     async def _descargar_plantilla(self, _e=None) -> None:
+        """Genera la plantilla con los catálogos de la empresa elegida.
+
+        La empresa se pide ANTES del diálogo de guardado: los desplegables de
+        sucursal, grupo y centro de costo se hornean dentro del archivo, así que
+        una plantilla ya generada no se puede reapuntar a otra empresa."""
+        empresa = (self._dd_empresa.value or "").strip() if self._dd_empresa else ""
+        if not empresa or empresa not in ID_POR_EMPRESA:
+            self.app.avisar("Elige la empresa de la plantilla.", NARANJA)
+            return
         destino = await self.app.picker.save_file(
             dialog_title="Guardar plantilla de carga masiva",
-            file_name="Plantilla carga masiva.xlsx", allowed_extensions=["xlsx"])
+            file_name=f"Plantilla carga masiva - {empresa}.xlsx",
+            allowed_extensions=["xlsx"])
         if not destino:
             return
         ruta = destino if destino.lower().endswith(".xlsx") else destino + ".xlsx"
+        # Se pide el destino ANTES de la descarga para que la espera sea una sola y
+        # sin interrupciones: al terminar el archivo ya está escrito, en vez de
+        # dejar al usuario mirando un diálogo tras varios minutos de proceso.
+        if not self._tiene_catalogo(empresa):
+            from ui.actualizar_sipp import descargar_catalogos_empresa
+
+            # El modal de carga masiva se cierra: durante la descarga no hay nada
+            # que hacer en él, y así el progreso no queda encimado sobre un
+            # diálogo que además tapa.
+            self.page.pop_dialog()
+            if not await descargar_catalogos_empresa(
+                    self.app, ID_POR_EMPRESA[empresa], empresa):
+                return          # el fallo ya se reportó
+            if not self._tiene_catalogo(empresa):
+                # Descarga correcta pero sin nada que guardar: la empresa no tiene
+                # centros de costo dados de alta en el SIPP. Se dice, en vez de
+                # entregar una plantilla con los desplegables vacíos sin explicar.
+                self.app.avisar(
+                    f"«{empresa}» no tiene grupos ni centros de costo en el SIPP. "
+                    f"La plantilla se genera, pero esas columnas irán sin lista.",
+                    NARANJA, duracion=9000)
         try:
-            await asyncio.to_thread(importador_excel.generar_plantilla, ruta)
+            await asyncio.to_thread(
+                importador_excel.generar_plantilla, ruta, empresa)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self.app.avisar(error_al_guardar(exc, ruta), ROJO, duracion=10000)
             return
         self.app.avisar(
-            "Plantilla descargada. Llénala y súbela aquí.", VERDE, accion="Abrir",
+            f"Plantilla de {empresa} descargada. Llénala y súbela aquí.", VERDE,
+            accion="Abrir",
             on_accion=lambda _e, x=ruta: self.app.abrir_en_sistema(x), duracion=8000)
 
     # ------------------------------------------------------ subir / analizar
