@@ -1711,140 +1711,221 @@ class SeccionRegistroActivos:
     # ------------------------------------------------------ búsqueda en SIPP
     async def _buscar(self, _e=None) -> None:
         """Compara cada activo del levantamiento contra los activos REALES ya
-        descargados del SIPP (caché por empresa): dado de alta si su etiqueta O
-        su número de serie coincide con los de algún activo cacheado."""
-        # Se evalúan TODOS los registros: los que tienen etiqueta se verifican contra
-        # el listado del SIPP; los que NO tienen etiqueta se dan por NO dados de alta
-        # (criterio), en vez de quedarse en "Pendiente".
+        descargados del SIPP: dado de alta si su ETIQUETA aparece en la caché.
+
+        La búsqueda es GENERAL: recorre las empresas descargadas, no solo la que
+        el registro tenga asignada. Antes, un activo cuya empresa estuviera mal
+        capturada —o vacía— salía «no dado de alta» aunque existiera en el SIPP, y
+        el RPA lo habría vuelto a crear.
+        """
         registros = db.listar_levantamiento()
         if not registros:
             self.app.avisar("No hay activos en el levantamiento para buscar.", ROJO)
             return
-        # El caché es por empresa: se agrupan los registros por su empresa.
-        from collections import defaultdict
-
-        from core.empresas import ID_POR_EMPRESA
-        por_empresa: dict[str, list] = defaultdict(list)
-        sin_empresa = 0
-        for r in registros:
-            idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
-            if idemp is None:
-                sin_empresa += 1
-            else:
-                por_empresa[r.empresa].append(r)
-        if not por_empresa:
-            self.app.avisar("Los activos no tienen una empresa válida asignada. "
-                            "Asigna la empresa (columna Empresa) y reintenta.", ROJO)
+        if not db.hay_activos_sipp():
+            self.app.avisar(
+                "No hay activos del SIPP descargados con qué comparar. Corre "
+                "«Actualizar SIPP» de al menos una empresa.", ROJO, duracion=9000)
             return
 
         self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
         try:
-            hechos, sin_cache = await asyncio.to_thread(
-                self._buscar_por_empresa, por_empresa)
+            hechos, ambiguos = await asyncio.to_thread(
+                self._clasificar_contra_sipp, registros)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._set_cargando(False)
             self.app.avisar(f"No se pudo buscar en el SIPP: {exc}", ROJO)
             return
         self._set_cargando(False)
 
+        # Las etiquetas que existen en varias empresas las resuelve el usuario: son
+        # activos DISTINTOS que comparten número, y elegir uno solo por orden le
+        # copiaría al registro el insumo y el resguardante de otro.
+        sin_resolver = 0
+        if ambiguos:
+            self._refrescar()
+            elegidos = await self._resolver_etiquetas_ambiguas(ambiguos)
+            if elegidos:
+                for r, datos in elegidos:
+                    self._aplicar_resultado_sipp(r, datos)
+                    hechos += 1
+            sin_resolver = len(ambiguos) - len(elegidos or [])
+
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
         n_no = len(db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA))
         self._refrescar()
-        if hechos == 0 and sin_cache:
-            self.app.avisar(
-                "Descarga primero los activos del SIPP de: "
-                + ", ".join(sin_cache)
-                + " (módulo «Generador de códigos QR»).", NARANJA, duracion=9000)
-            return
         msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
         extras = []
-        if sin_cache:
-            extras.append("sin caché (descárgalos): " + ", ".join(sin_cache))
-        if sin_empresa:
-            extras.append(f"{sin_empresa} sin empresa asignada")
+        if sin_resolver:
+            # No quedan como «no dado de alta»: eso invitaría al RPA a duplicarlos.
+            # Se quedan pendientes, que es lo que realmente son.
+            extras.append(f"{sin_resolver} sin resolver (siguen pendientes)")
         if extras:
             msg += " · " + " · ".join(extras)
         self.app.avisar(msg, VERDE if not extras else NARANJA,
                         duracion=9000 if extras else 6000)
 
-    def _buscar_por_empresa(self, por_empresa: dict) -> tuple[int, list[str]]:
-        """(hilo) Recorre cada empresa, usa su caché del SIPP y actualiza el
-        estatus de sus registros. Devuelve (registros_procesados, empresas_sin_caché)."""
+    def _marcar_no_dado_alta(self, r: "db.Levantamiento") -> None:
+        db.actualizar_estatus_levantamiento(r.id, db.EST_NO_DADO_ALTA, None, None)
+
+    def _aplicar_resultado_sipp(self, r: "db.Levantamiento", datos_sipp: dict) -> None:
+        """Marca el registro como dado de alta y adopta lo que el SIPP ya sabe.
+
+        Está fuera del bucle porque lo usan los dos caminos: el automático y el
+        del modal de desambiguación. Duplicarlo garantizaría que uno de los dos se
+        quedara atrás al tocar el prellenado."""
+        id_sipp = (datos_sipp.get("etiqueta") or "").strip() or None
+        db.actualizar_estatus_levantamiento(r.id, db.EST_DADO_ALTA, id_sipp, datos_sipp)
+        try:
+            idt = int(datos_sipp.get("id_tipo"))
+        except (TypeError, ValueError):
+            idt = None
+        id_tipo_nuevo = (idt if idt in TIPOS_ACTIVO
+                         and r.id_tipo_activo is None else None)
+        prefill = _prefill_desde_sipp(datos_sipp) if not r.datos() else None
+        # Los activos dados de alta ANTES de reflejar la serie quedaron con la
+        # columna vacía; al reconocerlos en el SIPP se adopta la suya (que suele
+        # ser su propia etiqueta).
+        serie_sipp = str(datos_sipp.get("serie") or "").strip()
+        serie_nueva = (serie_sipp if serie_sipp
+                       and not (r.no_serie or "").strip() else None)
+        # Si se adopta la serie del SIPP, el nombre no debe seguir arrastrándola
+        # pegada al final.
+        limpio = (archivos.nombre_sin_serie(
+            r.nombre_insumo, serie_nueva, r.etiqueta or "")
+            if serie_nueva else None)
+        if limpio == r.nombre_insumo:
+            limpio = None
+        if id_tipo_nuevo is not None or prefill or serie_nueva:
+            db.actualizar_datos_levantamiento(
+                r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill,
+                no_serie=serie_nueva, nombre_insumo=limpio)
+
+    def _clasificar_contra_sipp(self, registros: list) -> tuple:
+        """(hilo) Resuelve cada registro contra la caché del SIPP por ETIQUETA.
+
+        Devuelve `(hechos, ambiguos)`, con `ambiguos = [(registro, candidatos)]`.
+
+        Criterio: el identificador del alta es la ETIQUETA. Sin etiqueta se da por
+        NO dado de alta (ni se busca). Si la etiqueta aparece en la empresa del
+        propio registro se usa esa —dentro de una empresa la etiqueta es única, así
+        que no hay duda—; si no, se acepta la coincidencia global cuando es una
+        sola y se difiere al usuario cuando hay varias.
+        """
         from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
-        from core.proveedor_activos import ProveedorSipp, SinCacheActivos
-        hechos = 0
-        sin_cache: list[str] = []
-        for empresa, regs in por_empresa.items():
-            # Refresco previo por API (HTTP, sin navegador ni login): la búsqueda
-            # compara así contra el SIPP de AHORA, y funciona aunque nunca se haya
-            # corrido «Actualizar información del SIPP». Best-effort: si la API no
-            # está configurada o falla, se sigue con la caché tal como estaba, que
-            # es exactamente el comportamiento anterior.
-            if activos_sipp.hay_api():
+
+        # Refresco previo por API (HTTP, sin navegador ni login) de las empresas que
+        # los registros mencionan: la comparación es contra el SIPP de AHORA. Es
+        # best-effort; si la API no está configurada o falla, se usa la caché tal
+        # como esté, que es el comportamiento de siempre.
+        if activos_sipp.hay_api():
+            for nombre in {(r.empresa or "").strip() for r in registros}:
+                idemp = ID_POR_EMPRESA.get(nombre)
+                if idemp is None:
+                    continue
                 try:
-                    activos_sipp.descargar_activos_api(
-                        ID_POR_EMPRESA[empresa], empresa)
+                    activos_sipp.descargar_activos_api(idemp, nombre)
                 except Exception:  # noqa: BLE001 — se cae a la caché existente
                     pass
-            proveedor = ProveedorSipp(ID_POR_EMPRESA[empresa])
-            # Criterio: el identificador del alta es la ETIQUETA. Sin etiqueta se da
-            # por hecho que NO está dado de alta (ni se busca). Con etiqueta se busca
-            # EXACTA en el listado del SIPP: si está -> dado de alta; si no -> no dado
-            # de alta (se dará de alta). Sin serie ni coincidencia parcial.
-            etiquetas = sorted({(r.etiqueta or "").strip()
-                                for r in regs if (r.etiqueta or "").strip()})
-            resultados = {}
-            if etiquetas:   # sin etiquetas no hace falta la caché (todos serán no dado)
-                try:
-                    resultados = proveedor.buscar_por_etiqueta(etiquetas)
-                except SinCacheActivos:
-                    sin_cache.append(empresa)
-                    # Sin caché no se pueden verificar los que tienen etiqueta; pero
-                    # los que NO tienen etiqueta sí se marcan no dado de alta.
-                    for r in regs:
-                        if not (r.etiqueta or "").strip():
-                            db.actualizar_estatus_levantamiento(
-                                r.id, db.EST_NO_DADO_ALTA, None, None)
-                            hechos += 1
-                    continue
-            for r in regs:
-                etq = (r.etiqueta or "").strip()
-                res = resultados.get(etq) if etq else None
-                if res and res.dado_de_alta:
-                    dado, datos_sipp, id_sipp = True, res.datos, res.id_activo_sipp
-                else:
-                    dado, datos_sipp, id_sipp = False, None, None
-                estatus = db.EST_DADO_ALTA if dado else db.EST_NO_DADO_ALTA
-                db.actualizar_estatus_levantamiento(r.id, estatus, id_sipp, datos_sipp)
-                # Prefill del tipo/detalle desde el SIPP en la coincidencia exacta.
-                if dado and datos_sipp:
-                    try:
-                        idt = int(datos_sipp.get("id_tipo"))
-                    except (TypeError, ValueError):
-                        idt = None
-                    id_tipo_nuevo = (idt if idt in TIPOS_ACTIVO
-                                     and r.id_tipo_activo is None else None)
-                    prefill = _prefill_desde_sipp(datos_sipp) if not r.datos() else None
-                    # Los activos dados de alta ANTES de reflejar la serie quedaron
-                    # con la columna vacía; al reconocerlos en el SIPP se adopta la
-                    # suya (que suele ser su propia etiqueta).
-                    serie_sipp = str(datos_sipp.get("serie") or "").strip()
-                    serie_nueva = (serie_sipp if serie_sipp
-                                   and not (r.no_serie or "").strip() else None)
-                    # Si se adopta la serie del SIPP, el nombre no debe seguir
-                    # arrastrándola pegada al final.
-                    limpio = (archivos.nombre_sin_serie(
-                        r.nombre_insumo, serie_nueva, r.etiqueta or "")
-                        if serie_nueva else None)
-                    if limpio == r.nombre_insumo:
-                        limpio = None
-                    if id_tipo_nuevo is not None or prefill or serie_nueva:
-                        db.actualizar_datos_levantamiento(
-                            r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill,
-                            no_serie=serie_nueva, nombre_insumo=limpio)
+
+        candidatos = db.activos_sipp_por_etiquetas(
+            [(r.etiqueta or "") for r in registros])
+        hechos, ambiguos = 0, []
+        for r in registros:
+            etq = (r.etiqueta or "").strip()
+            opciones = candidatos.get(etq.upper(), []) if etq else []
+            if not opciones:
+                self._marcar_no_dado_alta(r)
                 hechos += 1
-        return hechos, sin_cache
+                continue
+            idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
+            propio = next((c for c in opciones
+                           if c.get("id_empresa") == idemp), None) if idemp else None
+            if propio is not None:
+                self._aplicar_resultado_sipp(r, propio)
+                hechos += 1
+            elif len(opciones) == 1:
+                self._aplicar_resultado_sipp(r, opciones[0])
+                hechos += 1
+            else:
+                ambiguos.append((r, opciones))
+        return hechos, ambiguos
+
+    async def _resolver_etiquetas_ambiguas(self, ambiguos: list) -> list:
+        """Pide elegir a qué activo corresponde cada etiqueta repetida.
+
+        `ambiguos`: [(registro, candidatos)]. Devuelve [(registro, activo elegido)]
+        SOLO de los resueltos: lo que no se elija se queda PENDIENTE, no «no dado
+        de alta» — marcarlo así invitaría al RPA a crear un duplicado de un activo
+        que sí existe.
+        """
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+        campos: dict = {}          # id de registro -> (registro, dropdown, opciones)
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        def _rotulo(c: dict) -> str:
+            partes = [c.get("empresa") or "(sin empresa)",
+                      c.get("insumo") or "(sin insumo)"]
+            if c.get("serie"):
+                partes.append(f"serie {c['serie']}")
+            if c.get("sucursal"):
+                partes.append(c["sucursal"])
+            return "  ·  ".join(partes)
+
+        lista = ft.ListView(spacing=10, expand=True)
+        for r, opciones in ambiguos:
+            rotulos = [_rotulo(c) for c in opciones]
+            _, dd = campo_opciones("¿Cuál es?", rotulos, flotante=True)
+            campos[r.id] = (r, dd, dict(zip(rotulos, opciones)))
+            lista.controls.append(ft.Container(
+                ft.Column(
+                    [ft.Row([ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=NARANJA),
+                             ft.Text(f"Etiqueta {r.etiqueta}", size=13,
+                                     weight=ft.FontWeight.W_600,
+                                     color=ft.Colors.ON_SURFACE, expand=True)],
+                            spacing=6),
+                     ft.Text(f"En el levantamiento: {r.nombre_insumo or '(sin insumo)'}"
+                             + (f"  ·  {r.empresa}" if r.empresa else ""),
+                             size=11, color=GRIS, no_wrap=False),
+                     ft.Text(f"Existe en {len(opciones)} empresas:", size=11,
+                             color=GRIS),
+                     dd],
+                    spacing=6, tight=True),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=8))
+
+        def _confirmar(_e=None) -> None:
+            elegidos = []
+            for r, dd, mapa in campos.values():
+                activo = mapa.get(dd.value or "")
+                if activo is not None:
+                    elegidos.append((r, activo))
+            responder(elegidos)
+
+        modal = Modal(self.page, "¿A qué activo corresponde cada etiqueta?",
+                      ancho=760, subtitulo=f"{len(ambiguos)} etiqueta(s) repetida(s)",
+                      alto_cuerpo=520, al_cerrar=lambda: responder([]))
+        modal.cuerpo.controls = [
+            ft.Text("Estas etiquetas existen en varias empresas del SIPP y no son el "
+                    "mismo activo, así que la herramienta no puede decidir sola.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Text("Lo que dejes sin elegir queda PENDIENTE: no se marca como «sin "
+                    "dar de alta», porque el RPA lo daría de alta otra vez.",
+                    size=11, color=GRIS, no_wrap=False),
+            ft.Container(lista, height=340)]
+        modal.set_acciones([
+            boton_herramienta("Dejar pendientes", on_click=lambda _e: responder([])),
+            boton_primario("Aplicar", ft.Icons.CHECK, _confirmar)])
+        modal.abrir()
+        return await decision
 
     # ------------------------------------------------ RPA: alta en el SIPP
     @staticmethod
