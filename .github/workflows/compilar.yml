@@ -81,7 +81,13 @@ jobs:
       - name: Compilar con flet pack
         shell: pwsh
         run: |
-          $datos = @("--add-data", "Imagenes:Imagenes")
+          # Catalogos va FIJO, igual que Imagenes y a diferencia de Fuentes: sin
+          # el catálogo depurado la plantilla de carga masiva sale sin su
+          # desplegable de insumos, y eso no se nota hasta que un usuario abre el
+          # Excel. Si algún día la carpeta desaparece del repo, es preferible que
+          # reviente el build a publicar la funcionalidad a medias.
+          $datos = @("--add-data", "Imagenes:Imagenes",
+                     "--add-data", "Catalogos:Catalogos")
           # La tipografía Inter es OPCIONAL y se detecta en vez de fijarse: si el
           # .ttf está versionado se empaqueta, y si no, la app cae a la fuente del
           # sistema (ui/tema.py -> registrar_fuente). Con --add-data fijo, un repo
@@ -91,6 +97,27 @@ jobs:
             --hidden-import openpyxl `
             --pyinstaller-build-args=--collect-all=playwright `
             -y
+
+      # Comprobar que los datos QUEDARON en el paquete. `--add-data` no falla si
+      # no copia, y la app está escrita para tolerar que falten (mejor arrancar
+      # sin catálogo que no arrancar), así que sin esta verificación un empaquetado
+      # incompleto llega al instalador sin una sola señal. Se busca en profundidad
+      # porque PyInstaller cambia de sitio los datos entre versiones (dist\App\ o
+      # dist\App\_internal\).
+      - name: Verificar que los datos van en el paquete
+        shell: pwsh
+        run: |
+          $faltan = @()
+          foreach ($f in @("insumos_depurados.csv")) {
+            if (-not (Get-ChildItem -Path dist -Recurse -Filter $f -ErrorAction SilentlyContinue)) {
+              $faltan += $f
+            }
+          }
+          if ($faltan) {
+            Write-Error "No se empaquetaron: $($faltan -join ', ')"
+            exit 1
+          }
+          Write-Host "Datos empaquetados correctamente."
 
       # 2. Instalar Inno Setup y compilar el instalador (instalador.iss).
       - name: Instalar Inno Setup
