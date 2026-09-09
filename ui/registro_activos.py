@@ -99,6 +99,33 @@ def _fecha_corta(sello: str) -> str:
         return texto
 
 
+# Tope para incrustar una foto en el visor. Por encima se pasa la RUTA, que el
+# cliente de escritorio sí sabe leer: incrustar 20 MB en base64 infla el mensaje
+# que viaja al cliente y congela la ventana mientras lo procesa.
+_MAX_INCRUSTAR_MB = 12
+
+
+def _src_imagen(ruta: str) -> str:
+    """`src` para `ft.Image`: la foto incrustada como data URI, o la ruta.
+
+    Se incrusta porque la ruta suelta solo la resuelve el cliente de escritorio;
+    el data URI se ve igual en cualquiera. Si el archivo es grande o no se puede
+    leer, se cae a la ruta y `error_content` cubre el caso de que tampoco cargue.
+    """
+    import base64
+    import mimetypes
+
+    try:
+        if os.path.getsize(ruta) > _MAX_INCRUSTAR_MB * 1024 * 1024:
+            return ruta
+        with open(ruta, "rb") as fh:
+            datos = base64.b64encode(fh.read()).decode("ascii")
+    except OSError:
+        return ruta
+    tipo = mimetypes.guess_type(ruta)[0] or "image/jpeg"
+    return f"data:{tipo};base64,{datos}"
+
+
 def _prefill_desde_sipp(info: dict) -> dict:
     """Traduce los datos del SIPP (info_sipp) a las claves del formulario de captura
     (datos_json), para registrar el detalle del insumo de un activo dado de alta.
@@ -275,13 +302,17 @@ class SeccionRegistroActivos:
         self._chk_general = ft.Checkbox(value=False, on_change=self._on_chk_general)
         columnas = [
             ColumnaTabla("", 4, encabezado_control=self._chk_general, ancho_min_px=40),
-            ColumnaTabla("Empresa", 12, ancho_min_px=155),
-            ColumnaTabla("Sucursal", 12, ancho_min_px=155),
-            ColumnaTabla("Departamento", 13, ancho_min_px=155),
-            ColumnaTabla("Nombre insumo", 17, ancho_min_px=140),
-            ColumnaTabla("Etiqueta", 10, ancho_min_px=100),
-            ColumnaTabla("No. de serie", 10, ancho_min_px=100),
-            ColumnaTabla("Estatus", 9, ancho_min_px=95),
+            # Los porcentajes suman 100: pasarse mete una barra horizontal (ver
+            # ui/tabla_responsiva.py). Al entrar «Responsable» se recortaron los
+            # tres desplegables de ubicación, que ya tienen su piso en píxeles.
+            ColumnaTabla("Empresa", 10, ancho_min_px=155),
+            ColumnaTabla("Sucursal", 10, ancho_min_px=155),
+            ColumnaTabla("Departamento", 11, ancho_min_px=155),
+            ColumnaTabla("Nombre insumo", 14, ancho_min_px=140),
+            ColumnaTabla("Responsable", 12, ancho_min_px=150),
+            ColumnaTabla("Etiqueta", 9, ancho_min_px=100),
+            ColumnaTabla("No. de serie", 9, ancho_min_px=100),
+            ColumnaTabla("Estatus", 8, ancho_min_px=95),
             # 6 acciones x _LADO_ACCION + holgura: es el MÁXIMO que puede tener
             # una fila (dada de alta y con serie válida), no el caso promedio.
             # `alineacion=IZQ`: las acciones arrancan pegadas al borde izquierdo y
@@ -542,6 +573,7 @@ class SeccionRegistroActivos:
             estatus = ft.Text(etiqueta, size=12, color=color,
                               weight=ft.FontWeight.W_500)
         capturado = r.id_tipo_activo is not None
+        tiene_imagen = bool((r.ruta_imagen or "").strip())
         controles_accion = []
         if es_parcial:
             # Resolver: comparar con el activo del SIPP y decidir si es el mismo.
@@ -580,7 +612,12 @@ class SeccionRegistroActivos:
                          else "Capturar datos del activo (tipo, ubicación, resguardo…)"),
                 on_click=lambda _e, reg=r: self.dialogo_captura.abrir(reg)),
             ft.IconButton(
-                icon=ft.Icons.IMAGE, tooltip="Ver imagen original", icon_size=20,
+                icon=ft.Icons.IMAGE, icon_size=20,
+                # En color solo si HAY foto: de un vistazo se ve qué activos
+                # quedaron sin imagen, que es lo que hay que salir a levantar.
+                icon_color=ft.Colors.PRIMARY if tiene_imagen else None,
+                tooltip=("Ver imagen del activo" if tiene_imagen
+                         else "Sin imagen relacionada"),
                 on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
             ft.IconButton(
                 icon=ft.Icons.DELETE_OUTLINE, tooltip="Eliminar", icon_size=20,
@@ -606,6 +643,7 @@ class SeccionRegistroActivos:
             suc,
             dep,
             r.nombre_insumo,
+            r.responsable or "—",
             r.etiqueta or "—",
             r.no_serie or "—",
             estatus,
@@ -777,10 +815,40 @@ class SeccionRegistroActivos:
 
     # ------------------------------------------------------ acciones por fila
     def _ver_imagen(self, ruta: "str | None") -> None:
-        if ruta and os.path.exists(ruta):
-            self.app.abrir_en_sistema(ruta)
-        else:
+        """Muestra la foto del activo en un modal DENTRO de la herramienta.
+
+        Antes se abría con `abrir_en_sistema`, es decir con el visor de Windows,
+        que al abrir un archivo carga TODA su carpeta y deja pasar de una foto a
+        otra con las flechas. Con las imágenes de un ZIP —decenas en la misma
+        carpeta de extracción— eso hacía imposible saber cuál era la del registro
+        que se estaba consultando. Aquí solo existe la que se pidió.
+
+        Queda el botón «Abrir en el sistema» para lo que el visor propio no hace:
+        zoom fino, girar, imprimir.
+        """
+        ruta = (ruta or "").strip()
+        if not ruta or not os.path.exists(ruta):
             self.app.avisar("No se encontró la imagen original.", ROJO)
+            return
+        modal = Modal(self.page, "Imagen del activo", ancho=760,
+                      subtitulo=os.path.basename(ruta))
+        modal.cuerpo.controls = [
+            # `CONTAIN` para que no recorte: una foto de campo puede ser vertical
+            # u horizontal y aquí lo que importa es ver el equipo completo.
+            ft.Container(
+                ft.Image(src=_src_imagen(ruta), fit=ft.BoxFit.CONTAIN,
+                         error_content=ft.Text(
+                             "No se pudo mostrar la imagen aquí. Usa «Abrir en el "
+                             "sistema».", size=12, color=GRIS, no_wrap=False)),
+                height=440, alignment=ft.Alignment(0, 0),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST, border_radius=8),
+            ft.Text(ruta, size=11, color=GRIS, selectable=True, no_wrap=False)]
+        modal.set_acciones([
+            boton_herramienta("Abrir en el sistema", ft.Icons.OPEN_IN_NEW,
+                              lambda _e, x=ruta: self.app.abrir_en_sistema(x)),
+            boton_primario("Cerrar", ft.Icons.CHECK,
+                           lambda _e: modal.cerrar())])
+        modal.abrir()
 
     def _ver_info_sipp(self, reg: "db.Levantamiento") -> None:
         """Muestra los datos REALES del activo en el SIPP (los que trae el
