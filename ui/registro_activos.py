@@ -1751,11 +1751,20 @@ class SeccionRegistroActivos:
                     hechos += 1
             sin_resolver = len(ambiguos) - len(elegidos or [])
 
+        # Respaldo en el portal: lo que la caché no encontró puede existir en una
+        # empresa que nunca se descargó. Es la única forma de saberlo sin bajar el
+        # catálogo de las 58 empresas.
+        self._refrescar()
+        hallados_portal = await self._respaldo_portal()
+
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
         n_no = len(db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA))
         self._refrescar()
         msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
         extras = []
+        if hallados_portal:
+            extras.append(f"{hallados_portal} encontrado(s) en otra empresa "
+                          f"consultando el portal")
         if sin_resolver:
             # No quedan como «no dado de alta»: eso invitaría al RPA a duplicarlos.
             # Se quedan pendientes, que es lo que realmente son.
@@ -1764,6 +1773,141 @@ class SeccionRegistroActivos:
             msg += " · " + " · ".join(extras)
         self.app.avisar(msg, VERDE if not extras else NARANJA,
                         duracion=9000 if extras else 6000)
+
+    async def _respaldo_portal(self) -> int:
+        """Consulta en el PORTAL las etiquetas que la caché local no encontró.
+
+        La búsqueda local solo ve las empresas descargadas; el listado del SIPP, en
+        cambio, se puede consultar sin ámbito y dice a qué empresa pertenece cada
+        etiqueta. Devuelve cuántas se encontraron.
+
+        Corre automáticamente al terminar la búsqueda, pero SOLO sobre lo que quedó
+        «no dado de alta» CON etiqueta: sin etiqueta no hay nada que preguntar, y
+        repetir lo ya resuelto sería pagar el portal por gusto.
+
+        Si el portal no devuelve nada para una etiqueta NO se toca el registro: el
+        listado oculta ciertos activos (bajas, fuera del alcance del usuario), así
+        que un vacío significa «no se pudo confirmar», no «no existe». Ya está
+        marcado como no dado de alta por la búsqueda local, que es la lectura
+        prudente.
+        """
+        candidatos = [r for r in db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA)
+                      if (r.etiqueta or "").strip()]
+        if not candidatos:
+            return 0
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar(
+                f"{len(candidatos)} etiqueta(s) no están en la caché local. Para "
+                "buscarlas en otras empresas configura las credenciales del SIPP "
+                "(botón ⚙).", NARANJA, duracion=9000)
+            return 0
+        usuario, contrasena = creds
+
+        total = len(candidatos)
+        bucle = BucleRpa()
+        ctrl = ControlRpa(bucle.loop)
+        ui_loop = asyncio.get_running_loop()
+
+        txt = ft.Text(f"Conectando al SIPP… (0/{total})", size=13)
+        barra = ft.ProgressBar(value=0)
+        # El detalle de qué se está buscando va a la vista, no solo un contador:
+        # son varios minutos y el usuario necesita ver que avanza sobre SUS
+        # activos, no sobre una barra anónima.
+        lista = ft.ListView(spacing=4, expand=True, auto_scroll=True)
+
+        def pedir_detener(_e=None) -> None:
+            ctrl.detener()
+            btn_detener.disabled = True
+            btn_detener.content = "Deteniendo…"
+            modal.refrescar()
+
+        btn_detener = boton_herramienta("Detener", on_click=pedir_detener,
+                                        destructivo=True)
+        modal = Modal(self.page, "Buscando etiquetas en otras empresas", ancho=620,
+                      subtitulo=f"{total} etiqueta(s) fuera de la caché local",
+                      acciones=[btn_detener])
+        # Cada consulta recarga la grid por AJAX: ~4 s entre navegación y espera.
+        minutos = max(1, round(total * 4 / 60))
+        modal.cuerpo.controls = [
+            ft.Text("Estas etiquetas no están en las empresas descargadas. Se "
+                    "consultan una por una en el catálogo del SIPP, sin filtro de "
+                    "empresa, para ver si pertenecen a otra.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Text(f"Son {total} consultas: unos {minutos} minuto(s). Puedes "
+                    "detenerlo cuando quieras; lo ya encontrado se conserva.",
+                    size=11, color=NARANJA, no_wrap=False),
+            txt, barra, ft.Container(lista, height=240),
+            ft.Text("Se abrirá un navegador; no lo cierres.", size=11, color=GRIS)]
+        modal.abrir()
+
+        def avance(i: int, r, resultado: str, color) -> None:
+            """Refleja el avance desde el hilo del RPA (marshalado a la UI)."""
+            def aplicar() -> None:
+                barra.value = i / total
+                txt.value = f"Consultando el portal… ({i}/{total})"
+                lista.controls.append(ft.Row(
+                    [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  {r.etiqueta}",
+                             size=12, color=ft.Colors.ON_SURFACE, expand=True,
+                             no_wrap=False),
+                     ft.Text(resultado, size=11, color=color, no_wrap=False)],
+                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+                modal.refrescar()
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        encontrados: list = []
+        error = None
+
+        async def flujo() -> None:
+            nonlocal error
+            from core.rpa_sipp import SesionSipp, mensaje_amigable
+            try:
+                async with SesionSipp(headless=True) as sipp:
+                    await sipp.login(usuario, contrasena)
+                    # El catálogo no monta sin sesión configurada. CUÁL empresa da
+                    # igual —el ámbito se limpia antes de cada búsqueda—, pero
+                    # tiene que ser una que el usuario tenga: si la del registro
+                    # no aparece en su selector, se cae a la primera del catálogo
+                    # en vez de tumbar todo el respaldo.
+                    for intento in ((candidatos[0].empresa or "").strip(),
+                                    *NOMBRES_EMPRESAS):
+                        if not intento:
+                            continue
+                        try:
+                            await sipp.preparar_sesion_empresa(intento)
+                            break
+                        except ErrorSipp:
+                            continue
+                    else:
+                        raise ErrorSipp(
+                            "No se pudo configurar la sesión con ninguna empresa.")
+                    for i, r in enumerate(candidatos, 1):
+                        await ctrl.punto_control()
+                        filas = await sipp.buscar_activo_global(r.etiqueta or "")
+                        if filas:
+                            encontrados.append((r, filas[0]))
+                            avance(i, r,
+                                   f"en {filas[0].get('empresa') or '(sin empresa)'}",
+                                   VERDE)
+                        else:
+                            avance(i, r, "no aparece en el portal", GRIS)
+            except RpaDetenido:
+                pass
+            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                error = mensaje_amigable(exc)
+
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        finally:
+            bucle.cerrar()
+            modal.cerrar()
+
+        for r, datos in encontrados:
+            self._aplicar_resultado_sipp(r, datos)
+        if error:
+            self.app.avisar(f"La consulta al portal falló: {error}", NARANJA,
+                            duracion=9000)
+        return len(encontrados)
 
     def _marcar_no_dado_alta(self, r: "db.Levantamiento") -> None:
         db.actualizar_estatus_levantamiento(r.id, db.EST_NO_DADO_ALTA, None, None)
