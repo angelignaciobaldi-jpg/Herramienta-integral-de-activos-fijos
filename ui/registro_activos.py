@@ -36,7 +36,7 @@ from core.tipos_activo import (ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo,
                                faltantes_obligatorios, nombre_tipo)
 from ui.captura_activo import DialogoCapturaActivo
 from ui.carga_masiva import DialogoCargaMasiva
-from ui.comun import (GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE,
+from ui.comun import (AZUL, GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE,
                       error_al_guardar, parse_fecha)
 from ui.componentes import (GUTTER_SCROLL, CampoFecha, Modal, Pestanas,
                             boton_herramienta, boton_primario,
@@ -639,7 +639,7 @@ class SeccionRegistroActivos:
                 icon=ft.Icons.IMAGE, icon_size=20,
                 # En color solo si HAY foto: de un vistazo se ve qué activos
                 # quedaron sin imagen, que es lo que hay que salir a levantar.
-                icon_color=ft.Colors.PRIMARY if tiene_imagen else None,
+                icon_color=AZUL if tiene_imagen else None,
                 tooltip=("Ver imagen del activo" if tiene_imagen
                          else "Sin imagen relacionada"),
                 on_click=lambda _e, ruta=foto: self._ver_imagen(ruta)),
