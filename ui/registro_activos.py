@@ -1156,8 +1156,16 @@ class SeccionRegistroActivos:
                     "las columnas).", _ir_excel),
             _opcion(ft.Icons.ADD_PHOTO_ALTERNATE, "Relacionar imágenes con activos",
                     "Para activos ya cargados (p. ej. por Excel): empareja las fotos "
-                    "por etiqueta, serie o nombre del archivo.",
+                    "de una CARPETA por etiqueta, serie o nombre del archivo.",
                     lambda _e: self.page.run_task(self._relacionar_imagenes, modal)),
+            # El ZIP va como opción propia y no como un diálogo que pregunte
+            # «¿carpeta o ZIP?»: el resto del modal ya distingue así las dos
+            # cargas, y un paso extra solo para elegir el formato sobra.
+            _opcion(ft.Icons.FOLDER_ZIP, "Relacionar imágenes desde un ZIP",
+                    "Igual que la anterior, pero las fotos vienen comprimidas en "
+                    "un .zip; se extrae y se empareja igual.",
+                    lambda _e: self.page.run_task(
+                        self._relacionar_imagenes, modal, True)),
         ]
         modal.set_acciones([boton_herramienta(
             "Cancelar", on_click=lambda _e: modal.cerrar())])
@@ -1275,17 +1283,43 @@ class SeccionRegistroActivos:
         await self._registrar_imagenes(
             archivos.listar_imagenes(carpeta), empresa, sucursal, departamento)
 
-    async def _relacionar_imagenes(self, modal_origen=None) -> None:
-        """Empareja imágenes de una carpeta con activos YA cargados.
+    async def _relacionar_imagenes(self, modal_origen=None,
+                                   desde_zip: bool = False) -> None:
+        """Empareja imágenes de una carpeta (o de un ZIP) con activos YA cargados.
 
         Pensado para la carga por Excel, que crea los registros sin foto: aquí se
         suben las del levantamiento y se asignan por lo que dice el nombre del
         archivo (etiqueta, serie o insumo). Lo que no se pueda emparejar solo, lo
-        resuelve el usuario a mano."""
+        resuelve el usuario a mano.
+
+        `desde_zip` pide un .zip en vez de una carpeta. Se extrae a la carpeta de
+        datos de la app —no a una temporal— porque la ruta extraída es la que se
+        guarda en el registro: desde ahí se abre la foto después, y una temporal
+        dejaría la imagen rota en cuanto Windows la limpiara."""
         if modal_origen is not None:
             modal_origen.cerrar()
-        carpeta = await self.app.picker.get_directory_path(
-            dialog_title="Carpeta con las imágenes de los activos")
+        if desde_zip:
+            seleccion = await self.app.picker.pick_files(
+                dialog_title="Selecciona el ZIP con las imágenes de los activos",
+                allowed_extensions=["zip"], allow_multiple=False)
+            if not seleccion:
+                return
+            self._set_cargando(True, f"Extrayendo «{seleccion[0].name}»…")
+            try:
+                carpeta, _extraidas = await asyncio.to_thread(
+                    archivos.extraer_zip, seleccion[0].path)
+            except archivos.ErrorArchivo as exc:
+                self._set_cargando(False)
+                self.app.avisar(str(exc), ROJO)
+                return
+            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                self._set_cargando(False)
+                self.app.avisar(f"No se pudo procesar el ZIP: {exc}", ROJO)
+                return
+            self._set_cargando(False)
+        else:
+            carpeta = await self.app.picker.get_directory_path(
+                dialog_title="Carpeta con las imágenes de los activos")
         if not carpeta:
             return
         try:
@@ -1294,7 +1328,9 @@ class SeccionRegistroActivos:
             self.app.avisar(f"No se pudo leer la carpeta: {exc}", ROJO)
             return
         if not entradas:
-            self.app.avisar("La carpeta no contiene imágenes compatibles.", NARANJA)
+            self.app.avisar(
+                "El ZIP no contiene imágenes compatibles." if desde_zip else
+                "La carpeta no contiene imágenes compatibles.", NARANJA)
             return
 
         # Solo los que NO tienen foto: relacionar no debe pisar una ya asignada.
