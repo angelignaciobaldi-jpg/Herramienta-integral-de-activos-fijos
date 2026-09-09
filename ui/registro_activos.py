@@ -126,6 +126,29 @@ def _src_imagen(ruta: str) -> str:
     return f"data:{tipo};base64,{datos}"
 
 
+def _foto_del_registro(r: "db.Levantamiento") -> str:
+    """Foto que representa al activo, venga de donde venga. "" si no hay ninguna.
+
+    Un registro puede tener imagen por dos caminos: la del LEVANTAMIENTO
+    (`ruta_imagen`, la que creó el registro o se le relacionó después) o las
+    adjuntadas a mano en la ficha (`imagenes_insumo`). La carga por Excel no crea
+    la primera, así que quien adjuntaba una foto en la ficha veía «No se encontró
+    la imagen original» al pulsar el ícono de la tabla, que solo miraba
+    `ruta_imagen`.
+
+    Se prefiere la de la ficha por el mismo criterio que usa el alta (ver
+    `_imagenes_para_alta`): es la elección explícita del usuario. Se descartan las
+    rutas que ya no existen, para no prometer una imagen que se borró.
+    """
+    candidatas = list((r.datos().get("imagenes_insumo") or []))
+    candidatas.append(r.ruta_imagen or "")
+    for ruta in candidatas:
+        ruta = (ruta or "").strip()
+        if ruta and os.path.exists(ruta):
+            return ruta
+    return ""
+
+
 def _prefill_desde_sipp(info: dict) -> dict:
     """Traduce los datos del SIPP (info_sipp) a las claves del formulario de captura
     (datos_json), para registrar el detalle del insumo de un activo dado de alta.
@@ -573,7 +596,8 @@ class SeccionRegistroActivos:
             estatus = ft.Text(etiqueta, size=12, color=color,
                               weight=ft.FontWeight.W_500)
         capturado = r.id_tipo_activo is not None
-        tiene_imagen = bool((r.ruta_imagen or "").strip())
+        foto = _foto_del_registro(r)
+        tiene_imagen = bool(foto)
         controles_accion = []
         if es_parcial:
             # Resolver: comparar con el activo del SIPP y decidir si es el mismo.
@@ -618,7 +642,7 @@ class SeccionRegistroActivos:
                 icon_color=ft.Colors.PRIMARY if tiene_imagen else None,
                 tooltip=("Ver imagen del activo" if tiene_imagen
                          else "Sin imagen relacionada"),
-                on_click=lambda _e, ruta=r.ruta_imagen: self._ver_imagen(ruta)),
+                on_click=lambda _e, ruta=foto: self._ver_imagen(ruta)),
             ft.IconButton(
                 icon=ft.Icons.DELETE_OUTLINE, tooltip="Eliminar", icon_size=20,
                 icon_color=ft.Colors.ERROR,
@@ -1334,7 +1358,7 @@ class SeccionRegistroActivos:
             return
         self._set_cargando(True, f"Extrayendo «{seleccion[0].name}»…")
         try:
-            carpeta, extraidas = await asyncio.to_thread(
+            carpeta, extraidas, _carpetas = await asyncio.to_thread(
                 archivos.extraer_zip, seleccion[0].path)
         except archivos.ErrorArchivo as exc:
             self._set_cargando(False)
@@ -1366,6 +1390,11 @@ class SeccionRegistroActivos:
         dejaría la imagen rota en cuanto Windows la limpiara."""
         if modal_origen is not None:
             modal_origen.cerrar()
+        # {ruta: subcarpeta} del ZIP. En una carpeta normal la estructura sigue en
+        # disco y el emparejador la deduce de la ruta; el ZIP se extrae APLANADO
+        # (por el límite de 260 caracteres de Windows), así que su árbol viaja
+        # aquí.
+        carpetas_zip: dict = {}
         if desde_zip:
             seleccion = await self.app.picker.pick_files(
                 dialog_title="Selecciona el ZIP con las imágenes de los activos",
@@ -1374,7 +1403,7 @@ class SeccionRegistroActivos:
                 return
             self._set_cargando(True, f"Extrayendo «{seleccion[0].name}»…")
             try:
-                carpeta, _extraidas = await asyncio.to_thread(
+                carpeta, _extraidas, carpetas_zip = await asyncio.to_thread(
                     archivos.extraer_zip, seleccion[0].path)
             except archivos.ErrorArchivo as exc:
                 self._set_cargando(False)
@@ -1411,7 +1440,8 @@ class SeccionRegistroActivos:
 
         # `carpeta` va como raíz para que el emparejador vea en qué subcarpeta
         # cayó cada foto: ahí es donde viene el nombre del responsable.
-        pares = archivos.emparejar_imagenes(entradas, disponibles, carpeta)
+        pares = archivos.emparejar_imagenes(entradas, disponibles, carpeta,
+                                            carpetas_zip)
         await self._modal_relacion(pares, disponibles)
 
     async def _modal_relacion(self, pares: list, disponibles: list) -> None:

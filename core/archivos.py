@@ -241,13 +241,16 @@ def _trae_identificador_ajeno(archivo: str, registro) -> bool:
     return sufijo not in propios
 
 
-def emparejar_imagenes(entradas: list, registros: list, raiz: str = "") -> list:
+def emparejar_imagenes(entradas: list, registros: list, raiz: str = "",
+                       carpetas: dict | None = None) -> list:
     """Relaciona cada imagen con un registro por su NOMBRE y por su CARPETA.
 
     `entradas`: [(nombre_archivo, ruta)] · `registros`: objetos con id, etiqueta,
     no_serie, nombre_insumo y responsable · `raiz`: carpeta que se subió, para
-    saber en qué subcarpeta cayó cada imagen. Devuelve un `Emparejamiento` por
-    imagen.
+    deducir en qué subcarpeta cayó cada imagen · `carpetas`: {ruta: subcarpeta}
+    para cuando esa estructura no está en disco, que es el caso del ZIP (se
+    extrae aplanado por el límite de ruta de Windows). Devuelve un
+    `Emparejamiento` por imagen.
 
     Los levantamientos vienen organizados en una carpeta por responsable, y ese
     dato desambigua lo que el nombre del archivo no puede: entre los tres
@@ -302,13 +305,20 @@ def emparejar_imagenes(entradas: list, registros: list, raiz: str = "") -> list:
                 return nombre, coincidencias[0]
         return "", []
 
+    def _origen(ru: str) -> list:
+        """Subcarpetas de las que pudo salir la imagen, de la más profunda a la
+        más externa. Del mapa si lo hay (ZIP) y, si no, del disco (carpeta)."""
+        if carpetas and ru in carpetas:
+            return [carpetas[ru]]
+        return _carpetas_de(ru, raiz)
+
     pares = []
     for n, ru in entradas:
-        carpetas = _carpetas_de(ru, raiz)
+        subs = _origen(ru)
         pares.append(Emparejamiento(archivo=os.path.basename(n), ruta=ru,
-                                    carpeta=carpetas[0] if carpetas else ""))
+                                    carpeta=subs[0] if subs else ""))
     # La carpeta reconocida se calcula una vez por imagen: se usa en dos pasos.
-    responsables = {id(par): _ids_del_responsable(_carpetas_de(par.ruta, raiz))
+    responsables = {id(par): _ids_del_responsable(_origen(par.ruta))
                     for par in pares}
     usados: set = set()
 
@@ -396,13 +406,20 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
     """Extrae las IMÁGENES de un .zip a una carpeta persistente.
 
     Solo se extraen archivos de imagen (se ignoran otros contenidos y la basura
-    que agregan algunos compresores, como '__MACOSX'). La estructura de
-    subcarpetas SE CONSERVA: los levantamientos vienen organizados en una carpeta
-    por responsable, y ese nombre es lo que permite asignar cada foto a su activo
-    (ver `emparejar_imagenes`). Aplanarla, como se hacía antes, tiraba justo el
-    dato que desambigua entre dos fotos que se llaman igual.
+    que agregan algunos compresores, como '__MACOSX').
 
-    Devuelve (carpeta_destino, cantidad_extraida).
+    La estructura de subcarpetas SE APLANA en disco, pero NO se pierde: el nombre
+    de la carpeta que contenía cada imagen se devuelve aparte, porque en los
+    levantamientos es el del responsable y con él se asigna la foto a su activo
+    (ver `emparejar_imagenes`).
+
+    Se aplana por el límite de 260 caracteres de Windows: la carpeta de datos ya
+    es larga y, al recrear el árbol del ZIP —'Piso 1/IVAN ALCANTARA AYONDO/
+    WhatsApp Image ....jpeg'— la ruta se pasaba y la extracción fallaba con un
+    «No such file or directory» que no dice nada de la causa real.
+
+    Devuelve (carpeta_destino, cantidad_extraida, carpetas), donde `carpetas` es
+    {ruta_extraida: nombre de la subcarpeta de la que salió}.
 
     Raises:
         ErrorArchivo: si el archivo no es un ZIP válido o no se puede leer.
@@ -423,6 +440,7 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
     os.makedirs(destino, exist_ok=True)
 
     extraidas = 0
+    carpetas: dict = {}
     try:
         with zipfile.ZipFile(ruta_zip) as z:
             for info in z.infolist():
@@ -434,30 +452,24 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
                     continue
                 if not es_imagen(base):
                     continue
-                # Cada SEGMENTO de la ruta se sanea por separado y el resultado
-                # se verifica contra la carpeta destino: así se conservan las
-                # subcarpetas sin abrir la puerta a que una ruta del ZIP escriba
-                # fuera de ella (zip slip).
-                partes = [_sanear(x) for x in interno.replace("\\", "/").split("/")
+                # Se aplana la estructura y se sanea el nombre: así no hay forma
+                # de que una ruta del ZIP escriba fuera de la carpeta destino
+                # (zip slip) ni de que un separador se cuele en el nombre. La
+                # última subcarpeta se guarda aparte, en memoria.
+                partes = [x for x in interno.replace("\\", "/").split("/")
                           if x not in ("", ".", "..")]
-                if not partes:
-                    continue
-                carpeta_destino = os.path.join(destino, *partes[:-1])
-                if os.path.commonpath(
-                        [os.path.realpath(destino),
-                         os.path.realpath(carpeta_destino)]) != os.path.realpath(destino):
-                    continue        # la ruta apuntaba fuera: se descarta
-                os.makedirs(carpeta_destino, exist_ok=True)
-                final = _ruta_libre(carpeta_destino, partes[-1])
+                final = _ruta_libre(destino, _sanear(base))
                 with z.open(info) as origen, open(final, "wb") as salida:
                     shutil.copyfileobj(origen, salida)
+                if len(partes) > 1:
+                    carpetas[final] = partes[-2]
                 extraidas += 1
     except zipfile.BadZipFile as exc:
         raise ErrorArchivo(
             "El archivo no es un ZIP válido o está dañado.") from exc
     except OSError as exc:
         raise ErrorArchivo(f"No se pudo extraer el ZIP: {exc}") from exc
-    return destino, extraidas
+    return destino, extraidas, carpetas
 
 
 def listar_imagenes(carpeta: str) -> list[tuple[str, str]]:
@@ -484,8 +496,8 @@ def _sanear(nombre: str) -> str:
 
 def _ruta_libre(carpeta: str, nombre: str) -> str:
     """Ruta que no pise un archivo existente: agrega ' (n)' antes de la extensión.
-    Con las subcarpetas conservadas casi nunca hace falta; queda como red por si
-    un ZIP trae dos entradas con la misma ruta."""
+    Evita que dos fotos con el mismo nombre en subcarpetas distintas se
+    sobrescriban al aplanar la estructura."""
     destino = os.path.join(carpeta, nombre)
     if not os.path.exists(destino):
         return destino
