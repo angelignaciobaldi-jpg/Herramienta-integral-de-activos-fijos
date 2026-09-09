@@ -1341,7 +1341,9 @@ class SeccionRegistroActivos:
                             NARANJA, duracion=7000)
             return
 
-        pares = archivos.emparejar_imagenes(entradas, disponibles)
+        # `carpeta` va como raíz para que el emparejador vea en qué subcarpeta
+        # cayó cada foto: ahí es donde viene el nombre del responsable.
+        pares = archivos.emparejar_imagenes(entradas, disponibles, carpeta)
         await self._modal_relacion(pares, disponibles)
 
     async def _modal_relacion(self, pares: list, disponibles: list) -> None:
@@ -1536,8 +1538,10 @@ class SeccionRegistroActivos:
                       subtitulo=f"{len(pares)} imagen(es)",
                       al_cerrar=lambda: responder(None))
         modal.cuerpo.controls = [
-            ft.Text("Se empareja por lo que dice el nombre del archivo: primero la "
-                    "etiqueta, luego la serie y, si no, el nombre del insumo.",
+            ft.Text("Se empareja por el nombre del archivo —primero la etiqueta, "
+                    "luego la serie y, si no, el insumo— y por la SUBCARPETA: si "
+                    "está nombrada como el responsable, sus fotos se asignan a los "
+                    "activos de esa persona.",
                     size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
             ft.Row([tabs.control]),
             ft.Container(ft.Column(list(paneles.values()), expand=True), height=320)]
