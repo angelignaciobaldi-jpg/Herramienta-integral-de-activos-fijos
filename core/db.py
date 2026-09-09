@@ -1415,6 +1415,64 @@ def buscar_activos_sipp(texto: str, id_empresa: int | None = None,
              "id_tipo": f["id_tipo"], "tipo": f["tipo"]} for f in filas]
 
 
+# SQLite admite 999 parámetros por sentencia; se consulta en tandas para que un
+# levantamiento grande no reviente el IN (...).
+_TANDA_PARAMS = 900
+
+
+def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
+    """{etiqueta -> [activos que la tienen, de CUALQUIER empresa cacheada]}.
+
+    La búsqueda del levantamiento pregunta por la etiqueta sin saber de qué
+    empresa es, así que no puede partir de `listar_activos_sipp`, que exige una.
+    Se consulta por las etiquetas pedidas en vez de traer la caché entera (son
+    decenas de miles de activos) y se devuelven TODOS los candidatos, no el
+    primero: la etiqueta es única dentro de una empresa pero NO entre empresas
+    —hay etiquetas que en una son una laptop y en otra un mouse—, y quedarse con
+    uno al azar copiaría al registro el insumo y el resguardante equivocados.
+    """
+    claves = {e.strip().upper() for e in etiquetas if (e or "").strip()}
+    if not claves:
+        return {}
+    lista = sorted(claves)
+    salida: dict[str, list[dict]] = {}
+    with _conectar() as con:
+        for i in range(0, len(lista), _TANDA_PARAMS):
+            tanda = lista[i:i + _TANDA_PARAMS]
+            marcadores = ", ".join(["?"] * len(tanda))
+            filas = con.execute(
+                f"SELECT id_empresa, empresa_nombre, etiqueta, insumo, serie, "
+                f"ubicacion, empleado, sucursal, departamento, id_tipo, tipo, extra "
+                f"FROM activos_sipp WHERE UPPER(TRIM(IFNULL(etiqueta,''))) "
+                f"IN ({marcadores}) ORDER BY empresa_nombre", tanda).fetchall()
+            for f in filas:
+                base = {"id_empresa": f["id_empresa"], "empresa": f["empresa_nombre"],
+                        "etiqueta": f["etiqueta"], "insumo": f["insumo"],
+                        "serie": f["serie"], "ubicacion": f["ubicacion"],
+                        "empleado": f["empleado"], "sucursal": f["sucursal"],
+                        "departamento": f["departamento"], "id_tipo": f["id_tipo"],
+                        "tipo": f["tipo"]}
+                if f["extra"]:
+                    try:
+                        extra = json.loads(f["extra"])
+                        if isinstance(extra, dict):
+                            base.update(extra)
+                    except (ValueError, TypeError):
+                        pass
+                salida.setdefault(
+                    (f["etiqueta"] or "").strip().upper(), []).append(base)
+    return salida
+
+
+def hay_activos_sipp() -> bool:
+    """¿Hay algún activo del SIPP descargado, de la empresa que sea?
+
+    La búsqueda del levantamiento ya no se ata a una empresa, así que lo único
+    que la imposibilita es que no haya NADA cacheado."""
+    with _conectar() as con:
+        return con.execute("SELECT 1 FROM activos_sipp LIMIT 1").fetchone() is not None
+
+
 def sucursales_activos_sipp(id_empresa: int) -> list[str]:
     """Sucursales distintas presentes en los activos cacheados de una empresa."""
     with _conectar() as con:

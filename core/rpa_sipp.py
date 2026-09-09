@@ -817,6 +817,75 @@ class SesionSipp:
         await page.wait_for_timeout(2_500)  # la grid recarga por AJAX
         return await self._contar_filas_grid()
 
+    # Campos de `arr_gridActivosFijos` que se conservan al leer una fila. El grid
+    # trae 67 columnas (depreciación, rutas de archivos, banderas internas); aquí
+    # solo va lo que la herramienta sabe usar, con los nombres que ya maneja la
+    # caché (`db.listar_activos_sipp`) para que el resto del código no distinga de
+    # dónde salió el activo.
+    _COLS_GRID = {
+        "etiqueta": "DE_ETIQUETA", "insumo": "NB_ACTIVOFIJO",
+        "serie": "DE_SERIEACTIVO", "empresa": "NB_EMPRESA",
+        "id_empresa": "ID_EMPRESA", "sucursal": "NB_SUCURSAL",
+        "departamento": "NB_DEPARTAMENTO", "empleado": "NB_EMPLEADORESGUARDO",
+        "ubicacion": "NB_UBICACION", "id_tipo": "ID_TIPOACTIVOFIJO",
+        "tipo": "NB_TIPOACTIVOFIJO", "costo": "IM_COSTO",
+        "grupo_centro_costo": "NB_GRUPOCENTROCOSTO",
+        "centro_costo": "NB_CENTROCOSTO",
+        "fecha_adquisicion": "FH_ADQUISICION_ISO",
+        "fecha_asignacion": "FH_ASIGNACION_ISO",
+        "fecha_garantia": "FH_GARANTIA_ISO",
+        "id_empleado_resguardo": "ID_EMPLEADORESGUARDO",
+        "id_insumo_origen": "ID_INSUMO",
+    }
+
+    async def _filas_grid(self) -> list:
+        """Las filas del listado, traducidas al formato de la caché.
+
+        Comparte el arreglo del scope con `_contar_filas_grid`: el grid NO
+        renderiza `.ngRow`, así que el DOM no sirve para leerlo."""
+        page = self._exigir_pagina()
+        try:
+            crudas = await page.evaluate(r"""() => {
+              const el = document.querySelector("[ng-model='js_filtroListado.de_SerieActivo']");
+              const sc = el && window.angular ? angular.element(el).scope() : null;
+              if (sc && Array.isArray(sc.arr_gridActivosFijos))
+                  return sc.arr_gridActivosFijos;
+              return [];
+            }""")
+        except Exception:  # noqa: BLE001 — sin scope no hay filas que leer
+            return []
+        filas = []
+        for c in crudas or []:
+            if not isinstance(c, dict):
+                continue
+            fila = {}
+            for destino, origen in self._COLS_GRID.items():
+                valor = c.get(origen)
+                fila[destino] = "" if valor is None else valor
+            fila["origen"] = "portal"
+            filas.append(fila)
+        return filas
+
+    async def buscar_activo_global(self, etiqueta: str) -> list:
+        """Busca una ETIQUETA en TODO el catálogo y devuelve los activos que la
+        tienen, con su empresa.
+
+        Es la vía para saber a qué empresa pertenece una etiqueta cuando no se ha
+        descargado la caché de esa empresa —el caso que la búsqueda local no puede
+        resolver—. Se apoya en `buscar_en_listado`, que ya limpia el ámbito:
+        **el catálogo aplica solo la empresa y sucursal de la sesión**, y sin
+        limpiarlas solo encontraría activos de la empresa configurada.
+
+        Devuelve [] si no aparece. Una lista vacía NO prueba que el activo no
+        exista: el listado no muestra ciertos registros (bajas, activos fuera del
+        alcance del usuario), así que el llamador debe tratarlo como «no se pudo
+        confirmar», no como «no está dado de alta».
+        """
+        if not (etiqueta or "").strip():
+            return []
+        await self.buscar_en_listado(etiqueta=etiqueta)
+        return await self._filas_grid()
+
     async def _contar_filas_grid(self) -> int:
         """Cuántos activos trajo el listado. El grid NO renderiza `.ngRow` (los
         datos viven en el array `arr_gridActivosFijos` del scope de Angular, que se

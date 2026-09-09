@@ -221,6 +221,19 @@ class DialogoCargaMasiva:
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self.app.avisar(error_al_guardar(exc, ruta), ROJO, duracion=10000)
             return
+        # Si el catálogo depurado no viajó en esta instalación, la plantilla sale
+        # sin el desplegable de INSUMO y sin nada que lo delate al abrirla. Se dice
+        # aquí: la ausencia de una lista es justo lo que nadie nota hasta que ya
+        # capturó mal cientos de renglones.
+        from core import insumos_depurados
+
+        if not insumos_depurados.nombres():
+            self.app.avisar(
+                "Plantilla generada, pero SIN la lista de insumos: falta el "
+                "catálogo depurado en esta instalación. La columna INSUMO se "
+                "captura a mano. Reinstala la herramienta para recuperarla.",
+                NARANJA, duracion=12000)
+            return
         self.app.avisar(
             f"Plantilla de {empresa} descargada. Llénala y súbela aquí.", VERDE,
             accion="Abrir",
