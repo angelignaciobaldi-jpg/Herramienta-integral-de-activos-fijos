@@ -21,6 +21,11 @@ VERDE = ft.Colors.GREEN_700
 ROJO = ft.Colors.RED_700
 NARANJA = ft.Colors.ORANGE_800
 GRIS = ft.Colors.ON_SURFACE_VARIANT
+# Azul de ESTADO, para marcar un ícono como "sí tiene". No se usa el rol
+# `PRIMARY` porque en el tema claro es #000666 —casi negro— y junto a un ícono
+# apagado no se distingue: la marca tiene que leerse de un vistazo. Es el mismo
+# peso que VERDE (700), para que ambos estados se vean de la misma familia.
+AZUL = ft.Colors.BLUE_700
 
 CENTRO = ft.Alignment(0, 0)
 

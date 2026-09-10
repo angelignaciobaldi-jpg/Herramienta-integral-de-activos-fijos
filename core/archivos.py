@@ -157,8 +157,9 @@ class Emparejamiento:
     archivo: str          # nombre del archivo
     ruta: str
     id_registro: "int | None" = None
-    motivo: str = ""      # por qué se emparejó (etiqueta / serie / insumo)
+    motivo: str = ""      # por qué se emparejó (etiqueta / serie / insumo / carpeta)
     candidato_de: "int | None" = None   # a qué activo apunta, si hay que preguntar
+    carpeta: str = ""     # subcarpeta de la que salió (suele ser el responsable)
 
     @property
     def emparejado(self) -> bool:
@@ -168,6 +169,54 @@ class Emparejamiento:
 def _clave_id(texto) -> str:
     """Identificador comparable: sin acentos, signos ni espacios."""
     return re.sub(r"[^A-Z0-9]+", "", str(texto or "").upper())
+
+
+def _tokens_nombre(texto) -> frozenset:
+    """Palabras comparables de un nombre de persona, sin acentos ni signos.
+
+    Se descartan los fragmentos de una sola letra (iniciales, 'DE', 'Y'): no
+    distinguen a nadie y solo generan coincidencias falsas."""
+    import unicodedata
+
+    t = unicodedata.normalize("NFD", str(texto or "").upper())
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return frozenset(x for x in re.split(r"[^A-Z0-9]+", t) if len(x) > 1)
+
+
+def _mismo_empleado(a: frozenset, b: frozenset) -> bool:
+    """¿Dos nombres se refieren a la misma persona?
+
+    Uno tiene que estar contenido en el otro y compartir AL MENOS DOS palabras:
+    las carpetas suelen traer el nombre corto ('JUAN PEREZ') y el registro el
+    completo ('JUAN PEREZ LOPEZ'). Con una sola palabra en común no basta —medio
+    padrón se llama JUAN— y emparejar por ahí asignaría la foto de un empleado al
+    activo de otro.
+    """
+    if not a or not b:
+        return False
+    return (a <= b or b <= a) and len(a & b) >= 2
+
+
+def _carpetas_de(ruta: str, raiz: str) -> list[str]:
+    """Nombres de las subcarpetas entre `raiz` y el archivo, de la más profunda a
+    la más externa.
+
+    Se devuelven TODAS porque el responsable puede estar a cualquier nivel: unos
+    levantamientos vienen como 'JUAN PEREZ/foto.jpg' y otros como
+    'SISTEMAS/JUAN PEREZ/foto.jpg'. Adivinar el nivel sería frágil; probarlos
+    todos y quedarse con el que nombre a un empleado real, no.
+    """
+    if not raiz:
+        return []
+    try:
+        relativa = os.path.relpath(os.path.dirname(ruta), raiz)
+    except ValueError:      # unidades distintas en Windows
+        return []
+    if relativa.startswith(".."):
+        return []
+    partes = [x for x in relativa.replace("\\", "/").split("/")
+              if x not in ("", ".")]
+    return list(reversed(partes))
 
 
 def _trae_identificador_ajeno(archivo: str, registro) -> bool:
@@ -192,22 +241,35 @@ def _trae_identificador_ajeno(archivo: str, registro) -> bool:
     return sufijo not in propios
 
 
-def emparejar_imagenes(entradas: list, registros: list) -> list:
-    """Relaciona cada imagen con un registro por lo que dice su NOMBRE.
+def emparejar_imagenes(entradas: list, registros: list, raiz: str = "",
+                       carpetas: dict | None = None) -> list:
+    """Relaciona cada imagen con un registro por su NOMBRE y por su CARPETA.
 
     `entradas`: [(nombre_archivo, ruta)] · `registros`: objetos con id, etiqueta,
-    no_serie y nombre_insumo. Devuelve un `Emparejamiento` por imagen.
+    no_serie, nombre_insumo y responsable · `raiz`: carpeta que se subió, para
+    deducir en qué subcarpeta cayó cada imagen · `carpetas`: {ruta: subcarpeta}
+    para cuando esa estructura no está en disco, que es el caso del ZIP (se
+    extrae aplanado por el límite de ruta de Windows). Devuelve un
+    `Emparejamiento` por imagen.
 
-    Dos pasos, de más a menos seguro:
+    Los levantamientos vienen organizados en una carpeta por responsable, y ese
+    dato desambigua lo que el nombre del archivo no puede: entre los tres
+    'MONITOR.jpg' de un levantamiento, el que está en la carpeta de Juan es el
+    monitor de Juan. Pasos, de más a menos seguro:
 
-      1. ETIQUETA o SERIE dentro del nombre: son identificadores únicos, así que
-         la relación es inequívoca.
-      2. NOMBRE DEL INSUMO: solo si UN registro lo lleva, la imagen NO nombra otro
+      1. ETIQUETA o SERIE dentro del nombre: identificadores únicos, relación
+         inequívoca.
+      2. INSUMO acotado por el RESPONSABLE de la carpeta: entre los registros de
+         esa persona, uno solo se llama así.
+      3. INSUMO a secas: solo si UN registro lo lleva, la imagen NO nombra otro
          identificador (ver `_trae_identificador_ajeno`) y ninguna otra imagen
-         compite por ese mismo activo. Si compiten, todas quedan marcadas con
-         `candidato_de` para que la interfaz pregunte cuál es la correcta: entre
-         varias fotos de 'SWITCH' la herramienta no puede saberlo, y equivocarse
-         aquí asigna la foto de un equipo a otro sin dejar rastro.
+         compite por ese activo. Si compiten, todas quedan con `candidato_de`
+         para que la interfaz pregunte: entre varias fotos de 'SWITCH' la
+         herramienta no puede saberlo, y equivocarse asigna la foto de un equipo
+         a otro sin dejar rastro.
+      4. RESPONSABLE a secas: la carpeta nombra a alguien que tiene UN solo
+         registro suelto y contiene UNA sola foto suelta. Con más de uno de
+         cualquiera de los dos lados no se adivina: se deja para el usuario.
 
     Un registro no se empareja dos veces: el primero que lo reclama se lo queda.
     """
@@ -221,7 +283,43 @@ def emparejar_imagenes(entradas: list, registros: list) -> list:
         por_insumo.setdefault(_clave_id(r.nombre_insumo), []).append(r.id)
     por_id = {r.id: r for r in registros}
 
-    pares = [Emparejamiento(archivo=os.path.basename(n), ruta=ru) for n, ru in entradas]
+    # Empleados del levantamiento, para reconocerlos en el nombre de la carpeta.
+    empleados: dict = {}       # tokens del nombre -> [ids de sus registros]
+    for r in registros:
+        toks = _tokens_nombre(getattr(r, "responsable", "") or "")
+        if toks:
+            empleados.setdefault(toks, []).append(r.id)
+
+    def _ids_del_responsable(carpetas: list) -> tuple:
+        """(nombre_carpeta, ids) del empleado que nombra alguna de las carpetas.
+
+        Si una carpeta cuadra con DOS empleados distintos no se usa: un nombre
+        ambiguo apuntando a dos personas es peor que no tener nombre."""
+        for nombre in carpetas:
+            toks = _tokens_nombre(nombre)
+            if not toks:
+                continue
+            coincidencias = [ids for emp, ids in empleados.items()
+                             if _mismo_empleado(toks, emp)]
+            if len(coincidencias) == 1:
+                return nombre, coincidencias[0]
+        return "", []
+
+    def _origen(ru: str) -> list:
+        """Subcarpetas de las que pudo salir la imagen, de la más profunda a la
+        más externa. Del mapa si lo hay (ZIP) y, si no, del disco (carpeta)."""
+        if carpetas and ru in carpetas:
+            return [carpetas[ru]]
+        return _carpetas_de(ru, raiz)
+
+    pares = []
+    for n, ru in entradas:
+        subs = _origen(ru)
+        pares.append(Emparejamiento(archivo=os.path.basename(n), ruta=ru,
+                                    carpeta=subs[0] if subs else ""))
+    # La carpeta reconocida se calcula una vez por imagen: se usa en dos pasos.
+    responsables = {id(par): _ids_del_responsable(_origen(par.ruta))
+                    for par in pares}
     usados: set = set()
 
     # --- Paso 1: identificadores (etiqueta y serie) ------------------------
@@ -237,7 +335,28 @@ def emparejar_imagenes(entradas: list, registros: list) -> list:
             if par.emparejado:
                 break
 
-    # --- Paso 2: nombre del insumo, con desempate por el usuario -----------
+    # --- Paso 2: insumo DENTRO de los registros del responsable ------------
+    for par in pares:
+        if par.emparejado:
+            continue
+        nombre_carpeta, ids_emp = responsables[id(par)]
+        if not ids_emp:
+            continue
+        base = _clave_id(os.path.splitext(par.archivo)[0])
+        coinciden = [rid for rid in ids_emp
+                     if rid not in usados
+                     and _clave_id(por_id[rid].nombre_insumo)
+                     and _clave_id(por_id[rid].nombre_insumo) in base]
+        if len(coinciden) != 1:
+            continue
+        registro = por_id[coinciden[0]]
+        if _trae_identificador_ajeno(par.archivo, registro):
+            continue    # la foto nombra otro activo: no es de este
+        par.id_registro = coinciden[0]
+        par.motivo = f"insumo · carpeta de {nombre_carpeta}"
+        usados.add(coinciden[0])
+
+    # --- Paso 3: nombre del insumo, con desempate por el usuario -----------
     candidatas: dict = {}
     for par in pares:
         if par.emparejado:
@@ -260,6 +379,22 @@ def emparejar_imagenes(entradas: list, registros: list) -> list:
             # Varias fotos para el mismo activo: que elija el usuario.
             for foto in fotos:
                 foto.candidato_de = rid
+
+    # --- Paso 4: la carpeta del responsable, cuando no queda duda ----------
+    sueltas: dict = {}          # nombre de carpeta -> [fotos sin emparejar]
+    for par in pares:
+        if par.emparejado or par.candidato_de is not None:
+            continue
+        nombre_carpeta, ids_emp = responsables[id(par)]
+        if ids_emp:
+            sueltas.setdefault(nombre_carpeta, []).append(par)
+    for nombre_carpeta, fotos in sueltas.items():
+        _, ids_emp = responsables[id(fotos[0])]
+        libres = [rid for rid in ids_emp if rid not in usados]
+        if len(fotos) == 1 and len(libres) == 1:
+            fotos[0].id_registro = libres[0]
+            fotos[0].motivo = f"carpeta de {nombre_carpeta}"
+            usados.add(libres[0])
     return pares
 
 
@@ -271,10 +406,20 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
     """Extrae las IMÁGENES de un .zip a una carpeta persistente.
 
     Solo se extraen archivos de imagen (se ignoran otros contenidos y la basura
-    que agregan algunos compresores, como '__MACOSX'). La estructura de
-    subcarpetas del ZIP se aplana: lo que importa es el nombre de cada archivo.
+    que agregan algunos compresores, como '__MACOSX').
 
-    Devuelve (carpeta_destino, cantidad_extraida).
+    La estructura de subcarpetas SE APLANA en disco, pero NO se pierde: el nombre
+    de la carpeta que contenía cada imagen se devuelve aparte, porque en los
+    levantamientos es el del responsable y con él se asigna la foto a su activo
+    (ver `emparejar_imagenes`).
+
+    Se aplana por el límite de 260 caracteres de Windows: la carpeta de datos ya
+    es larga y, al recrear el árbol del ZIP —'Piso 1/IVAN ALCANTARA AYONDO/
+    WhatsApp Image ....jpeg'— la ruta se pasaba y la extracción fallaba con un
+    «No such file or directory» que no dice nada de la causa real.
+
+    Devuelve (carpeta_destino, cantidad_extraida, carpetas), donde `carpetas` es
+    {ruta_extraida: nombre de la subcarpeta de la que salió}.
 
     Raises:
         ErrorArchivo: si el archivo no es un ZIP válido o no se puede leer.
@@ -295,6 +440,7 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
     os.makedirs(destino, exist_ok=True)
 
     extraidas = 0
+    carpetas: dict = {}
     try:
         with zipfile.ZipFile(ruta_zip) as z:
             for info in z.infolist():
@@ -308,17 +454,22 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
                     continue
                 # Se aplana la estructura y se sanea el nombre: así no hay forma
                 # de que una ruta del ZIP escriba fuera de la carpeta destino
-                # (zip slip) ni de que un separador se cuele en el nombre.
+                # (zip slip) ni de que un separador se cuele en el nombre. La
+                # última subcarpeta se guarda aparte, en memoria.
+                partes = [x for x in interno.replace("\\", "/").split("/")
+                          if x not in ("", ".", "..")]
                 final = _ruta_libre(destino, _sanear(base))
                 with z.open(info) as origen, open(final, "wb") as salida:
                     shutil.copyfileobj(origen, salida)
+                if len(partes) > 1:
+                    carpetas[final] = partes[-2]
                 extraidas += 1
     except zipfile.BadZipFile as exc:
         raise ErrorArchivo(
             "El archivo no es un ZIP válido o está dañado.") from exc
     except OSError as exc:
         raise ErrorArchivo(f"No se pudo extraer el ZIP: {exc}") from exc
-    return destino, extraidas
+    return destino, extraidas, carpetas
 
 
 def listar_imagenes(carpeta: str) -> list[tuple[str, str]]:

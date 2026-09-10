@@ -642,13 +642,15 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
                                    datos: dict | None = None, factura: str | None = None,
                                    modificado: bool | None = None,
                                    no_serie: str | None = None,
-                                   nombre_insumo: str | None = None) -> None:
+                                   nombre_insumo: str | None = None,
+                                   responsable: str | None = None) -> None:
     """Actualiza los campos de captura del alta (tipo, datos_json, factura), la
-    marca de modificado, el No. de serie y/o el nombre del insumo. Solo toca los
-    argumentos que se pasen.
+    marca de modificado, el No. de serie, el nombre del insumo y/o el
+    responsable. Solo toca los argumentos que se pasen.
 
-    `no_serie` y `nombre_insumo` se reflejan en la COLUMNA del registro (no solo en
-    datos_json): son las que se muestran en la tabla y con las que se busca."""
+    `no_serie`, `nombre_insumo` y `responsable` se reflejan en la COLUMNA del
+    registro (no solo en datos_json): son las que se muestran en la tabla y con
+    las que se busca."""
     sets, valores = [], []
     if id_tipo_activo is not None:
         sets.append("id_tipo_activo = ?"); valores.append(id_tipo_activo)
@@ -662,6 +664,8 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
         sets.append("no_serie = ?"); valores.append(no_serie)
     if nombre_insumo is not None:
         sets.append("nombre_insumo = ?"); valores.append(nombre_insumo)
+    if responsable is not None:
+        sets.append("responsable = ?"); valores.append(responsable)
     if not sets:
         return
     valores.append(id_lev)

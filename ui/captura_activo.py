@@ -441,10 +441,51 @@ class DialogoCapturaActivo:
                 seccion = ft.Column([self._barra_traer_factura(), seccion],
                                     spacing=8, tight=True)
             secciones.append(seccion)
+        extra = self._seccion_datos_sin_campo(tipo, datos)
+        if extra is not None:
+            secciones.append(extra)
         self._area_campos.controls = secciones
         # Regla de negocio: equipo personal -> grupo "CC Empleados" + centro del
         # empleado (solo si esos campos quedaron vacíos).
         self._aplicar_regla_cc()
+
+    def _seccion_datos_sin_campo(self, tipo: int, datos: dict):
+        """Bloque de solo lectura con lo importado que este tipo NO pide.
+
+        La plantilla de Excel tiene columnas (MARCA, MODELO, CLIENTE, PLACA) que
+        el alta del SIPP solo exige para algunos tipos: MARCA y MODELO en
+        maquinaria y vehículos, CLIENTE solo en maquinaria, PLACA solo en
+        vehículos. Para un equipo de cómputo esos campos no existen en el portal,
+        así que no se pueden capturar aquí ni enviar.
+
+        Se muestran igual, en gris y sin editar, porque el dato SÍ está guardado y
+        antes no había manera de saberlo: quien lo capturó en el Excel merecía ver
+        que llegó, aunque el SIPP no lo reciba para este tipo.
+        """
+        from core.importador_excel import _ENCABEZADOS_ALTA
+
+        propias = {c.clave for c in campos_de_tipo(tipo)}
+        # Solo las que la plantilla sabe llenar: un dato interno suelto en
+        # datos_json (ids, rutas de imagen) no es algo que el usuario capturara.
+        rotulos = {clave: hdr for hdr, clave in _ENCABEZADOS_ALTA.items()}
+        sobrantes = [(rotulos[c], str(v).strip()) for c, v in datos.items()
+                     if c in rotulos and c not in propias and str(v).strip()]
+        if not sobrantes:
+            return None
+        filas = [ft.Row([ft.Text(f"{hdr}:", size=13, width=170, color=GRIS,
+                                 weight=ft.FontWeight.W_600),
+                         ft.Text(valor, size=13, selectable=True, expand=True,
+                                 no_wrap=False)],
+                        vertical_alignment=ft.CrossAxisAlignment.START)
+                 for hdr, valor in sorted(sobrantes)]
+        return seccion_formulario(
+            "Datos del Excel que este tipo no usa", ft.Icons.INFO_OUTLINE,
+            [ft.Column(
+                [ft.Text("El SIPP no pide estos campos para este tipo de activo, "
+                         "así que no se envían en el alta. Se conservan tal como "
+                         "se importaron.", size=11, color=GRIS, no_wrap=False),
+                 *filas], spacing=6, tight=True)],
+            columnas=1)
 
     def _valor_inicial(self, campo, datos: dict) -> str:
         """Valor con el que se precarga un campo: lo ya capturado si existe; si no,
@@ -766,7 +807,13 @@ class DialogoCapturaActivo:
             if callable(self.al_guardar):
                 self.al_guardar()
             return
-        valores, faltantes = {}, []
+        # Se PARTE de lo ya guardado en vez de armar el dict desde cero: el Excel
+        # trae columnas (MARCA, MODELO, CLIENTE, PLACA) que el SIPP solo pide para
+        # ciertos tipos, así que el formulario de un equipo de cómputo no las
+        # pinta. Como `datos_json` se REEMPLAZA al guardar, construirlo solo con
+        # los campos pintados borraba en silencio lo importado. Lo que sí se pinta
+        # se sobrescribe abajo, incluido lo que el usuario haya dejado vacío.
+        valores, faltantes = dict(self._registro.datos()), []
         for clave, (campo, ctrl) in self._controles.items():
             valor = (getattr(ctrl, "value", "") or "").strip()
             if campo.requerido and not valor:
@@ -796,11 +843,17 @@ class DialogoCapturaActivo:
         if insumo_cap and serie:
             insumo_cap = archivos.nombre_sin_serie(
                 insumo_cap, serie, self._registro.etiqueta or "")
+        # El empleado de resguardo se refleja en la COLUMNA `responsable`, igual
+        # que la serie y el insumo: es la que ve el listado general. Sin esto, lo
+        # capturado aquí solo vivía en datos_json y la tabla seguía mostrando el
+        # responsable que trajo el Excel.
+        empleado_cap = (valores.get("nb_Empleado") or "").strip()
         db.actualizar_datos_levantamiento(
             self._registro.id, id_tipo_activo=tipo, datos=valores,
             modificado=True if ya_de_alta else None,
             no_serie=serie if serie else None,
-            nombre_insumo=insumo_cap or None)
+            nombre_insumo=insumo_cap or None,
+            responsable=empleado_cap or None)
         self.modal.cerrar()
         self.app.avisar("Datos del activo guardados.", VERDE)
         if callable(self.al_guardar):
