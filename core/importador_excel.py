@@ -71,6 +71,16 @@ _ENCABEZADOS_ALTA = {
     "MODELO": "modelo",
     "CLIENTE": "cliente",
     "PLACA": "placa",
+    # Detalles de Equipo informático. El encabezado NO repite el rótulo largo del
+    # portal («Tipo (Escritorio/Portatil)»): la columna se lee de lado y el rótulo
+    # completo vive en `core/tipos_activo`, que es quien lo empareja con el SIPP.
+    "TIPO EQUIPO": "tipo_equipo",
+    "MEMORIA RAM": "memoria_ram",
+    "PROCESADOR": "procesador",
+    "SISTEMA OPERATIVO": "sistema_operativo",
+    "PANTALLA TACTIL": "pantalla_tactil",
+    "TIPO SISTEMA": "tipo_sistema",
+    "CARGADOR": "cargador",
 }
 # Detección combinada: encabezado -> destino (campo básico O clave del alta).
 _HEADERS = {**_ENCABEZADOS, **_ENCABEZADOS_ALTA}
@@ -140,7 +150,9 @@ PLANTILLA_ENCABEZADOS = [
     "SITUACION", "COSTO", "FACTURA", "PROVEEDOR", "EMPRESA COMPRA",
     "SUCURSAL COMPRA", "GRUPO CENTRO DE COSTO", "CENTRO DE COSTO", "DEPARTAMENTO",
     "FECHA ADQUISICION", "FECHA GARANTIA", "FECHA ASIGNACION",
-    "MARCA", "MODELO", "CLIENTE", "PLACA",
+    "MARCA", "MODELO", "TIPO EQUIPO", "MEMORIA RAM", "PROCESADOR",
+    "SISTEMA OPERATIVO", "PANTALLA TACTIL", "TIPO SISTEMA", "CLIENTE",
+    "CARGADOR", "PLACA",
 ]
 
 
@@ -412,7 +424,13 @@ def generar_plantilla(ruta: str, empresa: str = "") -> str:
         "usan las del selector de la pantalla al importar.",
         "• UBICACION: ubicación física.",
         "",
-        "CARACTERÍSTICAS (según el tipo): MARCA, MODELO, CLIENTE, PLACA.",
+        "CARACTERÍSTICAS DEL INSUMO (solo las que el SIPP pide para ese tipo; el "
+        "resto se ignora al dar de alta):",
+        "• Equipo informático: MARCA, MODELO, TIPO EQUIPO (escritorio/portátil), "
+        "MEMORIA RAM, PROCESADOR, SISTEMA OPERATIVO, PANTALLA TACTIL, TIPO SISTEMA "
+        "(x86/x64), CLIENTE, CARGADOR.",
+        "• Maquinaria y Equipo: MARCA, MODELO, CLIENTE.",
+        "• Vehículos (utilitarios y pesados): MARCA, MODELO, PLACA.",
         "",
         "No cambies los nombres de los encabezados de la hoja «Activos».",
         "No borres la hoja oculta «Listas»: es de donde salen los desplegables.",
