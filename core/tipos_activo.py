@@ -170,7 +170,33 @@ CAMPOS_POR_TIPO: dict[int, list[CampoActivo]] = {
         CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo", detalle=True),
         CampoActivo("placa", "", "Placa", "text", grupo="Detalles Insumo", detalle=True),
     ],
-    # Equipo informático (id 7): pendiente de confirmar con su propia captura.
+    # Equipo informático (id 7): CONFIRMADO con captura real del formulario.
+    # Los rótulos van TAL COMO los escribe el portal (sin acentos en «Portatil» y
+    # «Tactil», con los paréntesis): el emparejado es por texto y, aunque la
+    # comparación ignora acentos y dos puntos, cualquier otra diferencia de
+    # redacción dejaría el campo sin llenar. El orden es el de la captura.
+    7: [
+        CampoActivo("marca", "", "Marca", "text", grupo="Detalles Insumo",
+                    detalle=True),
+        CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo",
+                    detalle=True),
+        CampoActivo("tipo_equipo", "", "Tipo (Escritorio/Portatil)", "text",
+                    grupo="Detalles Insumo", detalle=True),
+        CampoActivo("memoria_ram", "", "Memoria RAM", "text",
+                    grupo="Detalles Insumo", detalle=True),
+        CampoActivo("procesador", "", "Procesador", "text",
+                    grupo="Detalles Insumo", detalle=True),
+        CampoActivo("sistema_operativo", "", "Sistema Operativo", "text",
+                    grupo="Detalles Insumo", detalle=True),
+        CampoActivo("pantalla_tactil", "", "Pantalla Tactil", "text",
+                    grupo="Detalles Insumo", detalle=True),
+        CampoActivo("tipo_sistema", "", "Tipo Sistema (x86/x64)", "text",
+                    grupo="Detalles Insumo", detalle=True),
+        CampoActivo("cliente", "", "Cliente", "text", grupo="Detalles Insumo",
+                    detalle=True),
+        CampoActivo("cargador", "", "Cargador", "text", grupo="Detalles Insumo",
+                    detalle=True),
+    ],
 }
 
 
