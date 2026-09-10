@@ -1215,7 +1215,15 @@ class SeccionRegistroActivos:
     # ------------------------------------------------------ carga de imágenes
     # -------------------------------------------- modal unificado de carga
     def _abrir_subir(self, _e=None) -> None:
-        """Modal que unifica los métodos de alta: carpeta, ZIP o Excel."""
+        """Modal de carga, en DOS niveles: primero qué se quiere hacer y luego de
+        dónde salen los archivos.
+
+        Antes las cinco combinaciones colgaban de la misma lista, y elegir exigía
+        leerlas todas para descubrir que eran dos tareas distintas —dar de alta
+        activos nuevos y ponerle foto a activos que ya existen— repetidas por
+        formato. Agrupar por TAREA deja tres opciones arriba y el formato como un
+        detalle de la que se eligió.
+        """
         modal = Modal(self.page, "Subir archivos para dar de alta", ancho=560)
 
         def _opcion(icono, titulo, desc, on_click):
@@ -1233,34 +1241,72 @@ class SeccionRegistroActivos:
             modal.cerrar()
             await self.dialogo_carga.abrir()
 
-        modal.cuerpo.spacing = 10
-        modal.cuerpo.controls = [
-            ft.Text("Elige cómo cargar los activos para el registro del RPA:",
-                    size=13, color=GRIS),
-            _opcion(ft.Icons.FOLDER_OPEN, "Carga de carpeta",
-                    "Todas las imágenes de una carpeta (y sus subcarpetas).",
-                    lambda _e: self._pedir_contexto(modal, "carpeta")),
-            _opcion(ft.Icons.FOLDER_ZIP, "Carga de carpeta comprimida (ZIP)",
-                    "Un .zip del levantamiento; se extrae y se procesa igual.",
-                    lambda _e: self._pedir_contexto(modal, "zip")),
-            _opcion(ft.Icons.TABLE_VIEW, "Carga masiva con Excel",
-                    "Plantilla de Excel con los datos del alta (empresa/sucursal en "
-                    "las columnas).", _ir_excel),
-            _opcion(ft.Icons.ADD_PHOTO_ALTERNATE, "Relacionar imágenes con activos",
-                    "Para activos ya cargados (p. ej. por Excel): empareja las fotos "
-                    "de una CARPETA por etiqueta, serie o nombre del archivo.",
-                    lambda _e: self.page.run_task(self._relacionar_imagenes, modal)),
-            # El ZIP va como opción propia y no como un diálogo que pregunte
-            # «¿carpeta o ZIP?»: el resto del modal ya distingue así las dos
-            # cargas, y un paso extra solo para elegir el formato sobra.
-            _opcion(ft.Icons.FOLDER_ZIP, "Relacionar imágenes desde un ZIP",
-                    "Igual que la anterior, pero las fotos vienen comprimidas en "
-                    "un .zip; se extrae y se empareja igual.",
-                    lambda _e: self.page.run_task(
-                        self._relacionar_imagenes, modal, True)),
-        ]
-        modal.set_acciones([boton_herramienta(
-            "Cancelar", on_click=lambda _e: modal.cerrar())])
+        def _pintar(titulo: str, intro: str, opciones: list,
+                    volver=None) -> None:
+            """Reemplaza el contenido del modal. Se muta el mismo diálogo en vez de
+            abrir otro encima: apilar modales deja al usuario cerrando ventanas de
+            una en una para llegar de vuelta."""
+            modal.subtitulo = titulo
+            modal.cuerpo.spacing = 10
+            modal.cuerpo.controls = [
+                ft.Text(intro, size=13, color=GRIS, no_wrap=False), *opciones]
+            acciones = [boton_herramienta("Cancelar",
+                                          on_click=lambda _e: modal.cerrar())]
+            if volver is not None:
+                acciones.insert(0, boton_herramienta(
+                    "Volver", ft.Icons.ARROW_BACK, lambda _e: volver()))
+            modal.set_acciones(acciones)
+            modal.refrescar()
+
+        def _vista_inicio() -> None:
+            _pintar(
+                "", "¿Qué quieres hacer?",
+                [_opcion(ft.Icons.ADD_A_PHOTO,
+                         "Cargar imágenes y dar de alta los activos",
+                         "Crea un registro por imagen, tomando el insumo y la "
+                         "etiqueta del nombre del archivo.", lambda _e: _vista_carga()),
+                 _opcion(ft.Icons.TABLE_VIEW, "Carga masiva con Excel",
+                         "Plantilla de Excel con los datos del alta "
+                         "(empresa/sucursal en las columnas).", _ir_excel),
+                 _opcion(ft.Icons.ADD_PHOTO_ALTERNATE,
+                         "Relacionar imágenes con activos",
+                         "Para activos ya cargados (p. ej. por Excel): les asigna "
+                         "su foto por etiqueta, serie, insumo o carpeta del "
+                         "responsable.", lambda _e: _vista_relacionar())])
+
+        def _vista_carga() -> None:
+            _pintar(
+                "CARGAR IMÁGENES Y DAR DE ALTA", "¿De dónde salen las imágenes?",
+                [_opcion(ft.Icons.FOLDER_OPEN, "De una carpeta",
+                         "Todas las imágenes de una carpeta (y sus subcarpetas).",
+                         lambda _e: self._pedir_contexto(modal, "carpeta")),
+                 _opcion(ft.Icons.FOLDER_ZIP, "De una carpeta comprimida (ZIP)",
+                         "Un .zip del levantamiento; se extrae y se procesa igual.",
+                         lambda _e: self._pedir_contexto(modal, "zip"))],
+                volver=_vista_inicio)
+
+        def _vista_relacionar() -> None:
+            _pintar(
+                "RELACIONAR IMÁGENES CON ACTIVOS",
+                "¿De dónde salen las imágenes?",
+                [_opcion(ft.Icons.FOLDER_OPEN, "De una carpeta",
+                         "Si viene organizada en una carpeta por responsable, se "
+                         "usa ese nombre para asignar cada foto.",
+                         lambda _e: self.page.run_task(
+                             self._relacionar_imagenes, modal, "carpeta")),
+                 _opcion(ft.Icons.PHOTO_LIBRARY, "Fotos sueltas",
+                         "Se eligen una o varias imágenes a mano; se emparejan por "
+                         "lo que diga su nombre.",
+                         lambda _e: self.page.run_task(
+                             self._relacionar_imagenes, modal, "archivos")),
+                 _opcion(ft.Icons.FOLDER_ZIP, "De una carpeta comprimida (ZIP)",
+                         "Se extrae y se empareja igual, incluida la carpeta del "
+                         "responsable.",
+                         lambda _e: self.page.run_task(
+                             self._relacionar_imagenes, modal, "zip"))],
+                volver=_vista_inicio)
+
+        _vista_inicio()
         modal.abrir()
 
     def _pedir_contexto(self, modal, metodo: str) -> None:
@@ -1376,7 +1422,7 @@ class SeccionRegistroActivos:
             archivos.listar_imagenes(carpeta), empresa, sucursal, departamento)
 
     async def _relacionar_imagenes(self, modal_origen=None,
-                                   desde_zip: bool = False) -> None:
+                                   origen: str = "carpeta") -> None:
         """Empareja imágenes de una carpeta (o de un ZIP) con activos YA cargados.
 
         Pensado para la carga por Excel, que crea los registros sin foto: aquí se
@@ -1384,10 +1430,17 @@ class SeccionRegistroActivos:
         archivo (etiqueta, serie o insumo). Lo que no se pueda emparejar solo, lo
         resuelve el usuario a mano.
 
-        `desde_zip` pide un .zip en vez de una carpeta. Se extrae a la carpeta de
-        datos de la app —no a una temporal— porque la ruta extraída es la que se
-        guarda en el registro: desde ahí se abre la foto después, y una temporal
-        dejaría la imagen rota en cuanto Windows la limpiara."""
+        `origen` dice de dónde salen las fotos:
+          - "carpeta":  una carpeta (con sus subcarpetas).
+          - "zip":      un .zip, que se extrae a la carpeta de datos de la app
+                        —no a una temporal— porque la ruta extraída es la que se
+                        guarda en el registro: desde ahí se abre la foto después,
+                        y una temporal dejaría la imagen rota en cuanto Windows la
+                        limpiara.
+          - "archivos": imágenes elegidas a mano. No hay carpeta de la que deducir
+                        al responsable, así que el emparejamiento se apoya solo en
+                        el nombre del archivo.
+        """
         if modal_origen is not None:
             modal_origen.cerrar()
         # {ruta: subcarpeta} del ZIP. En una carpeta normal la estructura sigue en
@@ -1395,7 +1448,15 @@ class SeccionRegistroActivos:
         # (por el límite de 260 caracteres de Windows), así que su árbol viaja
         # aquí.
         carpetas_zip: dict = {}
-        if desde_zip:
+        carpeta, entradas = "", []
+        if origen == "archivos":
+            seleccion = await self.app.picker.pick_files(
+                dialog_title="Selecciona las imágenes de los activos",
+                allowed_extensions=IMG_EXT, allow_multiple=True)
+            if not seleccion:
+                return
+            entradas = [(a.name, a.path) for a in seleccion]
+        elif origen == "zip":
             seleccion = await self.app.picker.pick_files(
                 dialog_title="Selecciona el ZIP con las imágenes de los activos",
                 allowed_extensions=["zip"], allow_multiple=False)
@@ -1417,16 +1478,17 @@ class SeccionRegistroActivos:
         else:
             carpeta = await self.app.picker.get_directory_path(
                 dialog_title="Carpeta con las imágenes de los activos")
-        if not carpeta:
-            return
-        try:
-            entradas = archivos.listar_imagenes(carpeta)
-        except OSError as exc:
-            self.app.avisar(f"No se pudo leer la carpeta: {exc}", ROJO)
-            return
+        if origen != "archivos":
+            if not carpeta:
+                return
+            try:
+                entradas = archivos.listar_imagenes(carpeta)
+            except OSError as exc:
+                self.app.avisar(f"No se pudo leer la carpeta: {exc}", ROJO)
+                return
         if not entradas:
             self.app.avisar(
-                "El ZIP no contiene imágenes compatibles." if desde_zip else
+                "El ZIP no contiene imágenes compatibles." if origen == "zip" else
                 "La carpeta no contiene imágenes compatibles.", NARANJA)
             return
 
