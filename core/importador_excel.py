@@ -131,11 +131,30 @@ class HojaDetectada:
 
 
 @dataclass
+class GrupoDuplicado:
+    """Filas IDÉNTICAS dentro del archivo: mismo insumo, mismo responsable, mismo
+    departamento y misma ubicación, y ninguna trae etiqueta ni serie.
+
+    No hay forma de saber desde el archivo si son varios activos reales (cinco
+    sillas iguales de la misma persona) o la misma fila capturada de más, así que
+    la herramienta las reporta y deja que el usuario decida."""
+
+    hoja: str
+    insumo: str
+    responsable: str
+    departamento: str
+    ubicacion: str
+    veces: int
+
+
+@dataclass
 class ResultadoImportacion:
     """Estadísticas de una importación."""
 
     agregados: int = 0
-    duplicados: int = 0
+    duplicados: int = 0          # ya estaban en la herramienta (otra carga)
+    repetidos_archivo: int = 0   # misma etiqueta (o insumo+serie) repetida en el archivo
+    excluidos: int = 0           # copias idénticas que el usuario decidió no conservar
     sin_etiqueta: int = 0
     filas_leidas: int = 0
     errores: list = field(default_factory=list)
@@ -564,7 +583,8 @@ def _filas_datos(ws, fila_hdr: int, columnas: dict):
 
 
 def importar(ruta: str, hojas: list[str], empresa: str = "", sucursal: str = "",
-             departamento: str = "", progreso=None) -> ResultadoImportacion:
+             departamento: str = "", progreso=None,
+             conservar_duplicados: bool = True) -> ResultadoImportacion:
     """Importa las `hojas` indicadas del archivo al levantamiento.
 
     Cada fila se expande en un registro por ETIQUETA. EMPRESA, SUCURSAL y
@@ -575,10 +595,18 @@ def importar(ruta: str, hojas: list[str], empresa: str = "", sucursal: str = "",
     ORIGEN se usa como sucursal (compatibilidad). El TIPO de activo se deja vacío
     para asignarlo después desde la herramienta.
 
+    `conservar_duplicados`: qué hacer con las filas IDÉNTICAS sin etiqueta ni
+    serie (ver `detectar_duplicados`). True las registra todas como activos
+    distintos; False deja una sola por grupo y cuenta las demás en `excluidos`.
+
     `progreso(hecho, total, hoja)`: callback opcional para reflejar el avance.
     """
     res = ResultadoImportacion()
     wb = openpyxl.load_workbook(ruta, data_only=True, read_only=True)
+    # Ordinales y claves vistas se comparten entre hojas: un archivo con el
+    # inventario partido en varias pestañas es un solo inventario.
+    ordinales: dict = {}
+    vistas: set = set()
     try:
         total = len(hojas)
         for n, nombre in enumerate(hojas, 1):
@@ -592,17 +620,117 @@ def importar(ruta: str, hojas: list[str], empresa: str = "", sucursal: str = "",
                 continue
             if progreso:
                 progreso(n, total, nombre)
-            _importar_hoja(ws, fila_hdr, columnas, empresa, sucursal,
-                           departamento, res)
+            registros = _registros_hoja(ws, fila_hdr, columnas, empresa, sucursal,
+                                        departamento, res)
+            _numerar_copias(registros, ordinales, conservar_duplicados, res)
+            _insertar(registros, vistas, res)
     finally:
         wb.close()
     return res
 
 
-def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: str,
-                   departamento: str, res: ResultadoImportacion) -> None:
-    """Arma los registros de la hoja (expandiendo etiquetas) y los inserta EN
-    LOTE: con miles de filas, una transacción por registro es muchísimo más lenta."""
+def detectar_duplicados(ruta: str, hojas: list[str], empresa: str = "",
+                        sucursal: str = "",
+                        departamento: str = "") -> list[GrupoDuplicado]:
+    """Busca filas IDÉNTICAS sin etiqueta ni serie, ANTES de importar. No escribe nada.
+
+    Se avisa antes porque la decisión no se puede deshacer cómodamente después:
+    si eran captura duplicada, el inventario queda inflado; si eran activos
+    reales y se descartan, faltan. Devuelve un grupo por combinación repetida,
+    del más repetido al menos."""
+    grupos: dict = {}
+    wb = openpyxl.load_workbook(ruta, data_only=True, read_only=True)
+    try:
+        for nombre in hojas:
+            if nombre not in wb.sheetnames:
+                continue
+            ws = wb[nombre]
+            fila_hdr, columnas = _detectar_encabezado(ws)
+            if not columnas or "insumo" not in columnas:
+                continue
+            # Sin resolver ids del SIPP: aquí solo interesa detectar, y esa
+            # resolución consulta el catálogo fila por fila.
+            for r in _registros_hoja(ws, fila_hdr, columnas, empresa, sucursal,
+                                     departamento, ResultadoImportacion(),
+                                     resolver_ids=False):
+                if r["etiqueta"] or r["no_serie"]:
+                    continue
+                clave = (nombre, _grupo_copia(r))
+                grupos.setdefault(clave, [0, r])
+                grupos[clave][0] += 1
+    finally:
+        wb.close()
+    repetidos = [GrupoDuplicado(hoja=hoja, insumo=r["nombre_insumo"],
+                                responsable=r["responsable"],
+                                departamento=r["departamento"],
+                                ubicacion=r["ubicacion"], veces=n)
+                 for (hoja, _g), (n, r) in grupos.items() if n > 1]
+    repetidos.sort(key=lambda g: (-g.veces, g.insumo, g.responsable))
+    return repetidos
+
+
+def _grupo_copia(registro: dict) -> tuple:
+    """Lo que hace «idénticas» a dos filas sin etiqueta ni serie."""
+    return ((registro["nombre_insumo"] or "").strip().upper(),
+            (registro["responsable"] or "").strip().upper(),
+            (registro["departamento"] or "").strip().upper(),
+            (registro["ubicacion"] or "").strip().upper())
+
+
+def _numerar_copias(registros: list[dict], ordinales: dict, conservar: bool,
+                    res: ResultadoImportacion) -> None:
+    """Numera las copias idénticas (1, 2, 3…) para que cada una sea un activo.
+
+    Sin esto, todas comparten clave y el INSERT OR IGNORE se queda con la primera:
+    así era como 51 escritorios entraban como uno. Si el usuario eligió NO
+    conservarlas, se descartan aquí y se cuentan aparte (no como «ya existían»,
+    que era justo lo que confundía)."""
+    conservados = []
+    for r in registros:
+        if r["etiqueta"] or r["no_serie"]:
+            conservados.append(r)
+            continue
+        grupo = _grupo_copia(r)
+        n = ordinales.get(grupo, 0) + 1
+        ordinales[grupo] = n
+        if conservar:
+            r["ordinal"] = n
+            conservados.append(r)
+        elif n == 1:
+            r["ordinal"] = 1
+            conservados.append(r)
+        else:
+            res.excluidos += 1
+    registros[:] = conservados
+
+
+def _insertar(registros: list[dict], vistas: set, res: ResultadoImportacion) -> None:
+    """Inserta el lote, separando las repeticiones DEL ARCHIVO de lo que YA ESTABA.
+
+    Las dos cosas caían antes en el mismo contador y se reportaban como «ya
+    existían», que es falso para un archivo que nunca se había subido."""
+    unicos = []
+    for r in registros:
+        clave = db.clave_levantamiento(
+            r["nombre_insumo"], r["etiqueta"], r["no_serie"], r["responsable"],
+            r["departamento"], r["ubicacion"], r.get("ordinal", 1))
+        if clave in vistas:
+            res.repetidos_archivo += 1   # misma etiqueta / mismo insumo+serie
+            continue
+        vistas.add(clave)
+        unicos.append(r)
+    agregados, duplicados = db.guardar_levantamiento_lote(unicos)
+    res.agregados += agregados
+    res.duplicados += duplicados
+
+
+def _registros_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: str,
+                    departamento: str, res: ResultadoImportacion,
+                    resolver_ids: bool = True) -> list[dict]:
+    """Arma los registros de la hoja (expandiendo etiquetas). No escribe en la base.
+
+    Lo usan la importación y la detección de duplicados, para que lo que se
+    reporta y lo que se guarda salgan del MISMO cálculo."""
     registros = []
     cache_insumo: dict = {}
     cache_empleado: dict = {}
@@ -653,16 +781,18 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
             datos.setdefault("id_Departamento", dep_fila)
         # Ids del SIPP para que el RPA seleccione insumo/empleado por id (si no se
         # resuelven, se dejan para elegirlos en la ficha).
-        id_ins = _resolver_insumo(insumo, id_empresa, cache_insumo)
-        if id_ins:
-            datos["id_InsumoOrigen"] = str(id_ins)
-        id_emp = _resolver_empleado(responsable, cache_empleado)
-        if id_emp:
-            datos["id_EmpleadoResguardo"] = str(id_emp)
+        if resolver_ids:
+            id_ins = _resolver_insumo(insumo, id_empresa, cache_insumo)
+            if id_ins:
+                datos["id_InsumoOrigen"] = str(id_ins)
+            id_emp = _resolver_empleado(responsable, cache_empleado)
+            if id_emp:
+                datos["id_EmpleadoResguardo"] = str(id_emp)
 
         if not etiquetas:
-            # Sin etiqueta: se guarda un único registro (se identificará por
-            # insumo + serie) y se reporta para que el área lo revise.
+            # Sin etiqueta: se guarda un registro que se identificará por
+            # serie o, si tampoco la hay, por insumo + responsable + lugar
+            # (ver db.clave_levantamiento). Se reporta para que el área lo revise.
             res.sin_etiqueta += 1
             etiquetas = [""]
 
@@ -686,7 +816,4 @@ def _importar_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: st
                 "id_tipo_activo": id_tipo,
                 "datos": datos_fila or None,
             })
-
-    agregados, duplicados = db.guardar_levantamiento_lote(registros)
-    res.agregados += agregados
-    res.duplicados += duplicados
+    return registros

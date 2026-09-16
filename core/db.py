@@ -86,20 +86,35 @@ _SQL_CREAR_LEVANTAMIENTO = """
 
 
 def clave_levantamiento(nombre_insumo: str, etiqueta: str = "",
-                        no_serie: str = "") -> str:
+                        no_serie: str = "", responsable: str = "",
+                        departamento: str = "", ubicacion: str = "",
+                        ordinal: int = 1) -> str:
     """Clave única de un registro del levantamiento.
 
-    Unifica los dos orígenes de datos de la herramienta:
-      - Carga masiva de inventario -> la ETIQUETA (número de inventario) es el
-        identificador real del activo en el SIPP.
-      - Carga de imágenes del levantamiento físico -> no hay etiqueta, así que se
-        identifica por insumo + serie (como venía funcionando).
+    Unifica los orígenes de datos de la herramienta, de más a menos identificador:
+      - ETIQUETA (número de inventario del SIPP)   -> "ETQ:<etiqueta>"
+      - insumo + SERIE (carga de imágenes)         -> "INS:<INSUMO>|<SERIE>"
+      - ni una ni otra                             -> "LEV:<INSUMO>|<RESP>|<DEPTO>|<UBIC>|<n>"
+
+    La tercera forma existe porque identificar por SOLO el insumo colapsaba todos
+    los activos iguales de un inventario en uno: 51 escritorios sin etiqueta ni
+    serie entraban como UN escritorio y los otros 50 se descartaban en silencio
+    como «ya existía». Responsable, departamento y ubicación los separan; el
+    ordinal distingue los repetidos exactos (dos escritorios del mismo empleado
+    en el mismo lugar) sin perder la idempotencia: volver a subir el mismo
+    archivo recalcula los mismos ordinales y no duplica nada.
     """
     etiqueta = (etiqueta or "").strip()
     if etiqueta:
         return "ETQ:" + etiqueta
-    return "INS:%s|%s" % ((nombre_insumo or "").strip().upper(),
-                          (no_serie or "").strip().upper())
+    insumo = (nombre_insumo or "").strip().upper()
+    serie = (no_serie or "").strip().upper()
+    if serie:
+        return "INS:%s|%s" % (insumo, serie)
+    return "LEV:%s|%s|%s|%s|%d" % (
+        insumo, (responsable or "").strip().upper(),
+        (departamento or "").strip().upper(), (ubicacion or "").strip().upper(),
+        max(1, ordinal))
 
 
 def _migrar_levantamiento_a_clave_unica(con: sqlite3.Connection,
@@ -114,15 +129,25 @@ def _migrar_levantamiento_a_clave_unica(con: sqlite3.Connection,
     con.execute(_SQL_CREAR_LEVANTAMIENTO.format(tabla="_levantamiento_nuevo"))
     # Solo se copian las columnas que existan en la tabla vieja.
     comunes = [c for c in (
-        "id", "empresa", "sucursal", "departamento", "nombre_insumo", "no_serie",
-        "ruta_imagen", "estatus_registro", "id_tipo_activo", "datos_json",
-        "factura", "id_activo_sipp", "modificado", "creado_en",
+        "id", "empresa", "sucursal", "departamento", "nombre_insumo", "etiqueta",
+        "no_serie", "responsable", "ubicacion", "ruta_imagen", "estatus_registro",
+        "id_tipo_activo", "datos_json", "factura", "id_activo_sipp", "modificado",
+        "creado_en",
     ) if c in existentes]
     filas = con.execute(f"SELECT {', '.join(comunes)} FROM levantamiento").fetchall()
+    ordinales: dict = {}
     for fila in filas:
         d = dict(fila)
+        # Cada fila sin etiqueta ni serie lleva su propio ordinal: son activos
+        # distintos aunque se llamen igual, y sin esto se descartarían aquí.
+        grupo = (d.get("nombre_insumo", ""), d.get("responsable", ""),
+                 d.get("departamento", ""), d.get("ubicacion", ""))
+        ordinales[grupo] = ordinales.get(grupo, 0) + 1
         d["clave_unica"] = clave_levantamiento(
-            d.get("nombre_insumo", ""), "", d.get("no_serie", ""))
+            d.get("nombre_insumo", ""), d.get("etiqueta", "") or "",
+            d.get("no_serie", "") or "", d.get("responsable", "") or "",
+            d.get("departamento", "") or "", d.get("ubicacion", "") or "",
+            ordinales[grupo])
         cols = list(d.keys())
         con.execute(
             f"INSERT OR IGNORE INTO _levantamiento_nuevo ({', '.join(cols)}) "
@@ -130,6 +155,44 @@ def _migrar_levantamiento_a_clave_unica(con: sqlite3.Connection,
             [d[c] for c in cols])
     con.execute("DROP TABLE levantamiento")
     con.execute("ALTER TABLE _levantamiento_nuevo RENAME TO levantamiento")
+
+
+def _migrar_claves_sin_identificador(con: sqlite3.Connection) -> int:
+    """Recalcula la clave de los registros SIN etiqueta y SIN serie.
+
+    Esas filas se identificaban solo por el nombre del insumo, así que una base
+    creada antes de este cambio ya perdió las copias (entraron como una sola).
+    Lo que sí se puede hacer es dejar las supervivientes con la clave nueva —que
+    incluye responsable, departamento y ubicación— para que al volver a subir el
+    inventario las que faltan entren en vez de chocar otra vez.
+
+    Solo toca las claves viejas ('LEV:' es el prefijo nuevo), así que es
+    idempotente y puede correr en cada arranque."""
+    filas = con.execute(
+        "SELECT id, nombre_insumo, responsable, departamento, ubicacion "
+        "FROM levantamiento "
+        "WHERE IFNULL(etiqueta,'') = '' AND IFNULL(no_serie,'') = '' "
+        "  AND clave_unica NOT LIKE 'LEV:%' ORDER BY id").fetchall()
+    ordinales: dict = {}
+    corregidas = 0
+    for f in filas:
+        grupo = (f["nombre_insumo"] or "", f["responsable"] or "",
+                 f["departamento"] or "", f["ubicacion"] or "")
+        n = ordinales.get(grupo, 0)
+        while n < 10000:
+            n += 1
+            clave = clave_levantamiento(
+                f["nombre_insumo"] or "", "", "", f["responsable"] or "",
+                f["departamento"] or "", f["ubicacion"] or "", n)
+            try:
+                con.execute("UPDATE levantamiento SET clave_unica = ? WHERE id = ?",
+                            (clave, f["id"]))
+            except sqlite3.IntegrityError:
+                continue    # esa clave ya es de otro registro: siguiente ordinal
+            corregidas += 1
+            break
+        ordinales[grupo] = n
+    return corregidas
 
 
 def inicializar() -> None:
@@ -346,6 +409,7 @@ def inicializar() -> None:
                     con.execute(
                         f"ALTER TABLE levantamiento ADD COLUMN {col} "
                         f"{tipos_lev.get(col, 'TEXT')}")
+        _migrar_claves_sin_identificador(con)
         # Índice por estatus: acelera el conteo por pestaña y el filtrado (la tabla
         # puede tener miles de registros y se consulta en cada cambio de pestaña).
         con.execute("CREATE INDEX IF NOT EXISTS ix_lev_estatus "
@@ -473,7 +537,8 @@ def guardar_levantamiento(nombre_insumo: str, no_serie: str = "",
     """Inserta un registro del levantamiento. Devuelve su id, o None si ya existía
     otro con la misma clave (ver clave_levantamiento): misma ETIQUETA, o mismo
     insumo+serie cuando no hay etiqueta. En ese caso se ignora (no duplica)."""
-    clave = clave_levantamiento(nombre_insumo, etiqueta, no_serie)
+    clave = clave_levantamiento(nombre_insumo, etiqueta, no_serie, responsable,
+                                departamento, ubicacion)
     try:
         with _conectar() as con:
             cur = con.execute(
@@ -497,7 +562,8 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
     única se ignoran (son el mismo activo). Devuelve (agregados, duplicados).
 
     Cada dict acepta: nombre_insumo (obligatorio), etiqueta, no_serie,
-    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen y —para
+    responsable, ubicacion, empresa, sucursal, departamento, ruta_imagen,
+    ordinal (para distinguir copias idénticas sin etiqueta ni serie) y —para
     la carga masiva con todos los campos del alta— id_tipo_activo (int) y datos
     (dict que se serializa a datos_json, lo que consume el RPA de alta).
     """
@@ -515,7 +581,11 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
             insumo, etiqueta or None, serie, r.get("responsable", ""),
             r.get("ubicacion", ""), r.get("ruta_imagen"),
             r.get("id_tipo_activo"), datos_json,
-            clave_levantamiento(insumo, etiqueta, serie),
+            # `ordinal` distingue las copias idénticas (misma descripción, mismo
+            # responsable, mismo lugar); lo asigna quien arma el lote.
+            clave_levantamiento(insumo, etiqueta, serie, r.get("responsable", ""),
+                                r.get("departamento", ""), r.get("ubicacion", ""),
+                                r.get("ordinal", 1)),
         ))
     with _conectar() as con:
         antes = con.execute("SELECT COUNT(*) FROM levantamiento").fetchone()[0]

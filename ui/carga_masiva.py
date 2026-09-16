@@ -311,8 +311,93 @@ class DialogoCargaMasiva:
         self._btn_importar.disabled = marcadas == 0
         self._safe_update()
 
-    # ------------------------------------------------------- importación
+    # ------------------------------------------------------- duplicados
     async def _importar(self, _e=None) -> None:
+        """Antes de escribir, revisa si el archivo trae filas idénticas.
+
+        Se pregunta aquí y no después porque la decisión no se deshace cómodo:
+        conservar de más infla el inventario, descartar de más lo deja corto."""
+        seleccionadas = [n for n, c in self._checks.items() if c.value]
+        if not seleccionadas or not self._ruta:
+            return
+        empresa, sucursal, departamento = self.contexto()
+        self._progreso.visible = True
+        self._btn_importar.disabled = True
+        self._resumen.value = "Revisando duplicados…"
+        self._safe_update()
+        try:
+            grupos = await asyncio.to_thread(
+                importador_excel.detectar_duplicados, self._ruta, seleccionadas,
+                empresa, sucursal, departamento)
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            self._progreso.visible = False
+            self._btn_importar.disabled = False
+            self._resumen.value = f"No se pudo revisar el archivo: {exc}"
+            self._resumen.color = ROJO
+            self._safe_update()
+            return
+        self._progreso.visible = False
+        if grupos:
+            self._mostrar_duplicados(grupos)
+            return
+        await self._ejecutar_importacion(True)
+
+    def _mostrar_duplicados(self, grupos: list) -> None:
+        """Lista las filas idénticas y deja elegir: conservarlas o dejar una."""
+        copias = sum(g.veces - 1 for g in grupos)
+        filas = [ft.Row(
+            [ft.Text(f"{g.veces}×", size=12, weight=ft.FontWeight.BOLD,
+                     color=NARANJA, width=32),
+             ft.Column(
+                 [ft.Text(g.insumo, size=13, weight=ft.FontWeight.W_500),
+                  ft.Text(" · ".join(p for p in (g.responsable, g.departamento,
+                                                 g.ubicacion) if p) or "sin responsable",
+                          size=11, color=GRIS, no_wrap=False)],
+                 spacing=0, tight=True, expand=True)],
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.START)
+            for g in grupos]
+        self.dialogo.content = ft.Container(
+            ft.Column(
+                [ft.Text(f"{len(grupos)} grupo(s) de filas idénticas en el archivo",
+                         size=13, weight=ft.FontWeight.W_600),
+                 ft.Text("Estas filas repiten insumo, responsable, departamento y "
+                         "ubicación, y no traen etiqueta ni número de serie, así que "
+                         "no hay forma de saber si son varios activos reales o la "
+                         "misma captura repetida.",
+                         size=12, color=GRIS, no_wrap=False),
+                 ft.Divider(),
+                 ft.Container(ft.Column(filas, spacing=8, scroll=ft.ScrollMode.AUTO,
+                                        tight=True), height=260),
+                 ft.Divider(),
+                 ft.Text(f"Conservarlas registra {copias} activo(s) más; excluirlas "
+                         f"deja uno por grupo.", size=12, color=GRIS, no_wrap=False),
+                 self._progreso],
+                spacing=10, tight=True),
+            width=_ANCHO)
+        self.dialogo.actions = [
+            boton_herramienta("Volver", on_click=self._volver_al_analisis),
+            boton_secundario("Excluir copias", ft.Icons.FILTER_ALT_OFF,
+                             self._importar_sin_copias),
+            boton_primario("Conservar todas", ft.Icons.DONE_ALL,
+                           self._importar_con_copias),
+        ]
+        self._safe_update()
+
+    def _volver_al_analisis(self, _e=None) -> None:
+        """Regresa a la selección de hojas dejando «Importar» habilitado otra vez."""
+        self._btn_importar.disabled = False
+        self._mostrar_analisis()
+
+    # Los botones reciben la corrutina TAL CUAL: envolverla en un lambda
+    # devolvería la corrutina sin ejecutarla y la importación no ocurriría.
+    async def _importar_con_copias(self, _e=None) -> None:
+        await self._ejecutar_importacion(True)
+
+    async def _importar_sin_copias(self, _e=None) -> None:
+        await self._ejecutar_importacion(False)
+
+    # ------------------------------------------------------- importación
+    async def _ejecutar_importacion(self, conservar_duplicados: bool) -> None:
         seleccionadas = [n for n, c in self._checks.items() if c.value]
         if not seleccionadas or not self._ruta:
             return
@@ -324,22 +409,31 @@ class DialogoCargaMasiva:
         try:
             res = await asyncio.to_thread(
                 importador_excel.importar, self._ruta, seleccionadas,
-                empresa, sucursal, departamento)
+                empresa, sucursal, departamento, None, conservar_duplicados)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._progreso.visible = False
             self._btn_importar.disabled = False
             self._resumen.value = f"Error al importar: {exc}"
             self._resumen.color = ROJO
-            self._safe_update()
+            # Se vuelve a la vista de hojas: el error se escribe en `_resumen`, que
+            # no está montado en el panel de duplicados (nadie lo leería ahí).
+            self._mostrar_analisis()
             return
         self._progreso.visible = False
         self.page.pop_dialog()
         if callable(self.al_terminar):
             self.al_terminar()
 
+        # Cada descarte dice POR QUÉ: antes todos se reportaban como «ya
+        # existían» y eso era falso para un archivo que nunca se había subido.
         partes = [f"{res.agregados} activo(s) importado(s)"]
         if res.duplicados:
-            partes.append(f"{res.duplicados} ya existían")
+            partes.append(f"{res.duplicados} ya estaban en la herramienta")
+        if res.excluidos:
+            partes.append(f"{res.excluidos} copia(s) idéntica(s) excluida(s)")
+        if res.repetidos_archivo:
+            partes.append(f"{res.repetidos_archivo} repetida(s) en el archivo "
+                          f"(misma etiqueta o serie)")
         if res.sin_etiqueta:
             partes.append(f"{res.sin_etiqueta} fila(s) sin etiqueta")
         color = VERDE if res.agregados else NARANJA
