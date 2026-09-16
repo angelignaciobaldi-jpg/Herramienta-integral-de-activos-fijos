@@ -358,14 +358,60 @@ class AppActivosFijos:
     async def _buscar_actualizacion_manual(self, _e=None) -> None:
         self.btn_actualizar.disabled = True
         self.page.update()
-        tag = await asyncio.to_thread(_comprobar_update_sync)
+        estado, detalle = await asyncio.to_thread(_comprobar_update_sync)
         self.btn_actualizar.disabled = False
         self.page.update()
-        if not tag:
+        if estado == "disponible":
+            self.marcar_actualizacion_disponible(detalle)
+            self._dialogo_actualizacion(detalle)
+        elif estado == "al_dia":
             self.avisar("Ya tienes la última versión instalada.", ft.Colors.GREEN_700)
-            return
-        self.marcar_actualizacion_disponible(tag)
-        self._dialogo_actualizacion(tag)
+        else:
+            # NO se dice «al día»: no se pudo comprobar. Se abre el diagnóstico,
+            # que es la única forma de ver qué pasa en un equipo ajeno.
+            await self._abrir_diagnostico_actualizacion(detalle)
+
+    async def _abrir_diagnostico_actualizacion(self, motivo: str = "") -> None:
+        """Muestra, paso por paso, qué impide actualizar ESTE equipo."""
+        from core import auto_updater
+        from ui.componentes import Modal, boton_herramienta, boton_primario
+
+        pasos = await asyncio.to_thread(auto_updater.diagnosticar)
+        iconos = {"ok": (ft.Icons.CHECK_CIRCLE, ft.Colors.GREEN_700),
+                  "aviso": (ft.Icons.WARNING_AMBER, ft.Colors.ORANGE_800),
+                  "error": (ft.Icons.ERROR, ft.Colors.RED_700)}
+        filas = []
+        for paso, estado, detalle in pasos:
+            icono, color = iconos.get(estado, iconos["aviso"])
+            filas.append(ft.Row(
+                [ft.Icon(icono, size=18, color=color),
+                 ft.Column([ft.Text(paso, size=13, weight=ft.FontWeight.W_600,
+                                    color=ft.Colors.ON_SURFACE),
+                            ft.Text(detalle, size=12, selectable=True, no_wrap=False,
+                                    color=ft.Colors.ON_SURFACE_VARIANT)],
+                           spacing=2, tight=True, expand=True)],
+                spacing=10, vertical_alignment=ft.CrossAxisAlignment.START))
+        # Texto plano para copiar y mandarlo por chat: quien atiende el equipo
+        # rara vez es quien lo usa, y una captura de pantalla recorta.
+        reporte = "\n".join(f"[{e.upper()}] {p}: {d}" for p, e, d in pasos)
+
+        modal = Modal(self.page, "Diagnóstico de actualización", ancho=680,
+                      alto_cuerpo=520, subtitulo="No se pudo comprobar la versión")
+        cuerpo = []
+        if motivo:
+            cuerpo.append(ft.Text(motivo, size=12, color=ft.Colors.RED_700,
+                                  selectable=True, no_wrap=False))
+        cuerpo.extend(filas)
+        modal.cuerpo.controls = cuerpo
+
+        async def copiar(_e=None) -> None:
+            await self.page.clipboard.set(reporte)
+            self.avisar("Diagnóstico copiado al portapapeles.", ft.Colors.GREEN_700)
+
+        modal.set_acciones([
+            boton_herramienta("Copiar reporte", ft.Icons.CONTENT_COPY, copiar),
+            boton_primario("Cerrar", ft.Icons.CHECK, lambda _e: modal.cerrar())])
+        modal.abrir()
 
     def _dialogo_actualizacion(self, tag: str) -> None:
         def aplicar(_e=None) -> None:
@@ -456,28 +502,33 @@ async def _splash_descargando(page: ft.Page, tag: str) -> None:
     )
 
 
-def _comprobar_update_sync() -> str | None:
-    """Chequeo SÍNCRONO (para correr en un hilo): devuelve el tag disponible o
-    None. Solo en la app empaquetada con PAT; cualquier fallo -> None."""
-    if not getattr(sys, "frozen", False):
-        return None
-    try:
-        from core import entorno
-        from core.auto_updater import AutoUpdater
+def _comprobar_update_sync() -> tuple[str, str]:
+    """Chequeo SÍNCRONO (para correr en un hilo): (estado, detalle).
 
-        if not entorno.github_pat(requerido=False):
-            return None
-        return AutoUpdater().hay_actualizacion()
-    except Exception:  # noqa: BLE001 — el chequeo nunca debe estorbar
-        return None
+    Antes devolvía el tag o None, y None cubría a la vez «estás al día» y «no se
+    pudo ni consultar» (sin token, 401, sin red…). El botón manual lo traducía a
+    «Ya tienes la última versión», así que un equipo que nunca se actualizaba no
+    daba ninguna pista de por qué. Ver `core.auto_updater.comprobar`.
+
+    Nunca lanza: el chequeo no debe estorbar el arranque.
+    """
+    try:
+        from core import auto_updater
+
+        return auto_updater.comprobar()
+    except Exception as exc:  # noqa: BLE001 — se reporta como no verificado
+        return "sin_verificar", str(exc)
 
 
 async def _revisar_actualizacion_2do_plano(page: ft.Page, app: "AppActivosFijos") -> None:
     """Tras cargar la app, revisa en segundo plano si hay una versión nueva; si la
     hay, prende el botón de actualización para que el usuario la aplique."""
-    tag = await asyncio.to_thread(_comprobar_update_sync)
-    if tag:
-        app.marcar_actualizacion_disponible(tag)
+    estado, detalle = await asyncio.to_thread(_comprobar_update_sync)
+    # En segundo plano solo se avisa lo bueno: un problema al arrancar sería una
+    # alerta en cada apertura para algo que el usuario no puede resolver solo. El
+    # motivo se ve al pulsar «Buscar actualizaciones».
+    if estado == "disponible":
+        app.marcar_actualizacion_disponible(detalle)
 
 
 async def _bitacora_uso_2do_plano(page: ft.Page) -> None:

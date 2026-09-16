@@ -57,6 +57,15 @@ class ErrorActualizacion(Exception):
     """Falla durante la búsqueda, descarga o aplicación de la actualización."""
 
 
+# Resultado del chequeo que ve el usuario. Se distingue "al día" de "no se pudo
+# comprobar" porque confundirlos es exactamente lo que volvía imposible de
+# diagnosticar un equipo que no se actualiza: la app decía «Ya tienes la última
+# versión» cuando en realidad no había podido ni consultar.
+AL_DIA = "al_dia"
+DISPONIBLE = "disponible"
+SIN_VERIFICAR = "sin_verificar"
+
+
 class _RedireccionSinAuth(urllib.request.HTTPRedirectHandler):
     """Quita el header Authorization cuando GitHub redirige el asset a otro host.
 
@@ -299,3 +308,214 @@ class AutoUpdater:
         sin elevación), así que se usa siempre %TEMP%, que es escribible."""
         _ = getattr(sys, "frozen", False)  # ejecutándose como .exe de PyInstaller
         return tempfile.gettempdir()
+
+
+# ================================================================ diagnóstico
+def comprobar() -> tuple[str, str]:
+    """(estado, detalle) del chequeo, SIN tragarse el motivo de un fallo.
+
+    `estado` es AL_DIA, DISPONIBLE (detalle = tag) o SIN_VERIFICAR (detalle = por
+    qué no se pudo). Es lo que usa el botón «Buscar actualizaciones».
+    """
+    if not getattr(sys, "frozen", False):
+        return SIN_VERIFICAR, "La actualización solo funciona en la app instalada."
+    if not entorno.github_pat(requerido=False):
+        return SIN_VERIFICAR, ("La aplicación no encuentra el token "
+                               "QUETZALTIC_GITHUB_PAT.")
+    try:
+        actualizador = AutoUpdater()
+        tag = actualizador.obtener_release_latest().get("tag_name", "")
+    except Exception as exc:  # noqa: BLE001 — el motivo se devuelve, no se calla
+        return SIN_VERIFICAR, str(exc)
+    if not actualizador.hay_version_mas_nueva(tag):
+        return AL_DIA, ""
+    # No se usa `hay_actualizacion()`: devuelve None tanto si está al día como si
+    # la release quedó BLOQUEADA por el anti-bucle, y ese segundo caso —el de una
+    # instalación duplicada que nunca avanza— es justo el que hay que ver.
+    if actualizador._tag_ya_aplicado(tag):
+        return SIN_VERIFICAR, (f"La versión {tag} ya se intentó instalar y la "
+                               f"instalada sigue siendo {VERSION_ACTUAL}.")
+    return DISPONIBLE, tag
+
+
+def _registrada_en_windows(nombre: str) -> list[str]:
+    """Dónde está REGISTRADA la variable en Windows ('usuario' / 'sistema').
+
+    Es distinto de si el proceso la ve: una variable recién registrada solo
+    llega a los programas que se abren DESPUÉS de iniciar sesión, porque el
+    escritorio de Windows se queda con el entorno que tenía al entrar. Comparar
+    las dos cosas es lo que delata ese caso, que es el más común."""
+    if os.name != "nt":
+        return []
+    import winreg
+
+    donde = []
+    for etiqueta, raiz, ruta in (
+            ("usuario", winreg.HKEY_CURRENT_USER, "Environment"),
+            ("sistema", winreg.HKEY_LOCAL_MACHINE,
+             r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(raiz, ruta) as clave:
+                valor, _ = winreg.QueryValueEx(clave, nombre)
+                if str(valor).strip():
+                    donde.append(etiqueta)
+        except OSError:
+            continue
+    return donde
+
+
+def _enmascarar(token: str) -> str:
+    """Tipo y últimos 4 caracteres: suficiente para confirmar QUÉ token es y si
+    es clásico (ghp_) o de grano fino (github_pat_), sin exponerlo."""
+    t = (token or "").strip()
+    tipo = ("de grano fino" if t.startswith("github_pat_")
+            else "clásico" if t.startswith("ghp_") else "de formato desconocido")
+    return f"token {tipo} terminado en …{t[-4:]}" if len(t) >= 8 else "token muy corto"
+
+
+def diagnosticar() -> list[tuple[str, str, str]]:
+    """Revisa, paso por paso, todo lo que necesita la actualización automática.
+
+    Devuelve [(paso, estado, detalle)] con estado 'ok', 'aviso' o 'error', en el
+    orden en que fallaría: no tiene caso probar la conexión si no hay token.
+    Nunca lanza. Pensado para correrse en el equipo que no se actualiza y leerse
+    ahí mismo, porque desde fuera no hay forma de ver su entorno.
+    """
+    pasos: list[tuple[str, str, str]] = []
+    congelado = getattr(sys, "frozen", False)
+
+    pasos.append(("Versión instalada", "ok", VERSION_ACTUAL))
+
+    # --- 1. ¿Dónde vive la app? -------------------------------------------
+    exe = os.path.abspath(sys.executable)
+    if not congelado:
+        pasos.append(("Instalación", "aviso",
+                      "Se está ejecutando desde el código fuente, no instalada: "
+                      "la actualización automática no aplica."))
+    else:
+        local = os.environ.get("LOCALAPPDATA", "")
+        por_usuario = os.path.join(local, "Programs") if local else ""
+        progs = [os.environ.get(v, "") for v in ("ProgramFiles", "ProgramFiles(x86)")]
+        rel = os.path.join("Quetzaltic Solutions", "Herramientas Activos Fijos",
+                           "ActivosFijos.exe")
+        copias = [c for c in ([os.path.join(por_usuario, rel)] if por_usuario else [])
+                  + [os.path.join(pf, rel) for pf in progs if pf]
+                  if os.path.exists(c)]
+        if len(copias) > 1:
+            pasos.append((
+                "Instalación", "error",
+                "Hay DOS copias instaladas:\n  " + "\n  ".join(copias) +
+                f"\nSe está usando: {exe}\n"
+                "La actualización se instala por usuario, pero el acceso directo "
+                "abre la otra copia, que nunca cambia. Desinstala la de Archivos "
+                "de programa y deja solo la de AppData."))
+        elif any(pf and exe.lower().startswith(pf.lower()) for pf in progs):
+            pasos.append((
+                "Instalación", "error",
+                f"Instalada en Archivos de programa ({exe}).\n"
+                "Se instaló como administrador, y la actualización corre sin "
+                "permisos: instala otra copia por usuario que el acceso directo "
+                "no abre. Desinstálala y vuelve a instalar SIN «Ejecutar como "
+                "administrador»."))
+        else:
+            pasos.append(("Instalación", "ok", exe))
+
+    # --- 2. ¿La app ve el token? -------------------------------------------
+    nombre = entorno.VAR_GITHUB_PAT
+    en_archivos = []
+    for ruta in entorno._rutas_env():
+        try:
+            with open(ruta, encoding="utf-8") as fh:
+                if any(linea.strip().startswith(nombre + "=") for linea in fh):
+                    en_archivos.append(ruta)
+        except OSError:
+            continue
+    registrada = _registrada_en_windows(nombre)
+    token = entorno.github_pat(requerido=False)
+    if token:
+        origen = (f"archivo .env ({en_archivos[0]})" if en_archivos
+                  else "variable de entorno de Windows")
+        pasos.append(("Token", "ok", f"{_enmascarar(token)}, desde {origen}"))
+    elif registrada:
+        pasos.append((
+            "Token", "error",
+            f"La variable {nombre} SÍ está registrada en Windows "
+            f"({' y '.join(registrada)}), pero la aplicación NO la ve.\n"
+            "Pasa cuando se registra con la sesión abierta: los programas abiertos "
+            "desde el escritorio heredan las variables de cuando se inició sesión. "
+            "Cierra sesión de Windows (o reinicia) y vuelve a abrir la app."))
+    else:
+        buscado = "\n  ".join(entorno._rutas_env())
+        pasos.append((
+            "Token", "error",
+            f"No hay token. La variable {nombre} no está registrada en Windows "
+            f"y tampoco hay un .env con ella en:\n  {buscado}"))
+
+    # --- 3. Anti-bucle -----------------------------------------------------
+    try:
+        with open(AutoUpdater._ruta_estado(), encoding="utf-8") as fh:
+            ultimo = json.load(fh).get("ultimo_tag_aplicado", "")
+    except (OSError, json.JSONDecodeError):
+        ultimo = ""
+    if ultimo:
+        pasos.append((
+            "Último intento", "aviso",
+            f"Ya se intentó instalar la versión {ultimo}. Si la versión instalada "
+            "sigue siendo la anterior, esa release NO se volverá a ofrecer (es la "
+            "protección contra bucles). Para reintentarla, borra:\n  "
+            + AutoUpdater._ruta_estado()))
+    else:
+        pasos.append(("Último intento", "ok", "Sin intentos previos registrados."))
+
+    # --- 4. Conexión con GitHub y permisos del token -----------------------
+    if not token:
+        pasos.append(("Conexión con GitHub", "aviso",
+                      "No se probó: primero hace falta el token."))
+        return pasos
+    try:
+        actualizador = AutoUpdater(token=token)
+        release = actualizador.obtener_release_latest()
+    except ErrorActualizacion as exc:
+        texto = str(exc)
+        if " 401 " in texto:
+            causa = "El token es inválido o ya expiró. Genera uno nuevo."
+        elif " 404 " in texto:
+            causa = ("GitHub no muestra el repositorio a este token. El repo es "
+                     "PRIVADO: el token necesita acceso de lectura a él (en los "
+                     "de grano fino hay que agregarlo explícitamente).")
+        elif " 403 " in texto:
+            causa = ("GitHub negó el acceso: el token no tiene permiso de lectura "
+                     "de contenidos, o se alcanzó el límite de consultas.")
+        elif "conectar" in texto:
+            causa = ("No hay salida a api.github.com. Revisa proxy, firewall o "
+                     "antivirus de ese equipo.")
+        else:
+            causa = ""
+        pasos.append(("Conexión con GitHub", "error",
+                      (causa + "\n" if causa else "") + f"Detalle: {texto}"))
+        return pasos
+    tag = release.get("tag_name", "")
+    pasos.append(("Conexión con GitHub", "ok", f"Última release publicada: {tag}"))
+
+    # --- 5. ¿La release trae instalador? -----------------------------------
+    if actualizador._id_asset(release) is None:
+        pasos.append(("Instalador en la release", "error",
+                      f"La release {tag} no incluye «{NOMBRE_ASSET}»."))
+        return pasos
+    pasos.append(("Instalador en la release", "ok", NOMBRE_ASSET))
+
+    # --- 6. Veredicto -------------------------------------------------------
+    if not actualizador.hay_version_mas_nueva(tag):
+        pasos.append(("Resultado", "ok",
+                      f"Está al día: {VERSION_ACTUAL} ≥ {tag}."))
+    elif actualizador._tag_ya_aplicado(tag):
+        pasos.append((
+            "Resultado", "error",
+            f"Hay versión nueva ({tag}) pero está BLOQUEADA: ya se intentó "
+            "instalar y la versión no avanzó. Casi siempre es la instalación "
+            "duplicada del paso «Instalación». Corrige eso y borra el archivo "
+            "del paso «Último intento»."))
+    else:
+        pasos.append(("Resultado", "ok",
+                      f"Hay versión nueva ({tag}) y se puede instalar."))
+    return pasos
