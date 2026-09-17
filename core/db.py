@@ -601,6 +601,38 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
     return agregados, len(filas) - agregados
 
 
+def adoptar_etiqueta_levantamiento(id_lev: int, etiqueta: str) -> bool:
+    """Pone en un registro la etiqueta con que el SIPP tiene ese activo.
+
+    Se usa cuando el activo se reconoció por NÚMERO DE SERIE: el levantamiento no
+    traía etiqueta y el SIPP sí, así que adoptarla es lo que deja los dos lados
+    hablando del mismo activo (y lo que permite que el RPA de modificación lo
+    encuentre después).
+
+    La `clave_unica` NO se recalcula, y es deliberado: identifica al registro
+    frente a sus ORÍGENES (el Excel y la carga de imágenes), no frente al SIPP. La
+    fila del Excel sigue llegando sin etiqueta, así que si la clave pasara a
+    'ETQ:<etiqueta>' volver a subir la misma plantilla —que es lo normal— crearía
+    un duplicado de cada activo cuya etiqueta se adoptó aquí.
+
+    Devuelve False —sin tocar nada— si OTRO registro ya tiene esa etiqueta: eso
+    significa que el levantamiento trae dos filas del mismo activo, y eso lo
+    resuelve una persona, no un UPDATE."""
+    etiqueta = (etiqueta or "").strip()
+    if not etiqueta:
+        return False
+    with _conectar() as con:
+        ocupada = con.execute(
+            "SELECT 1 FROM levantamiento WHERE id <> ? "
+            "  AND UPPER(TRIM(IFNULL(etiqueta,''))) = ? LIMIT 1",
+            (id_lev, etiqueta.upper())).fetchone()
+        if ocupada:
+            return False
+        cur = con.execute(
+            "UPDATE levantamiento SET etiqueta = ? WHERE id = ?", (etiqueta, id_lev))
+        return cur.rowcount > 0
+
+
 def actualizar_ubicacion_levantamiento(id_lev: int, empresa: str | None = None,
                                        sucursal: str | None = None,
                                        departamento: str | None = None) -> None:
