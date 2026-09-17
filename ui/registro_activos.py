@@ -149,6 +149,24 @@ def _foto_del_registro(r: "db.Levantamiento") -> str:
     return ""
 
 
+# Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
+# activos que no tienen nada que ver entre sí.
+_SERIES_VACIAS = {"", "-", "--", "—", "N/A", "NA", "S/N", "SN", "SIN SERIE",
+                  "SIN NUMERO", "SIN NÚMERO", "NO APLICA", "0", "00", "000"}
+
+
+def _serie_buscable(serie: str | None) -> str:
+    """La serie, si sirve para identificar un activo; "" si no.
+
+    Se exige un mínimo de 5 caracteres y se descartan los rellenos típicos: una
+    serie de dos dígitos aparece en decenas de activos distintos, y reconocer por
+    ella marcaría como dado de alta al equipo equivocado."""
+    limpia = (serie or "").strip()
+    if limpia.upper() in _SERIES_VACIAS or len(limpia) < 5:
+        return ""
+    return limpia
+
+
 def _prefill_desde_sipp(info: dict) -> dict:
     """Traduce los datos del SIPP (info_sipp) a las claves del formulario de captura
     (datos_json), para registrar el detalle del insumo de un activo dado de alta.
@@ -1894,7 +1912,7 @@ class SeccionRegistroActivos:
 
         self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
         try:
-            hechos, ambiguos = await asyncio.to_thread(
+            hechos, ambiguos, por_serie = await asyncio.to_thread(
                 self._clasificar_contra_sipp, registros)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._set_cargando(False)
@@ -1926,6 +1944,12 @@ class SeccionRegistroActivos:
         self._refrescar()
         msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
         extras = []
+        if por_serie:
+            # Se nombra aparte: son activos que YA están en el SIPP con OTRA
+            # etiqueta, así que hay que corregir el rótulo o el registro, no
+            # darlos de alta.
+            extras.append(f"{por_serie} reconocido(s) por número de serie "
+                          f"(su etiqueta no coincide con la del SIPP)")
         if hallados_portal:
             extras.append(f"{hallados_portal} encontrado(s) en otra empresa "
                           f"consultando el portal")
@@ -1955,14 +1979,17 @@ class SeccionRegistroActivos:
         marcado como no dado de alta por la búsqueda local, que es la lectura
         prudente.
         """
+        # También entran los que no traen etiqueta pero sí serie: el listado del
+        # portal busca por cualquiera de las dos, y sin esto un activo sin rótulo
+        # legible nunca se llegaba a confirmar.
         candidatos = [r for r in db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA)
-                      if (r.etiqueta or "").strip()]
+                      if (r.etiqueta or "").strip() or _serie_buscable(r.no_serie)]
         if not candidatos:
             return 0
         creds = credenciales.cargar()
         if not creds or not creds[0]:
             self.app.avisar(
-                f"{len(candidatos)} etiqueta(s) no están en la caché local. Para "
+                f"{len(candidatos)} activo(s) no están en la caché local. Para "
                 "buscarlas en otras empresas configura las credenciales del SIPP "
                 "(botón ⚙).", NARANJA, duracion=9000)
             return 0
@@ -1988,15 +2015,16 @@ class SeccionRegistroActivos:
 
         btn_detener = boton_herramienta("Detener", on_click=pedir_detener,
                                         destructivo=True)
-        modal = Modal(self.page, "Buscando etiquetas en otras empresas", ancho=620,
-                      subtitulo=f"{total} etiqueta(s) fuera de la caché local",
+        modal = Modal(self.page, "Buscando activos en otras empresas", ancho=620,
+                      subtitulo=f"{total} activo(s) fuera de la caché local",
                       acciones=[btn_detener])
         # Cada consulta recarga la grid por AJAX: ~4 s entre navegación y espera.
         minutos = max(1, round(total * 4 / 60))
         modal.cuerpo.controls = [
-            ft.Text("Estas etiquetas no están en las empresas descargadas. Se "
-                    "consultan una por una en el catálogo del SIPP, sin filtro de "
-                    "empresa, para ver si pertenecen a otra.",
+            ft.Text("Estos activos no están en las empresas descargadas. Se "
+                    "consultan uno por uno en el catálogo del SIPP —por etiqueta y, "
+                    "si no aparece, por número de serie— sin filtro de empresa, "
+                    "para ver si pertenecen a otra.",
                     size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
             ft.Text(f"Son {total} consultas: unos {minutos} minuto(s). Puedes "
                     "detenerlo cuando quieras; lo ya encontrado se conserva.",
@@ -2011,7 +2039,8 @@ class SeccionRegistroActivos:
                 barra.value = i / total
                 txt.value = f"Consultando el portal… ({i}/{total})"
                 lista.controls.append(ft.Row(
-                    [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  {r.etiqueta}",
+                    [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  "
+                             f"{r.etiqueta or r.no_serie or ''}",
                              size=12, color=ft.Colors.ON_SURFACE, expand=True,
                              no_wrap=False),
                      ft.Text(resultado, size=11, color=color, no_wrap=False)],
@@ -2048,6 +2077,9 @@ class SeccionRegistroActivos:
                     for i, r in enumerate(candidatos, 1):
                         await ctrl.punto_control()
                         filas = await sipp.buscar_activo_global(r.etiqueta or "")
+                        if not filas and _serie_buscable(r.no_serie):
+                            filas = await sipp.buscar_activo_global(
+                                serie=_serie_buscable(r.no_serie))
                         if filas:
                             encontrados.append((r, filas[0]))
                             avance(i, r,
@@ -2110,15 +2142,22 @@ class SeccionRegistroActivos:
                 no_serie=serie_nueva, nombre_insumo=limpio)
 
     def _clasificar_contra_sipp(self, registros: list) -> tuple:
-        """(hilo) Resuelve cada registro contra la caché del SIPP por ETIQUETA.
+        """(hilo) Resuelve cada registro contra la caché del SIPP.
 
-        Devuelve `(hechos, ambiguos)`, con `ambiguos = [(registro, candidatos)]`.
+        Devuelve `(hechos, ambiguos, por_serie)`, con
+        `ambiguos = [(registro, candidatos)]`.
 
-        Criterio: el identificador del alta es la ETIQUETA. Sin etiqueta se da por
-        NO dado de alta (ni se busca). Si la etiqueta aparece en la empresa del
+        Criterio: primero la ETIQUETA. Si la etiqueta aparece en la empresa del
         propio registro se usa esa —dentro de una empresa la etiqueta es única, así
         que no hay duda—; si no, se acepta la coincidencia global cuando es una
         sola y se difiere al usuario cuando hay varias.
+
+        Si por etiqueta no aparece, se intenta por NÚMERO DE SERIE. La etiqueta
+        del levantamiento es la del rótulo físico y no siempre es la que el SIPP
+        tiene registrada (activos reetiquetados, o dados de alta con otro número);
+        la serie del fabricante, en cambio, es la misma de los dos lados. Sin este
+        paso, activos que SÍ están en el SIPP salían «no dados de alta» y el RPA
+        los habría duplicado.
         """
         from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
@@ -2139,10 +2178,17 @@ class SeccionRegistroActivos:
 
         candidatos = db.activos_sipp_por_etiquetas(
             [(r.etiqueta or "") for r in registros])
-        hechos, ambiguos = 0, []
+        por_serie_cache = db.activos_sipp_por_series(
+            [_serie_buscable(r.no_serie) for r in registros])
+        hechos, ambiguos, por_serie = 0, [], 0
         for r in registros:
             etq = (r.etiqueta or "").strip()
             opciones = candidatos.get(etq.upper(), []) if etq else []
+            hallado_por_serie = False
+            if not opciones:
+                serie = _serie_buscable(r.no_serie)
+                opciones = por_serie_cache.get(serie.upper(), []) if serie else []
+                hallado_por_serie = bool(opciones)
             if not opciones:
                 self._marcar_no_dado_alta(r)
                 hechos += 1
@@ -2150,15 +2196,16 @@ class SeccionRegistroActivos:
             idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
             propio = next((c for c in opciones
                            if c.get("id_empresa") == idemp), None) if idemp else None
-            if propio is not None:
-                self._aplicar_resultado_sipp(r, propio)
-                hechos += 1
-            elif len(opciones) == 1:
-                self._aplicar_resultado_sipp(r, opciones[0])
-                hechos += 1
-            else:
+            elegido = propio if propio is not None else (
+                opciones[0] if len(opciones) == 1 else None)
+            if elegido is None:
                 ambiguos.append((r, opciones))
-        return hechos, ambiguos
+                continue
+            self._aplicar_resultado_sipp(r, elegido)
+            hechos += 1
+            if hallado_por_serie:
+                por_serie += 1
+        return hechos, ambiguos, por_serie
 
     async def _resolver_etiquetas_ambiguas(self, ambiguos: list) -> list:
         """Pide elegir a qué activo corresponde cada etiqueta repetida.

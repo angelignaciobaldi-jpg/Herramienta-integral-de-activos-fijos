@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import glob
+import json
 import os
 import re
+import shutil
 import sys
 import threading
 from datetime import datetime
@@ -58,9 +60,54 @@ def _ruta_navegadores() -> str:
     return os.path.join(rutas.DATOS, "ms-playwright")
 
 
+def _revision_chromium() -> str:
+    """Revisión de Chromium que EXIGE la versión de Playwright empaquetada.
+
+    Playwright no acepta cualquier Chromium: busca exactamente 'chromium-<rev>',
+    y la revisión sube con cada versión de Playwright. El dato vive en el
+    browsers.json de su driver, así que se lee de ahí en vez de adivinarlo."""
+    try:
+        import playwright
+
+        ruta = os.path.join(os.path.dirname(playwright.__file__), "driver",
+                            "package", "browsers.json")
+        with open(ruta, encoding="utf-8") as fh:
+            for navegador in json.load(fh).get("browsers", []):
+                if navegador.get("name") == "chromium":
+                    return str(navegador.get("revision") or "")
+    except Exception:  # noqa: BLE001 — sin el dato se cae al chequeo laxo
+        pass
+    return ""
+
+
 def _hay_chromium(base: str) -> bool:
-    """True si ya hay un Chromium instalado en `base`."""
-    return bool(glob.glob(os.path.join(base, "chromium-*", "**", "chrome.exe"), recursive=True))
+    """True si está el Chromium que ESTA versión de Playwright sabe usar.
+
+    Antes bastaba con que hubiera un 'chromium-*' cualquiera, y eso rompía la app
+    en cuanto el build subía de versión de Playwright: la carpeta vieja seguía
+    ahí, la descarga se saltaba y el RPA moría al arrancar con «Executable
+    doesn't exist at ...chromium-1243...». Se comprueba la revisión exacta."""
+    revision = _revision_chromium()
+    patron = f"chromium-{revision}" if revision else "chromium-*"
+    return bool(glob.glob(os.path.join(base, patron, "**", "chrome.exe"),
+                          recursive=True))
+
+
+def _borrar_chromium_viejos(base: str) -> None:
+    """Borra las revisiones de Chromium que ya no se usan (~180 MB cada una).
+
+    Sin esto, cada actualización de la herramienta deja otra copia completa en la
+    carpeta del usuario para siempre."""
+    revision = _revision_chromium()
+    if not revision:
+        return
+    for carpeta in glob.glob(os.path.join(base, "chromium-*")) +             glob.glob(os.path.join(base, "chromium_headless_shell-*")):
+        if carpeta.endswith(f"-{revision}"):
+            continue
+        try:
+            shutil.rmtree(carpeta, ignore_errors=True)
+        except OSError:
+            pass    # que no se pueda liberar espacio no es motivo para fallar
 
 
 def necesita_navegador() -> bool:
@@ -103,6 +150,7 @@ async def asegurar_navegador() -> None:
             "No se pudo preparar el navegador (Chromium). Revisa la conexión a "
             "internet e inténtalo de nuevo."
         )
+    _borrar_chromium_viejos(destino)
 
 
 def serie_para_alta(serie: str = "", etiqueta: str = "",
@@ -866,9 +914,9 @@ class SesionSipp:
             filas.append(fila)
         return filas
 
-    async def buscar_activo_global(self, etiqueta: str) -> list:
-        """Busca una ETIQUETA en TODO el catálogo y devuelve los activos que la
-        tienen, con su empresa.
+    async def buscar_activo_global(self, etiqueta: str = "", serie: str = "") -> list:
+        """Busca una ETIQUETA (o una SERIE) en TODO el catálogo y devuelve los
+        activos que la tienen, con su empresa.
 
         Es la vía para saber a qué empresa pertenece una etiqueta cuando no se ha
         descargado la caché de esa empresa —el caso que la búsqueda local no puede
@@ -881,9 +929,9 @@ class SesionSipp:
         alcance del usuario), así que el llamador debe tratarlo como «no se pudo
         confirmar», no como «no está dado de alta».
         """
-        if not (etiqueta or "").strip():
+        if not (etiqueta or "").strip() and not (serie or "").strip():
             return []
-        await self.buscar_en_listado(etiqueta=etiqueta)
+        await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         return await self._filas_grid()
 
     async def _contar_filas_grid(self) -> int:

@@ -1505,7 +1505,25 @@ def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
     —hay etiquetas que en una son una laptop y en otra un mouse—, y quedarse con
     uno al azar copiaría al registro el insumo y el resguardante equivocados.
     """
-    claves = {e.strip().upper() for e in etiquetas if (e or "").strip()}
+    return _activos_sipp_por("etiqueta", etiquetas)
+
+
+def activos_sipp_por_series(series: list[str]) -> dict[str, list[dict]]:
+    """{serie -> [activos que la tienen, de CUALQUIER empresa cacheada]}.
+
+    Es el segundo camino para reconocer un activo: la etiqueta del levantamiento
+    es la del rótulo físico y NO siempre es la que el SIPP tiene registrada (se
+    reetiqueta, o el alta se hizo con otro número). La serie del fabricante sí es
+    la misma en los dos lados, así que un activo que por etiqueta parecía no
+    existir aparece por serie —y darlo de alta habría creado un duplicado."""
+    return _activos_sipp_por("serie", series)
+
+
+def _activos_sipp_por(campo: str, valores: list[str]) -> dict[str, list[dict]]:
+    """Busca activos cacheados del SIPP por `etiqueta` o por `serie`."""
+    if campo not in ("etiqueta", "serie"):
+        raise ValueError(campo)
+    claves = {e.strip().upper() for e in valores if (e or "").strip()}
     if not claves:
         return {}
     lista = sorted(claves)
@@ -1517,7 +1535,7 @@ def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
             filas = con.execute(
                 f"SELECT id_empresa, empresa_nombre, etiqueta, insumo, serie, "
                 f"ubicacion, empleado, sucursal, departamento, id_tipo, tipo, extra "
-                f"FROM activos_sipp WHERE UPPER(TRIM(IFNULL(etiqueta,''))) "
+                f"FROM activos_sipp WHERE UPPER(TRIM(IFNULL({campo},''))) "
                 f"IN ({marcadores}) ORDER BY empresa_nombre", tanda).fetchall()
             for f in filas:
                 base = {"id_empresa": f["id_empresa"], "empresa": f["empresa_nombre"],
@@ -1534,7 +1552,7 @@ def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
                     except (ValueError, TypeError):
                         pass
                 salida.setdefault(
-                    (f["etiqueta"] or "").strip().upper(), []).append(base)
+                    (f[campo] or "").strip().upper(), []).append(base)
     return salida
 
 
