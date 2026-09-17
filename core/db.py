@@ -601,6 +601,38 @@ def guardar_levantamiento_lote(registros: list[dict]) -> tuple[int, int]:
     return agregados, len(filas) - agregados
 
 
+def adoptar_etiqueta_levantamiento(id_lev: int, etiqueta: str) -> bool:
+    """Pone en un registro la etiqueta con que el SIPP tiene ese activo.
+
+    Se usa cuando el activo se reconoció por NÚMERO DE SERIE: el levantamiento no
+    traía etiqueta y el SIPP sí, así que adoptarla es lo que deja los dos lados
+    hablando del mismo activo (y lo que permite que el RPA de modificación lo
+    encuentre después).
+
+    La `clave_unica` NO se recalcula, y es deliberado: identifica al registro
+    frente a sus ORÍGENES (el Excel y la carga de imágenes), no frente al SIPP. La
+    fila del Excel sigue llegando sin etiqueta, así que si la clave pasara a
+    'ETQ:<etiqueta>' volver a subir la misma plantilla —que es lo normal— crearía
+    un duplicado de cada activo cuya etiqueta se adoptó aquí.
+
+    Devuelve False —sin tocar nada— si OTRO registro ya tiene esa etiqueta: eso
+    significa que el levantamiento trae dos filas del mismo activo, y eso lo
+    resuelve una persona, no un UPDATE."""
+    etiqueta = (etiqueta or "").strip()
+    if not etiqueta:
+        return False
+    with _conectar() as con:
+        ocupada = con.execute(
+            "SELECT 1 FROM levantamiento WHERE id <> ? "
+            "  AND UPPER(TRIM(IFNULL(etiqueta,''))) = ? LIMIT 1",
+            (id_lev, etiqueta.upper())).fetchone()
+        if ocupada:
+            return False
+        cur = con.execute(
+            "UPDATE levantamiento SET etiqueta = ? WHERE id = ?", (etiqueta, id_lev))
+        return cur.rowcount > 0
+
+
 def actualizar_ubicacion_levantamiento(id_lev: int, empresa: str | None = None,
                                        sucursal: str | None = None,
                                        departamento: str | None = None) -> None:
@@ -829,13 +861,20 @@ def ids_levantamiento(estatus: str | None = None, filtro: str = "",
             f"SELECT id FROM levantamiento{where}", params).fetchall()]
 
 
-def contar_levantamiento_por_estatus() -> dict[str, int]:
+def contar_levantamiento_por_estatus(filtro: str = "",
+                                     filtros: dict | None = None) -> dict[str, int]:
     """Devuelve {estatus: cantidad} más 'total'. Es una sola consulta agregada:
-    con miles de registros, listar la tabla completa solo para contarla es caro."""
+    con miles de registros, listar la tabla completa solo para contarla es caro.
+
+    Acepta los MISMOS filtros que la tabla porque los conteos se muestran en las
+    pestañas, al lado de la tabla: contar sobre todo el inventario mientras la
+    tabla muestra lo filtrado hacía leer «166» junto a nueve filas, que se lee
+    como datos perdidos."""
+    where, params = _filtro_sql(None, filtro, filtros)
     with _conectar() as con:
         filas = con.execute(
-            "SELECT estatus_registro, COUNT(*) AS n FROM levantamiento "
-            "GROUP BY estatus_registro").fetchall()
+            "SELECT estatus_registro, COUNT(*) AS n FROM levantamiento"
+            f"{where} GROUP BY estatus_registro", params).fetchall()
     conteos = {f["estatus_registro"]: f["n"] for f in filas}
     conteos["total"] = sum(conteos.values())
     return conteos
@@ -1505,7 +1544,25 @@ def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
     —hay etiquetas que en una son una laptop y en otra un mouse—, y quedarse con
     uno al azar copiaría al registro el insumo y el resguardante equivocados.
     """
-    claves = {e.strip().upper() for e in etiquetas if (e or "").strip()}
+    return _activos_sipp_por("etiqueta", etiquetas)
+
+
+def activos_sipp_por_series(series: list[str]) -> dict[str, list[dict]]:
+    """{serie -> [activos que la tienen, de CUALQUIER empresa cacheada]}.
+
+    Es el segundo camino para reconocer un activo: la etiqueta del levantamiento
+    es la del rótulo físico y NO siempre es la que el SIPP tiene registrada (se
+    reetiqueta, o el alta se hizo con otro número). La serie del fabricante sí es
+    la misma en los dos lados, así que un activo que por etiqueta parecía no
+    existir aparece por serie —y darlo de alta habría creado un duplicado."""
+    return _activos_sipp_por("serie", series)
+
+
+def _activos_sipp_por(campo: str, valores: list[str]) -> dict[str, list[dict]]:
+    """Busca activos cacheados del SIPP por `etiqueta` o por `serie`."""
+    if campo not in ("etiqueta", "serie"):
+        raise ValueError(campo)
+    claves = {e.strip().upper() for e in valores if (e or "").strip()}
     if not claves:
         return {}
     lista = sorted(claves)
@@ -1517,7 +1574,7 @@ def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
             filas = con.execute(
                 f"SELECT id_empresa, empresa_nombre, etiqueta, insumo, serie, "
                 f"ubicacion, empleado, sucursal, departamento, id_tipo, tipo, extra "
-                f"FROM activos_sipp WHERE UPPER(TRIM(IFNULL(etiqueta,''))) "
+                f"FROM activos_sipp WHERE UPPER(TRIM(IFNULL({campo},''))) "
                 f"IN ({marcadores}) ORDER BY empresa_nombre", tanda).fetchall()
             for f in filas:
                 base = {"id_empresa": f["id_empresa"], "empresa": f["empresa_nombre"],
@@ -1534,7 +1591,7 @@ def activos_sipp_por_etiquetas(etiquetas: list[str]) -> dict[str, list[dict]]:
                     except (ValueError, TypeError):
                         pass
                 salida.setdefault(
-                    (f["etiqueta"] or "").strip().upper(), []).append(base)
+                    (f[campo] or "").strip().upper(), []).append(base)
     return salida
 
 

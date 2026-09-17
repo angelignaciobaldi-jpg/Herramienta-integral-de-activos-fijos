@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import glob
+import json
 import os
 import re
+import shutil
 import sys
 import threading
 from datetime import datetime
@@ -46,7 +48,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from core import rutas
+from core import certificados, rutas
 
 # Carpeta del proyecto (para guardar diagnósticos del RPA en desarrollo).
 _PROYECTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,9 +60,56 @@ def _ruta_navegadores() -> str:
     return os.path.join(rutas.DATOS, "ms-playwright")
 
 
+def _revision_chromium() -> str:
+    """Revisión de Chromium que EXIGE la versión de Playwright empaquetada.
+
+    Playwright no acepta cualquier Chromium: busca exactamente 'chromium-<rev>',
+    y la revisión sube con cada versión de Playwright. El dato vive en el
+    browsers.json de su driver, así que se lee de ahí en vez de adivinarlo."""
+    try:
+        import playwright
+
+        ruta = os.path.join(os.path.dirname(playwright.__file__), "driver",
+                            "package", "browsers.json")
+        with open(ruta, encoding="utf-8") as fh:
+            for navegador in json.load(fh).get("browsers", []):
+                if navegador.get("name") == "chromium":
+                    return str(navegador.get("revision") or "")
+    except Exception:  # noqa: BLE001 — sin el dato se cae al chequeo laxo
+        pass
+    return ""
+
+
 def _hay_chromium(base: str) -> bool:
-    """True si ya hay un Chromium instalado en `base`."""
-    return bool(glob.glob(os.path.join(base, "chromium-*", "**", "chrome.exe"), recursive=True))
+    """True si está el Chromium que ESTA versión de Playwright sabe usar.
+
+    Antes bastaba con que hubiera un 'chromium-*' cualquiera, y eso rompía la app
+    en cuanto el build subía de versión de Playwright: la carpeta vieja seguía
+    ahí, la descarga se saltaba y el RPA moría al arrancar con «Executable
+    doesn't exist at ...chromium-1243...». Se comprueba la revisión exacta."""
+    revision = _revision_chromium()
+    patron = f"chromium-{revision}" if revision else "chromium-*"
+    return bool(glob.glob(os.path.join(base, patron, "**", "chrome.exe"),
+                          recursive=True))
+
+
+def _borrar_chromium_viejos(base: str) -> None:
+    """Borra las revisiones de Chromium que ya no se usan (~180 MB cada una).
+
+    Sin esto, cada actualización de la herramienta deja otra copia completa en la
+    carpeta del usuario para siempre."""
+    revision = _revision_chromium()
+    if not revision:
+        return
+    viejas = (glob.glob(os.path.join(base, "chromium-*"))
+              + glob.glob(os.path.join(base, "chromium_headless_shell-*")))
+    for carpeta in viejas:
+        if carpeta.endswith(f"-{revision}"):
+            continue
+        try:
+            shutil.rmtree(carpeta, ignore_errors=True)
+        except OSError:
+            pass    # que no se pueda liberar espacio no es motivo para fallar
 
 
 def necesita_navegador() -> bool:
@@ -88,6 +137,14 @@ async def asegurar_navegador() -> None:
     node, cli = compute_driver_executable()
     entorno_driver = {**os.environ, **get_driver_env()}
     entorno_driver["PLAYWRIGHT_BROWSERS_PATH"] = destino
+    # La descarga la hace NODE, con su propia lista de autoridades: donde un
+    # antivirus inspecciona HTTPS no reconoce al emisor y falla. Se le pasan los
+    # certificados de Windows, que son los que el equipo ya usa para navegar. No
+    # se pisa la variable si el equipo ya trae una puesta a mano.
+    if not entorno_driver.get("NODE_EXTRA_CA_CERTS"):
+        pem = certificados.ruta_bundle_pem()
+        if pem:
+            entorno_driver["NODE_EXTRA_CA_CERTS"] = pem
     try:
         proc = await asyncio.create_subprocess_exec(
             node, cli, "install", "chromium", "--no-shell",
@@ -95,14 +152,45 @@ async def asegurar_navegador() -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        await proc.communicate()
+        salida, _ = await proc.communicate()
     except Exception as exc:  # noqa: BLE001 — se reporta como ErrorSipp
         raise ErrorSipp("No se pudo descargar el navegador (Chromium): %s" % exc) from exc
     if not _hay_chromium(destino):
-        raise ErrorSipp(
-            "No se pudo preparar el navegador (Chromium). Revisa la conexión a "
+        raise ErrorSipp(_error_descarga(salida))
+    _borrar_chromium_viejos(destino)
+
+
+def _error_descarga(salida: bytes | None) -> str:
+    """Traduce el fallo de la descarga del navegador a su causa probable.
+
+    La salida del driver se leía y se tiraba, y el usuario recibía «revisa la
+    conexión a internet» aunque el equipo tuviera internet de sobra. Los dos
+    fallos que sí pasan en la práctica —inspección HTTPS y proxy que corta— se
+    nombran; del resto se muestra el final de la salida real, que es lo único
+    que permite avanzar."""
+    texto = (salida or b"").decode("utf-8", "replace")
+    if any(p in texto for p in ("self-signed certificate", "unable to verify",
+                                "UNABLE_TO_GET_ISSUER_CERT",
+                                "SELF_SIGNED_CERT_IN_CHAIN",
+                                "CERT_", "certificate")):
+        return (
+            "No se pudo descargar el navegador del RPA: un antivirus o proxy de "
+            "este equipo está inspeccionando el tráfico HTTPS y el descargador no "
+            "reconoce a quien firma sus certificados.\n"
+            "Pide que excluyan de la inspección HTTPS los dominios "
+            "playwright.azureedge.net y playwright-akamai.azureedge.net, o que "
+            "instalen el certificado raíz del antivirus en el almacén de Windows.")
+    if any(p in texto for p in ("ECONNRESET", "ETIMEDOUT", "ENOTFOUND",
+                                "EAI_AGAIN", "socket hang up", "407", "403")):
+        return (
+            "No se pudo descargar el navegador del RPA: la red cortó la descarga. "
+            "Suele ser el proxy o el firewall del equipo; los dominios que hay que "
+            "permitir son playwright.azureedge.net y "
+            "playwright-akamai.azureedge.net.")
+    cola = " ".join(texto.split())[-400:]
+    return ("No se pudo preparar el navegador (Chromium). Revisa la conexión a "
             "internet e inténtalo de nuevo."
-        )
+            + (f"\nDetalle: …{cola}" if cola else ""))
 
 
 def serie_para_alta(serie: str = "", etiqueta: str = "",
@@ -866,9 +954,9 @@ class SesionSipp:
             filas.append(fila)
         return filas
 
-    async def buscar_activo_global(self, etiqueta: str) -> list:
-        """Busca una ETIQUETA en TODO el catálogo y devuelve los activos que la
-        tienen, con su empresa.
+    async def buscar_activo_global(self, etiqueta: str = "", serie: str = "") -> list:
+        """Busca una ETIQUETA (o una SERIE) en TODO el catálogo y devuelve los
+        activos que la tienen, con su empresa.
 
         Es la vía para saber a qué empresa pertenece una etiqueta cuando no se ha
         descargado la caché de esa empresa —el caso que la búsqueda local no puede
@@ -881,9 +969,9 @@ class SesionSipp:
         alcance del usuario), así que el llamador debe tratarlo como «no se pudo
         confirmar», no como «no está dado de alta».
         """
-        if not (etiqueta or "").strip():
+        if not (etiqueta or "").strip() and not (serie or "").strip():
             return []
-        await self.buscar_en_listado(etiqueta=etiqueta)
+        await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         return await self._filas_grid()
 
     async def _contar_filas_grid(self) -> int:

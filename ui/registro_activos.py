@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import flet as ft
@@ -147,6 +148,45 @@ def _foto_del_registro(r: "db.Levantamiento") -> str:
         if ruta and os.path.exists(ruta):
             return ruta
     return ""
+
+
+@dataclass
+class ResultadoBusquedaSipp:
+    """Lo que dejó la comparación contra la caché del SIPP.
+
+    Se devuelve como objeto y no como tupla porque la búsqueda ya distingue cinco
+    desenlaces distintos, y cada uno lleva a una conversación distinta con el
+    usuario (o a ninguna)."""
+
+    hechos: int = 0
+    # [(registro, candidatos)] — la etiqueta existe en varias empresas.
+    ambiguos: list = field(default_factory=list)
+    # [(registro, activo del SIPP)] — misma serie, etiqueta distinta: lo decide el usuario.
+    conflictos: list = field(default_factory=list)
+    # [(registro, etiqueta adoptada, activo del SIPP)] — no traía etiqueta.
+    adoptadas: list = field(default_factory=list)
+    # [(registro, etiqueta del SIPP)] — otro registro local ya tiene esa etiqueta.
+    choques: list = field(default_factory=list)
+    # [(registro, activo, "sipp"|"aparte")] — lo que el usuario decidió.
+    decisiones: list = field(default_factory=list)
+
+
+# Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
+# activos que no tienen nada que ver entre sí.
+_SERIES_VACIAS = {"", "-", "--", "—", "N/A", "NA", "S/N", "SN", "SIN SERIE",
+                  "SIN NUMERO", "SIN NÚMERO", "NO APLICA", "0", "00", "000"}
+
+
+def _serie_buscable(serie: str | None) -> str:
+    """La serie, si sirve para identificar un activo; "" si no.
+
+    Se exige un mínimo de 5 caracteres y se descartan los rellenos típicos: una
+    serie de dos dígitos aparece en decenas de activos distintos, y reconocer por
+    ella marcaría como dado de alta al equipo equivocado."""
+    limpia = (serie or "").strip()
+    if limpia.upper() in _SERIES_VACIAS or len(limpia) < 5:
+        return ""
+    return limpia
 
 
 def _prefill_desde_sipp(info: dict) -> dict:
@@ -765,8 +805,12 @@ class SeccionRegistroActivos:
                 NARANJA, duracion=8000)
 
     def _actualizar_conteos(self) -> None:
-        """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""
-        c = db.contar_levantamiento_por_estatus()
+        """Conteos por pestaña con UNA consulta agregada (no listando la tabla).
+
+        Cuentan lo MISMO que muestra la tabla, filtros incluidos: con el filtro de
+        insumo puesto en «laptop», la pestaña decía 166 junto a nueve filas, y eso
+        se lee como registros perdidos, no como un filtro activo."""
+        c = db.contar_levantamiento_por_estatus(self._filtro, self._filtros_col)
         conteos = {_TAB_TODOS: c.get("total", 0),
                    db.EST_DADO_ALTA: c.get(db.EST_DADO_ALTA, 0),
                    db.EST_NO_DADO_ALTA: c.get(db.EST_NO_DADO_ALTA, 0)}
@@ -1894,8 +1938,7 @@ class SeccionRegistroActivos:
 
         self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
         try:
-            hechos, ambiguos = await asyncio.to_thread(
-                self._clasificar_contra_sipp, registros)
+            res = await asyncio.to_thread(self._clasificar_contra_sipp, registros)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._set_cargando(False)
             self.app.avisar(f"No se pudo buscar en el SIPP: {exc}", ROJO)
@@ -1906,26 +1949,63 @@ class SeccionRegistroActivos:
         # activos DISTINTOS que comparten número, y elegir uno solo por orden le
         # copiaría al registro el insumo y el resguardante de otro.
         sin_resolver = 0
-        if ambiguos:
+        if res.ambiguos:
             self._refrescar()
-            elegidos = await self._resolver_etiquetas_ambiguas(ambiguos)
+            elegidos = await self._resolver_etiquetas_ambiguas(res.ambiguos)
             if elegidos:
                 for r, datos in elegidos:
                     self._aplicar_resultado_sipp(r, datos)
-                    hechos += 1
-            sin_resolver = len(ambiguos) - len(elegidos or [])
+                    res.hechos += 1
+            sin_resolver = len(res.ambiguos) - len(elegidos or [])
+
+        # Misma serie con otra etiqueta: lo decide el usuario (ver
+        # `_conciliar_por_serie`).
+        aparte = 0
+        if res.conflictos:
+            self._refrescar()
+            sin_resolver += await self._aplicar_decisiones_etiqueta(res)
+            aparte = sum(1 for _r, _d, q in (res.decisiones or []) if q == "aparte")
+
+        # Etiquetas adoptadas del SIPP: no se pregunta, pero se informa.
+        if res.adoptadas:
+            self._refrescar()
+            await self._avisar_etiquetas_adoptadas(res.adoptadas)
 
         # Respaldo en el portal: lo que la caché no encontró puede existir en una
         # empresa que nunca se descargó. Es la única forma de saberlo sin bajar el
         # catálogo de las 58 empresas.
         self._refrescar()
-        hallados_portal = await self._respaldo_portal()
+        portal = await self._respaldo_portal()
+        hallados_portal = portal.hechos
+        if portal.conflictos:
+            self._refrescar()
+            sin_resolver += await self._aplicar_decisiones_etiqueta(portal)
+            aparte += sum(1 for _r, _d, q in portal.decisiones if q == "aparte")
+            hallados_portal += sum(1 for _r, _d, q in portal.decisiones if q == "sipp")
+        if portal.adoptadas:
+            self._refrescar()
+            await self._avisar_etiquetas_adoptadas(portal.adoptadas)
+        # Lo del portal se suma a lo local para el resumen final.
+        res.adoptadas += portal.adoptadas
+        res.choques += portal.choques
 
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
         n_no = len(db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA))
         self._refrescar()
         msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
         extras = []
+        if res.adoptadas:
+            extras.append(f"{len(res.adoptadas)} sin etiqueta tomaron la del SIPP "
+                          f"(coincidió el número de serie)")
+        if aparte:
+            extras.append(f"{aparte} se registrará(n) aparte pese a compartir serie")
+        if res.choques:
+            # Dos filas del levantamiento son el mismo activo del SIPP. No se
+            # resuelve solo: quedarían dos registros apuntando a una etiqueta.
+            detalle = ", ".join(f"{r.nombre_insumo or '(sin insumo)'} → {etq}"
+                                for r, etq in res.choques[:3])
+            extras.append(f"{len(res.choques)} con etiqueta ya usada por otro "
+                          f"registro ({detalle}); quedan pendientes")
         if hallados_portal:
             extras.append(f"{hallados_portal} encontrado(s) en otra empresa "
                           f"consultando el portal")
@@ -1938,7 +2018,7 @@ class SeccionRegistroActivos:
         self.app.avisar(msg, VERDE if not extras else NARANJA,
                         duracion=9000 if extras else 6000)
 
-    async def _respaldo_portal(self) -> int:
+    async def _respaldo_portal(self) -> "ResultadoBusquedaSipp":
         """Consulta en el PORTAL las etiquetas que la caché local no encontró.
 
         La búsqueda local solo ve las empresas descargadas; el listado del SIPP, en
@@ -1954,18 +2034,26 @@ class SeccionRegistroActivos:
         que un vacío significa «no se pudo confirmar», no «no existe». Ya está
         marcado como no dado de alta por la búsqueda local, que es la lectura
         prudente.
+
+        Lo que se encuentra POR SERIE pasa por el mismo tamiz que la búsqueda
+        local (`_conciliar_por_serie`): adoptar la etiqueta del SIPP cuando no
+        había, y preguntar cuando hay dos etiquetas distintas.
         """
+        # También entran los que no traen etiqueta pero sí serie: el listado del
+        # portal busca por cualquiera de las dos, y sin esto un activo sin rótulo
+        # legible nunca se llegaba a confirmar.
         candidatos = [r for r in db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA)
-                      if (r.etiqueta or "").strip()]
+                      if (r.etiqueta or "").strip() or _serie_buscable(r.no_serie)]
+        res = ResultadoBusquedaSipp()
         if not candidatos:
-            return 0
+            return res
         creds = credenciales.cargar()
         if not creds or not creds[0]:
             self.app.avisar(
-                f"{len(candidatos)} etiqueta(s) no están en la caché local. Para "
+                f"{len(candidatos)} activo(s) no están en la caché local. Para "
                 "buscarlas en otras empresas configura las credenciales del SIPP "
                 "(botón ⚙).", NARANJA, duracion=9000)
-            return 0
+            return res
         usuario, contrasena = creds
 
         total = len(candidatos)
@@ -1988,15 +2076,16 @@ class SeccionRegistroActivos:
 
         btn_detener = boton_herramienta("Detener", on_click=pedir_detener,
                                         destructivo=True)
-        modal = Modal(self.page, "Buscando etiquetas en otras empresas", ancho=620,
-                      subtitulo=f"{total} etiqueta(s) fuera de la caché local",
+        modal = Modal(self.page, "Buscando activos en otras empresas", ancho=620,
+                      subtitulo=f"{total} activo(s) fuera de la caché local",
                       acciones=[btn_detener])
         # Cada consulta recarga la grid por AJAX: ~4 s entre navegación y espera.
         minutos = max(1, round(total * 4 / 60))
         modal.cuerpo.controls = [
-            ft.Text("Estas etiquetas no están en las empresas descargadas. Se "
-                    "consultan una por una en el catálogo del SIPP, sin filtro de "
-                    "empresa, para ver si pertenecen a otra.",
+            ft.Text("Estos activos no están en las empresas descargadas. Se "
+                    "consultan uno por uno en el catálogo del SIPP —por etiqueta y, "
+                    "si no aparece, por número de serie— sin filtro de empresa, "
+                    "para ver si pertenecen a otra.",
                     size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
             ft.Text(f"Son {total} consultas: unos {minutos} minuto(s). Puedes "
                     "detenerlo cuando quieras; lo ya encontrado se conserva.",
@@ -2011,7 +2100,8 @@ class SeccionRegistroActivos:
                 barra.value = i / total
                 txt.value = f"Consultando el portal… ({i}/{total})"
                 lista.controls.append(ft.Row(
-                    [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  {r.etiqueta}",
+                    [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  "
+                             f"{r.etiqueta or r.no_serie or ''}",
                              size=12, color=ft.Colors.ON_SURFACE, expand=True,
                              no_wrap=False),
                      ft.Text(resultado, size=11, color=color, no_wrap=False)],
@@ -2048,8 +2138,13 @@ class SeccionRegistroActivos:
                     for i, r in enumerate(candidatos, 1):
                         await ctrl.punto_control()
                         filas = await sipp.buscar_activo_global(r.etiqueta or "")
+                        hallado_por_serie = False
+                        if not filas and _serie_buscable(r.no_serie):
+                            filas = await sipp.buscar_activo_global(
+                                serie=_serie_buscable(r.no_serie))
+                            hallado_por_serie = bool(filas)
                         if filas:
-                            encontrados.append((r, filas[0]))
+                            encontrados.append((r, filas[0], hallado_por_serie))
                             avance(i, r,
                                    f"en {filas[0].get('empresa') or '(sin empresa)'}",
                                    VERDE)
@@ -2066,12 +2161,16 @@ class SeccionRegistroActivos:
             bucle.cerrar()
             modal.cerrar()
 
-        for r, datos in encontrados:
-            self._aplicar_resultado_sipp(r, datos)
+        for r, datos, hallado_por_serie in encontrados:
+            if hallado_por_serie:
+                self._conciliar_por_serie(r, datos, res)
+            else:
+                self._aplicar_resultado_sipp(r, datos)
+                res.hechos += 1
         if error:
             self.app.avisar(f"La consulta al portal falló: {error}", NARANJA,
                             duracion=9000)
-        return len(encontrados)
+        return res
 
     def _marcar_no_dado_alta(self, r: "db.Levantamiento") -> None:
         db.actualizar_estatus_levantamiento(r.id, db.EST_NO_DADO_ALTA, None, None)
@@ -2110,15 +2209,22 @@ class SeccionRegistroActivos:
                 no_serie=serie_nueva, nombre_insumo=limpio)
 
     def _clasificar_contra_sipp(self, registros: list) -> tuple:
-        """(hilo) Resuelve cada registro contra la caché del SIPP por ETIQUETA.
+        """(hilo) Resuelve cada registro contra la caché del SIPP.
 
-        Devuelve `(hechos, ambiguos)`, con `ambiguos = [(registro, candidatos)]`.
+        Devuelve `(hechos, ambiguos, por_serie)`, con
+        `ambiguos = [(registro, candidatos)]`.
 
-        Criterio: el identificador del alta es la ETIQUETA. Sin etiqueta se da por
-        NO dado de alta (ni se busca). Si la etiqueta aparece en la empresa del
+        Criterio: primero la ETIQUETA. Si la etiqueta aparece en la empresa del
         propio registro se usa esa —dentro de una empresa la etiqueta es única, así
         que no hay duda—; si no, se acepta la coincidencia global cuando es una
         sola y se difiere al usuario cuando hay varias.
+
+        Si por etiqueta no aparece, se intenta por NÚMERO DE SERIE. La etiqueta
+        del levantamiento es la del rótulo físico y no siempre es la que el SIPP
+        tiene registrada (activos reetiquetados, o dados de alta con otro número);
+        la serie del fabricante, en cambio, es la misma de los dos lados. Sin este
+        paso, activos que SÍ están en el SIPP salían «no dados de alta» y el RPA
+        los habría duplicado.
         """
         from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
@@ -2139,26 +2245,89 @@ class SeccionRegistroActivos:
 
         candidatos = db.activos_sipp_por_etiquetas(
             [(r.etiqueta or "") for r in registros])
-        hechos, ambiguos = 0, []
+        por_serie_cache = db.activos_sipp_por_series(
+            [_serie_buscable(r.no_serie) for r in registros])
+        res = ResultadoBusquedaSipp()
         for r in registros:
             etq = (r.etiqueta or "").strip()
             opciones = candidatos.get(etq.upper(), []) if etq else []
+            hallado_por_serie = False
+            if not opciones:
+                serie = _serie_buscable(r.no_serie)
+                opciones = por_serie_cache.get(serie.upper(), []) if serie else []
+                hallado_por_serie = bool(opciones)
             if not opciones:
                 self._marcar_no_dado_alta(r)
-                hechos += 1
+                res.hechos += 1
                 continue
             idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
             propio = next((c for c in opciones
                            if c.get("id_empresa") == idemp), None) if idemp else None
-            if propio is not None:
-                self._aplicar_resultado_sipp(r, propio)
-                hechos += 1
-            elif len(opciones) == 1:
-                self._aplicar_resultado_sipp(r, opciones[0])
-                hechos += 1
+            elegido = propio if propio is not None else (
+                opciones[0] if len(opciones) == 1 else None)
+            if elegido is None:
+                res.ambiguos.append((r, opciones))
+                continue
+            if hallado_por_serie:
+                self._conciliar_por_serie(r, elegido, res)
             else:
-                ambiguos.append((r, opciones))
-        return hechos, ambiguos
+                self._aplicar_resultado_sipp(r, elegido)
+                res.hechos += 1
+        return res
+
+    def _conciliar_por_serie(self, r: "db.Levantamiento", datos: dict,
+                             res: "ResultadoBusquedaSipp") -> None:
+        """Aplica un activo reconocido por SERIE, según qué etiqueta tenga.
+
+        Tres caminos, y la diferencia importa:
+        - **Sin etiqueta local**: se adopta la del SIPP sin preguntar. No hay nada
+          que perder y es lo que deja a los dos lados hablando del mismo activo.
+        - **Etiqueta distinta**: NO se decide aquí. Misma serie con otra etiqueta
+          puede ser un activo reetiquetado o dos activos distintos (una serie
+          repetida por el fabricante, o mal capturada), y las dos salidas son
+          irreversibles en la práctica: adoptar borra el rótulo levantado, y dar de
+          alta crea un activo en el SIPP. Lo elige el usuario.
+        - **Ya existe otro registro con esa etiqueta**: el levantamiento trae dos
+          filas del mismo activo. Se reporta y se deja PENDIENTE (marcarlo «no dado
+          de alta» invitaría al RPA a duplicarlo en el SIPP).
+        """
+        etq_sipp = (datos.get("etiqueta") or "").strip()
+        etq_local = (r.etiqueta or "").strip()
+        if etq_local and etq_sipp and etq_local.upper() != etq_sipp.upper():
+            # PENDIENTE hasta que el usuario decida: dejarlo «no dado de alta»
+            # —que es como pudo llegar de una búsqueda anterior— haría que el RPA
+            # lo diera de alta y quedara duplicado en el SIPP.
+            db.actualizar_estatus_levantamiento(r.id, db.EST_PENDIENTE, None, None)
+            res.conflictos.append((r, datos))
+            return
+        if etq_sipp and not etq_local:
+            if not db.adoptar_etiqueta_levantamiento(r.id, etq_sipp):
+                db.actualizar_estatus_levantamiento(r.id, db.EST_PENDIENTE, None, None)
+                res.choques.append((r, etq_sipp))
+                return
+            res.adoptadas.append((r, etq_sipp, datos))
+        self._aplicar_resultado_sipp(r, datos)
+        res.hechos += 1
+
+    async def _aplicar_decisiones_etiqueta(self, res: "ResultadoBusquedaSipp") -> int:
+        """Pregunta por los conflictos de etiqueta y aplica lo decidido.
+
+        Devuelve cuántos quedaron SIN decidir (siguen pendientes)."""
+        res.decisiones = await self._resolver_conflictos_etiqueta(res.conflictos) or []
+        for r, datos, que in res.decisiones:
+            if que == "sipp":
+                etq = (datos.get("etiqueta") or "").strip()
+                if not db.adoptar_etiqueta_levantamiento(r.id, etq):
+                    # Otro registro ya tiene esa etiqueta: no se pisa ninguno.
+                    res.choques.append((r, etq))
+                    continue
+                self._aplicar_resultado_sipp(r, datos)
+            else:
+                # Activo distinto que comparte serie: se conserva su etiqueta y se
+                # va al alta como cualquier otro pendiente.
+                self._marcar_no_dado_alta(r)
+            res.hechos += 1
+        return len(res.conflictos) - len(res.decisiones)
 
     async def _resolver_etiquetas_ambiguas(self, ambiguos: list) -> list:
         """Pide elegir a qué activo corresponde cada etiqueta repetida.
@@ -2234,6 +2403,134 @@ class SeccionRegistroActivos:
             boton_primario("Aplicar", ft.Icons.CHECK, _confirmar)])
         modal.abrir()
         return await decision
+
+    async def _resolver_conflictos_etiqueta(self, conflictos: list) -> list:
+        """Pregunta, activo por activo, qué hacer cuando la serie coincide pero la
+        etiqueta no.
+
+        `conflictos`: [(registro, activo del SIPP)]. Devuelve
+        [(registro, activo, "sipp" | "aparte")] SOLO de los decididos; lo que se
+        deje sin decidir queda PENDIENTE.
+
+        Las dos salidas son distintas de verdad:
+        - **Usar la etiqueta del SIPP**: es el mismo activo, reetiquetado. La
+          etiqueta levantada se sustituye por la del catálogo.
+        - **Registrar aparte**: son dos activos distintos que comparten número de
+          serie. Se conserva la etiqueta levantada y el activo queda para darse de
+          alta en el SIPP.
+        """
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+        campos: dict = {}          # id de registro -> (registro, activo, dropdown)
+        OPC_SIPP = "Es el mismo activo: usar la etiqueta del SIPP"
+        OPC_APARTE = "Es otro activo: registrarlo aparte con su etiqueta"
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=10, expand=True)
+        for r, datos in conflictos:
+            _, dd = campo_opciones("¿Qué hacemos?", [OPC_SIPP, OPC_APARTE],
+                                   flotante=True)
+            campos[r.id] = (r, datos, dd)
+            lista.controls.append(ft.Container(
+                ft.Column(
+                    [ft.Row([ft.Icon(ft.Icons.RULE, size=16, color=NARANJA),
+                             ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  "
+                                     f"serie {r.no_serie}", size=13,
+                                     weight=ft.FontWeight.W_600,
+                                     color=ft.Colors.ON_SURFACE, expand=True)],
+                            spacing=6),
+                     ft.Text(f"Etiqueta levantada: {r.etiqueta}", size=11,
+                             color=GRIS, no_wrap=False),
+                     ft.Text(f"En el SIPP esa serie es {datos.get('etiqueta')}"
+                             + (f"  ·  {datos.get('insumo')}" if datos.get("insumo") else "")
+                             + (f"  ·  {datos.get('empresa')}" if datos.get("empresa") else "")
+                             + (f"  ·  {datos.get('empleado')}" if datos.get("empleado") else ""),
+                             size=11, color=GRIS, no_wrap=False),
+                     dd],
+                    spacing=6, tight=True),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=8))
+
+        def _confirmar(_e=None) -> None:
+            elegidos = []
+            for r, datos, dd in campos.values():
+                if dd.value == OPC_SIPP:
+                    elegidos.append((r, datos, "sipp"))
+                elif dd.value == OPC_APARTE:
+                    elegidos.append((r, datos, "aparte"))
+            responder(elegidos)
+
+        modal = Modal(self.page, "Misma serie, etiqueta distinta",
+                      ancho=760,
+                      subtitulo=f"{len(conflictos)} activo(s) por decidir",
+                      alto_cuerpo=520, al_cerrar=lambda: responder([]))
+        modal.cuerpo.controls = [
+            ft.Text("El número de serie de estos activos ya está en el SIPP, pero "
+                    "con otra etiqueta. Puede ser el mismo activo reetiquetado, o "
+                    "dos activos distintos con la serie repetida: eso no se puede "
+                    "deducir del dato.", size=12, color=ft.Colors.ON_SURFACE,
+                    no_wrap=False),
+            ft.Text("Lo que dejes sin decidir queda PENDIENTE: no se marca como "
+                    "«sin dar de alta», porque el RPA lo daría de alta y quedaría "
+                    "duplicado en el SIPP.", size=11, color=GRIS, no_wrap=False),
+            ft.Container(lista, height=340)]
+        modal.set_acciones([
+            boton_herramienta("Dejar pendientes", on_click=lambda _e: responder([])),
+            boton_primario("Aplicar", ft.Icons.CHECK, _confirmar)])
+        modal.abrir()
+        return await decision
+
+    async def _avisar_etiquetas_adoptadas(self, adoptadas: list) -> None:
+        """Informa qué etiquetas se tomaron del SIPP. No pregunta: informa.
+
+        Estos activos no traían etiqueta, así que adoptar la del catálogo no
+        sustituye ningún dato capturado. Aun así se muestra la lista: el usuario
+        va a ver números que él no escribió en la columna ETIQUETA, y enterarse
+        después es lo que hace desconfiar de la herramienta."""
+        espera: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def cerrar(_e=None) -> None:
+            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
+            # que es esta misma función. Sin el corte se llama sin fin y la app
+            # muere con «maximum recursion depth exceeded».
+            if espera.done():
+                return
+            espera.set_result(None)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=8, expand=True)
+        for r, etiqueta, datos in adoptadas:
+            lista.controls.append(ft.Row(
+                [ft.Icon(ft.Icons.LABEL_OUTLINE, size=16, color=VERDE),
+                 ft.Column(
+                     [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  "
+                              f"serie {r.no_serie}", size=12,
+                              color=ft.Colors.ON_SURFACE, no_wrap=False),
+                      ft.Text(f"etiqueta {etiqueta}"
+                              + (f"  ·  {datos.get('empresa')}" if datos.get("empresa") else "")
+                              + (f"  ·  {datos.get('empleado')}" if datos.get("empleado") else ""),
+                              size=11, color=GRIS, no_wrap=False)],
+                     spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        modal = Modal(self.page, "Etiquetas tomadas del SIPP", ancho=700,
+                      subtitulo=f"{len(adoptadas)} activo(s) sin etiqueta levantada",
+                      alto_cuerpo=440, al_cerrar=cerrar)
+        modal.cuerpo.controls = [
+            ft.Text("Estos activos se reconocieron por su número de serie: no "
+                    "traían etiqueta y el SIPP sí la tiene, así que se copió a la "
+                    "herramienta para que los dos lados hablen del mismo activo.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Container(lista, height=280)]
+        modal.set_acciones([boton_primario("Entendido", ft.Icons.CHECK, cerrar)])
+        modal.abrir()
+        await espera
 
     # ------------------------------------------------ RPA: alta en el SIPP
     @staticmethod

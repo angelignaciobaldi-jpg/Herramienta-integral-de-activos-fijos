@@ -95,6 +95,7 @@ jobs:
           if (Test-Path "Fuentes") { $datos += @("--add-data", "Fuentes:Fuentes") }
           flet pack app.py -n "ActivosFijos" -D $datos `
             --hidden-import openpyxl `
+            --hidden-import truststore `
             --pyinstaller-build-args=--collect-all=playwright `
             -y
 
