@@ -31,6 +31,7 @@ flet pack app.py -n "ActivosFijos" -D ^
   --hidden-import openpyxl ^
   --hidden-import segno ^
   --hidden-import PIL ^
+  --hidden-import truststore ^
   --pyinstaller-build-args="--collect-all=playwright" ^
   -y
 if errorlevel 1 (

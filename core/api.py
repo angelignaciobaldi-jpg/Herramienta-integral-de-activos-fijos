@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core import ajustes_api
+from core import ajustes_api, certificados
 
 TIMEOUT = 30
 
@@ -99,7 +99,10 @@ def solicitar(ruta: str, metodo: str = "GET", cuerpo: dict | None = None, *,
     req = urllib.request.Request(_url(ruta, params), data=datos,
                                  headers=_headers(), method=metodo)
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        # Mismo contexto TLS que el actualizador: en equipos con antivirus
+        # que inspecciona HTTPS, el de Python no valida (ver core/certificados.py).
+        with urllib.request.urlopen(req, timeout=TIMEOUT,
+                                    context=certificados.contexto()) as resp:
             crudo = resp.read().decode("utf-8")
         return json.loads(crudo) if crudo else {}
     except urllib.error.HTTPError as exc:

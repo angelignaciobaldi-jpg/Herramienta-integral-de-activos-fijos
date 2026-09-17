@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from core import entorno, rutas
+from core import certificados, entorno, rutas
 from core.version import __version__ as VERSION_ACTUAL
 
 # --- Configuración del repositorio (privado) ---
@@ -109,7 +109,13 @@ class AutoUpdater:
         self.version_actual = version_actual
         self.nombre_asset = nombre_asset
         self.timeout = timeout
-        self._opener = urllib.request.build_opener(_RedireccionSinAuth)
+        # La verificación TLS se delega al almacén de Windows: en un equipo con
+        # antivirus o proxy que inspecciona HTTPS, la lista propia de Python no
+        # conoce al emisor y la actualización moría con CERTIFICATE_VERIFY_FAILED
+        # (ver core/certificados.py).
+        self._opener = urllib.request.build_opener(
+            _RedireccionSinAuth,
+            urllib.request.HTTPSHandler(context=certificados.contexto()))
 
     # ------------------------------------------------------- peticiones
     def _headers(self, accept: str) -> dict[str, str]:
@@ -468,6 +474,7 @@ def diagnosticar() -> list[tuple[str, str, str]]:
         pasos.append(("Último intento", "ok", "Sin intentos previos registrados."))
 
     # --- 4. Conexión con GitHub y permisos del token -----------------------
+    pasos.append(("Certificados", "ok", certificados.origen()))
     if not token:
         pasos.append(("Conexión con GitHub", "aviso",
                       "No se probó: primero hace falta el token."))
@@ -486,6 +493,17 @@ def diagnosticar() -> list[tuple[str, str, str]]:
         elif " 403 " in texto:
             causa = ("GitHub negó el acceso: el token no tiene permiso de lectura "
                      "de contenidos, o se alcanzó el límite de consultas.")
+        elif "CERTIFICATE_VERIFY_FAILED" in texto or "SSL" in texto:
+            causa = ("Un antivirus o proxy de ese equipo está inspeccionando el "
+                     "tráfico HTTPS y Windows no reconoce a quien firma sus "
+                     "certificados. Sale a internet, pero no puede comprobar con "
+                     "quién habla, y bajar el instalador sin comprobarlo no es "
+                     "una opción.\n"
+                     "Salidas: instalar el certificado raíz de ese antivirus en el "
+                     "almacén de Windows (Entidades de certificación raíz de "
+                     "confianza), excluir api.github.com y objects.githubusercontent.com "
+                     "de la inspección HTTPS, o apuntar la variable "
+                     f"{certificados.VAR_BUNDLE} a un .pem con ese certificado.")
         elif "conectar" in texto:
             causa = ("No hay salida a api.github.com. Revisa proxy, firewall o "
                      "antivirus de ese equipo.")
