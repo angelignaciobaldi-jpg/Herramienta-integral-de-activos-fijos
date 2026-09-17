@@ -805,8 +805,12 @@ class SeccionRegistroActivos:
                 NARANJA, duracion=8000)
 
     def _actualizar_conteos(self) -> None:
-        """Conteos por pestaña con UNA consulta agregada (no listando la tabla)."""
-        c = db.contar_levantamiento_por_estatus()
+        """Conteos por pestaña con UNA consulta agregada (no listando la tabla).
+
+        Cuentan lo MISMO que muestra la tabla, filtros incluidos: con el filtro de
+        insumo puesto en «laptop», la pestaña decía 166 junto a nueve filas, y eso
+        se lee como registros perdidos, no como un filtro activo."""
+        c = db.contar_levantamiento_por_estatus(self._filtro, self._filtros_col)
         conteos = {_TAB_TODOS: c.get("total", 0),
                    db.EST_DADO_ALTA: c.get(db.EST_DADO_ALTA, 0),
                    db.EST_NO_DADO_ALTA: c.get(db.EST_NO_DADO_ALTA, 0)}

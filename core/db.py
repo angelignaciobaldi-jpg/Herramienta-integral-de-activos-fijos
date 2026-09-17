@@ -861,13 +861,20 @@ def ids_levantamiento(estatus: str | None = None, filtro: str = "",
             f"SELECT id FROM levantamiento{where}", params).fetchall()]
 
 
-def contar_levantamiento_por_estatus() -> dict[str, int]:
+def contar_levantamiento_por_estatus(filtro: str = "",
+                                     filtros: dict | None = None) -> dict[str, int]:
     """Devuelve {estatus: cantidad} más 'total'. Es una sola consulta agregada:
-    con miles de registros, listar la tabla completa solo para contarla es caro."""
+    con miles de registros, listar la tabla completa solo para contarla es caro.
+
+    Acepta los MISMOS filtros que la tabla porque los conteos se muestran en las
+    pestañas, al lado de la tabla: contar sobre todo el inventario mientras la
+    tabla muestra lo filtrado hacía leer «166» junto a nueve filas, que se lee
+    como datos perdidos."""
+    where, params = _filtro_sql(None, filtro, filtros)
     with _conectar() as con:
         filas = con.execute(
-            "SELECT estatus_registro, COUNT(*) AS n FROM levantamiento "
-            "GROUP BY estatus_registro").fetchall()
+            "SELECT estatus_registro, COUNT(*) AS n FROM levantamiento"
+            f"{where} GROUP BY estatus_registro", params).fetchall()
     conteos = {f["estatus_registro"]: f["n"] for f in filas}
     conteos["total"] = sum(conteos.values())
     return conteos
