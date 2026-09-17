@@ -2492,8 +2492,12 @@ class SeccionRegistroActivos:
         espera: asyncio.Future = asyncio.get_running_loop().create_future()
 
         def cerrar(_e=None) -> None:
-            if not espera.done():
-                espera.set_result(None)
+            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
+            # que es esta misma función. Sin el corte se llama sin fin y la app
+            # muere con «maximum recursion depth exceeded».
+            if espera.done():
+                return
+            espera.set_result(None)
             modal.cerrar()
 
         lista = ft.ListView(spacing=8, expand=True)
