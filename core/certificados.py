@@ -101,3 +101,58 @@ def _sumar_almacenes_windows(ctx: ssl.SSLContext) -> str:
             except (ssl.SSLError, ValueError):
                 continue    # certificado ilegible o repetido: se ignora
     return f" + {sumados} del almacén de Windows" if sumados else ""
+
+
+# Archivo (en DATOS) con los certificados de Windows en formato PEM, para los
+# programas que NO usan el `ssl` de Python. Hoy: el descargador de navegadores de
+# Playwright, que es Node.
+NOMBRE_PEM = "certificados_windows.pem"
+
+
+def ruta_bundle_pem() -> str:
+    """Escribe los certificados de confianza de Windows como .pem y devuelve su ruta.
+
+    Existe para **Node**: el navegador del RPA (Chromium) no viaja empaquetado, lo
+    descarga el driver de Playwright, que es Node y trae su propia lista de
+    autoridades. Ni el contexto TLS de Python ni el almacén de Windows le sirven,
+    así que en un equipo donde un antivirus inspecciona HTTPS esa descarga falla
+    igual que fallaba la actualización —y con un mensaje que habla de internet—.
+    Node sí acepta un almacén extra por la variable NODE_EXTRA_CA_CERTS, que es
+    lo que se le pasa apuntando aquí.
+
+    Se reescribe en cada llamada (son milisegundos y ocurre solo cuando hay que
+    descargar): un antivirus recién instalado cambia la lista, y un archivo viejo
+    volvería a dejar el equipo sin navegador. Devuelve "" si no se pudo.
+    """
+    from core import rutas
+
+    trozos = []
+    if hasattr(ssl, "enum_certificates"):
+        for almacen in ("ROOT", "CA", "Trust"):
+            try:
+                certificados = ssl.enum_certificates(almacen)
+            except (OSError, ValueError):
+                continue
+            for cert, tipo, _uso in certificados:
+                if tipo == "x509_asn":
+                    try:
+                        trozos.append(ssl.DER_cert_to_PEM_cert(cert))
+                    except (ValueError, ssl.SSLError):
+                        continue
+    propio = (entorno.obtener(VAR_BUNDLE) or "").strip('"').strip()
+    if propio and os.path.isfile(propio):
+        try:
+            with open(propio, encoding="utf-8", errors="ignore") as fh:
+                trozos.append(fh.read())
+        except OSError:
+            pass
+    if not trozos:
+        return ""
+    destino = os.path.join(rutas.DATOS, NOMBRE_PEM)
+    try:
+        os.makedirs(rutas.DATOS, exist_ok=True)
+        with open(destino, "w", encoding="ascii") as fh:
+            fh.write("\n".join(t.strip() for t in trozos) + "\n")
+    except OSError:
+        return ""      # sin PEM se intenta la descarga igual, como antes
+    return destino

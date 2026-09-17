@@ -62,3 +62,7 @@ imagenes_insumo/
 
 # Ejemplos de diseño en html (mockups de referencia, pesados)
 ejemplos/
+
+# Certificados de Windows exportados para el descargador de Playwright (Node).
+# Se regeneran solos; en desarrollo caen en la raíz porque DATOS es el repo.
+certificados_windows.pem
