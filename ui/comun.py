@@ -6,6 +6,8 @@ estilo de botones, campos y tarjetas NO está aquí: es de ui/componentes.py.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import datetime
 
 import flet as ft
@@ -86,3 +88,47 @@ def error_al_guardar(exc: Exception, ruta: str = "") -> str:
     if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
         return f"No se pudo guardar «{nombre}»: no hay espacio en el disco."
     return f"No se pudo guardar «{nombre}»: {exc}"
+
+
+async def copiar_al_portapapeles(page, texto: str) -> bool:
+    """Copia `texto` al portapapeles. Devuelve si lo consiguió; NUNCA lanza.
+
+    Hay tres caminos porque el del portapapeles cambió entre versiones de Flet, y
+    la que compila el CI no es siempre la del entorno de desarrollo: `page.clipboard`
+    es lo de ahora, `page.set_clipboard` lo anterior, y `clip.exe` el respaldo de
+    Windows, que funciona haya lo que haya en Flet.
+
+    Que no lance importa más que el copiado en sí: esto cuelga de un botón, y una
+    excepción en un manejador de Flet no se queda en el botón —se lleva la
+    aplicación entera con «Error running app»—. Fue justo lo que pasó al pulsar
+    «Copiar reporte» en el diagnóstico de actualización, que es donde más falta
+    hace que nada se caiga.
+    """
+    portapapeles = getattr(page, "clipboard", None)
+    if portapapeles is not None and hasattr(portapapeles, "set"):
+        try:
+            resultado = portapapeles.set(texto)
+            if hasattr(resultado, "__await__"):
+                await resultado
+            return True
+        except Exception:  # noqa: BLE001 — queda el siguiente camino
+            pass
+    legado = getattr(page, "set_clipboard", None)
+    if callable(legado):
+        try:
+            resultado = legado(texto)
+            if hasattr(resultado, "__await__"):
+                await resultado
+            return True
+        except Exception:  # noqa: BLE001 — queda el respaldo de Windows
+            pass
+    if sys.platform != "win32":
+        return False
+    try:
+        proc = subprocess.run(
+            ["clip"], input=texto.encode("utf-16-le"), shell=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            capture_output=True)
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001 — sin portapapeles, se avisa y ya
+        return False
