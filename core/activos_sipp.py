@@ -79,24 +79,17 @@ def _fila_api(r: dict) -> dict:
     }
 
 
-def descargar_activos_api(id_empresa: int, empresa_nombre: str = "",
-                          progreso=None) -> dict:
-    """Descarga por HTTP el listado de activos de una empresa y lo FUSIONA en la
-    caché. No abre navegador ni inicia sesión en el portal.
+def _bajar_listado_api(id_empresa: int, progreso=None) -> tuple[list[dict], int, str]:
+    """(registros, total, nombre de la empresa) del listado por API. Solo red.
 
-    `id_empresa` va tal cual al parámetro `empresa` del endpoint, que espera el ID
-    numérico (por nombre responde 500). `progreso(traidos, total)` es opcional.
-
-    Devuelve {guardados, nuevos, eliminados, total, origen, duplicadas, candidatos}.
-    `candidatos` es {etiqueta -> [activos que la comparten]} y solo trae las
-    repetidas; sirve para preguntarle al usuario cuál es el suyo antes de que el
-    RPA edite a ciegas la primera coincidencia.
-    """
+    Separado de la fusión para que el barrido de todas las empresas pueda bajar
+    en paralelo y escribir en la base en un solo hilo: SQLite no admite varios
+    escritores a la vez y respondería «database is locked»."""
     from . import api
 
     registros: list[dict] = []
     total = 0
-    nombre_final = empresa_nombre
+    nombre = ""
     for pagina in range(1, _MAX_PAGINAS + 1):
         try:
             resp = api.solicitar(_RUTA_API, params={
@@ -111,34 +104,99 @@ def descargar_activos_api(id_empresa: int, empresa_nombre: str = "",
             total = int(filas[0].get("total") or 0)
         except (TypeError, ValueError):
             total = 0
-        if not nombre_final:
-            nombre_final = (filas[0].get("empresa") or "").strip()
+        if not nombre:
+            nombre = (filas[0].get("empresa") or "").strip()
         registros.extend(_fila_api(f) for f in filas)
         if callable(progreso):
             progreso(len(registros), total or len(registros))
         if len(filas) < _TAM_PAGINA or (total and len(registros) >= total):
             break
+    return registros, total, nombre
 
-    # Etiquetas repetidas: el SIPP permite que DOS activos distintos compartan
-    # número de inventario, y la caché guarda uno por etiqueta (es su clave), así
-    # que uno tapa al otro. No se corrige aquí —es dato de origen— pero se reporta
-    # CON SUS CANDIDATOS: la etiqueta es con lo que el RPA localiza el activo al
-    # modificar, así que hay que poder enseñarle al usuario entre qué insumos está
-    # la ambigüedad antes de tocar nada.
+
+def _candidatos_repetidos(registros: list[dict]) -> dict:
+    """{etiqueta -> activos que la comparten}, solo de las repetidas.
+
+    El SIPP permite que DOS activos distintos compartan número de inventario, y
+    la caché guarda uno por etiqueta (es su clave), así que uno tapa al otro. No
+    se corrige aquí —es dato de origen— pero se reporta CON SUS CANDIDATOS: la
+    etiqueta es con lo que el RPA localiza el activo al modificar, así que hay que
+    poder enseñarle al usuario entre qué insumos está la ambigüedad."""
     por_etiqueta: dict[str, list[dict]] = {}
     for r in registros:
         por_etiqueta.setdefault(r["etiqueta"], []).append(r)
-    candidatos = {e: filas for e, filas in por_etiqueta.items() if len(filas) > 1}
+    return {e: filas for e, filas in por_etiqueta.items() if len(filas) > 1}
 
+
+def descargar_activos_api(id_empresa: int, empresa_nombre: str = "",
+                          progreso=None) -> dict:
+    """Descarga por HTTP el listado de activos de una empresa y lo FUSIONA en la
+    caché. No abre navegador ni inicia sesión en el portal.
+
+    `id_empresa` va tal cual al parámetro `empresa` del endpoint, que espera el ID
+    numérico (por nombre responde 500). `progreso(traidos, total)` es opcional.
+
+    NUNCA borra lo que la API no trae, aunque el listado venga completo. La API y
+    el portal NO asignan los activos a la misma empresa: un monitor resguardado en
+    Aske y comprado por Abastecedora el portal lo lista en Aske y la API en
+    Abastecedora. Con el borrado activado, cada «Buscar en SIPP» refrescaba Aske
+    por API y eliminaba de su caché los ~850 activos que la API archiva en otra
+    empresa —y esos activos, que SÍ están en el SIPP, pasaban a «no dado de alta»,
+    listos para que el RPA los duplicara—. Un activo que ya no existe y sigue en
+    caché es un problema menor; uno que existe y desaparece de ella, no.
+
+    Devuelve {guardados, nuevos, eliminados, total, origen, duplicadas, candidatos}.
+    """
+    registros, total, nombre = _bajar_listado_api(id_empresa, progreso)
+    candidatos = _candidatos_repetidos(registros)
     sello = datetime.now().strftime("%Y-%m-%d %H:%M")
-    # `eliminar_ausentes` solo si de verdad se trajo el listado COMPLETO: con una
-    # descarga a medias (red caída a la tercera página) borraría activos buenos.
-    completo = bool(registros) and (not total or len(registros) >= total)
-    res = db.fusionar_activos_sipp(id_empresa, nombre_final or empresa_nombre,
-                                   registros, sello,
-                                   eliminar_ausentes=completo)
+    res = db.fusionar_activos_sipp(id_empresa, nombre or empresa_nombre,
+                                   registros, sello, eliminar_ausentes=False)
     return {**res, "total": total or len(registros), "origen": "api",
             "duplicadas": sorted(candidatos), "candidatos": candidatos}
+
+
+def refrescar_todas_api(progreso=None, hilos: int = 6) -> dict:
+    """Trae por API el listado de TODAS las empresas y lo fusiona en la caché.
+
+    Es lo que hace que la búsqueda en el SIPP encuentre un activo aunque la API lo
+    archive en una empresa distinta de la del levantamiento (ver
+    `descargar_activos_api`). Refrescar solo la empresa del registro —como se
+    hacía— nunca iba a encontrarlo.
+
+    Cuesta ~16 s para las 58 empresas (~65 mil activos) con 6 descargas en
+    paralelo; el respaldo por el portal tardaría minutos solo para unos cientos
+    de etiquetas. La red va en paralelo y la base en un solo hilo.
+
+    `progreso(hechas, total)` se llama al terminar cada empresa, desde el hilo que
+    llama. Devuelve {empresas, activos, errores: [(empresa, motivo)]}; una empresa
+    que falla no detiene a las demás.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from .empresas import ID_POR_EMPRESA
+
+    empresas = list(ID_POR_EMPRESA.items())
+    sello = datetime.now().strftime("%Y-%m-%d %H:%M")
+    activos, errores, hechas = 0, [], 0
+    with ThreadPoolExecutor(max_workers=hilos) as ex:
+        futuros = {ex.submit(_bajar_listado_api, idemp): (nombre, idemp)
+                   for nombre, idemp in empresas}
+        for fut in as_completed(futuros):
+            nombre, idemp = futuros[fut]
+            hechas += 1
+            try:
+                registros, _total, nombre_api = fut.result()
+            except Exception as exc:  # noqa: BLE001 — se reporta, sigue el resto
+                errores.append((nombre, str(exc)))
+            else:
+                if registros:
+                    db.fusionar_activos_sipp(idemp, nombre_api or nombre, registros,
+                                             sello, eliminar_ausentes=False)
+                    activos += len(registros)
+            if callable(progreso):
+                progreso(hechas, len(empresas))
+    return {"empresas": len(empresas), "activos": activos, "errores": errores}
 
 
 def _elegir_columna(cols: list[str], *claves: str) -> "int | None":

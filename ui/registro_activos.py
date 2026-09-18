@@ -189,6 +189,41 @@ def _serie_buscable(serie: str | None) -> str:
     return limpia
 
 
+def _mismo_activo(r, opciones: list) -> "dict | None":
+    """Elige entre candidatos de VARIAS empresas cuando la duda es solo aparente.
+
+    Que una etiqueta aparezca en dos empresas casi nunca significa dos activos:
+    la API y el portal archivan el mismo equipo en empresas distintas (la de
+    compra y la de resguardo), así que el mismo monitor sale dos veces. Preguntar
+    por eso es ruido. Se decide sola cuando hay con qué:
+
+    1. La SERIE del levantamiento coincide con la de UN solo candidato: es ese.
+       (Así se descarta la maceta de Asamaz que comparte número con una laptop.)
+    2. Todos los candidatos tienen la MISMA serie: es un solo activo archivado dos
+       veces.
+    3. Sin serie, todos tienen el mismo insumo y el mismo resguardante: ídem.
+
+    Entre copias del mismo activo se prefiere la del resguardante del registro.
+    Devuelve None cuando SÍ son activos distintos: eso lo decide el usuario.
+    """
+    norm = lambda v: " ".join(str(v or "").upper().split())  # noqa: E731
+    serie = norm(_serie_buscable(r.no_serie))
+    if serie:
+        por_serie = [c for c in opciones if norm(c.get("serie")) == serie]
+        if len(por_serie) == 1:
+            return por_serie[0]
+    series = {norm(c.get("serie")) for c in opciones}
+    mismo = (len(series) == 1 and "" not in series) or (
+        len({norm(c.get("insumo")) for c in opciones}) == 1
+        and len({norm(c.get("empleado")) for c in opciones}) == 1
+        and norm(opciones[0].get("empleado")))
+    if not mismo:
+        return None
+    resp = norm(r.responsable)
+    return next((c for c in opciones if resp and norm(c.get("empleado")) == resp),
+                opciones[0])
+
+
 def _prefill_desde_sipp(info: dict) -> dict:
     """Traduce los datos del SIPP (info_sipp) a las claves del formulario de captura
     (datos_json), para registrar el detalle del insumo de un activo dado de alta.
@@ -1936,6 +1971,8 @@ class SeccionRegistroActivos:
                 "«Actualizar SIPP» de al menos una empresa.", ROJO, duracion=9000)
             return
 
+        aviso_api, api_completa = await self._refrescar_cache_api()
+
         self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
         try:
             res = await asyncio.to_thread(self._clasificar_contra_sipp, registros)
@@ -1975,7 +2012,12 @@ class SeccionRegistroActivos:
         # empresa que nunca se descargó. Es la única forma de saberlo sin bajar el
         # catálogo de las 58 empresas.
         self._refrescar()
-        portal = await self._respaldo_portal()
+        # Si la API trajo TODAS las empresas, el portal ya no tiene nada que
+        # agregar: la API devuelve más activos (~65 mil) que el propio tablero, y
+        # consultar uno por uno lo que falta costaba minutos y un navegador
+        # abierto para no encontrar nada. Queda para cuando la API no está o falla.
+        portal = (ResultadoBusquedaSipp() if api_completa
+                  else await self._respaldo_portal())
         hallados_portal = portal.hechos
         if portal.conflictos:
             self._refrescar()
@@ -1994,6 +2036,8 @@ class SeccionRegistroActivos:
         self._refrescar()
         msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
         extras = []
+        if aviso_api:
+            extras.append(aviso_api)
         if res.adoptadas:
             extras.append(f"{len(res.adoptadas)} sin etiqueta tomaron la del SIPP "
                           f"(coincidió el número de serie)")
@@ -2017,6 +2061,43 @@ class SeccionRegistroActivos:
             msg += " · " + " · ".join(extras)
         self.app.avisar(msg, VERDE if not extras else NARANJA,
                         duracion=9000 if extras else 6000)
+
+    async def _refrescar_cache_api(self) -> tuple[str, bool]:
+        """Trae por API los activos de TODAS las empresas antes de comparar.
+
+        Devuelve (aviso para el resumen final, si se trajeron TODAS). Es
+        best-effort: si la API no está configurada o se cae, la búsqueda sigue
+        con la caché como esté, que es lo que hacía siempre.
+
+        Todas y no solo las del levantamiento: la API no archiva los activos en la
+        misma empresa que el portal (un monitor resguardado en Aske puede estar en
+        Abastecedora), y la búsqueda local ya es global. Son ~16 s; lo que no
+        aparezca aquí es lo único que después paga el respaldo por el portal.
+        """
+        from core import activos_sipp
+
+        if not activos_sipp.hay_api():
+            return "", False
+        ui_loop = asyncio.get_running_loop()
+
+        def avance(hechas: int, total: int) -> None:
+            ui_loop.call_soon_threadsafe(
+                self._set_cargando, True,
+                f"Consultando el SIPP por API… {hechas}/{total} empresas")
+
+        self._set_cargando(True, "Consultando el SIPP por API…")
+        try:
+            res = await asyncio.to_thread(activos_sipp.refrescar_todas_api, avance)
+        except Exception as exc:  # noqa: BLE001 — se sigue con la caché
+            self._set_cargando(False)
+            return (f"la API no respondió ({exc}); se comparó con la caché local",
+                    False)
+        self._set_cargando(False)
+        if res["errores"]:
+            nombres = ", ".join(e for e, _m in res["errores"][:3])
+            return (f"{len(res['errores'])} empresa(s) no respondieron por API "
+                    f"({nombres}); para ellas se usó la caché local", False)
+        return "", True
 
     async def _respaldo_portal(self) -> "ResultadoBusquedaSipp":
         """Consulta en el PORTAL las etiquetas que la caché local no encontró.
@@ -2226,23 +2307,11 @@ class SeccionRegistroActivos:
         paso, activos que SÍ están en el SIPP salían «no dados de alta» y el RPA
         los habría duplicado.
         """
-        from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
 
-        # Refresco previo por API (HTTP, sin navegador ni login) de las empresas que
-        # los registros mencionan: la comparación es contra el SIPP de AHORA. Es
-        # best-effort; si la API no está configurada o falla, se usa la caché tal
-        # como esté, que es el comportamiento de siempre.
-        if activos_sipp.hay_api():
-            for nombre in {(r.empresa or "").strip() for r in registros}:
-                idemp = ID_POR_EMPRESA.get(nombre)
-                if idemp is None:
-                    continue
-                try:
-                    activos_sipp.descargar_activos_api(idemp, nombre)
-                except Exception:  # noqa: BLE001 — se cae a la caché existente
-                    pass
-
+        # El refresco por API ya NO va aquí: lo hace `_buscar` antes, sobre TODAS
+        # las empresas (ver `_refrescar_cache_api`). Refrescar solo las del
+        # levantamiento no encontraba lo que la API archiva en otra empresa.
         candidatos = db.activos_sipp_por_etiquetas(
             [(r.etiqueta or "") for r in registros])
         por_serie_cache = db.activos_sipp_por_series(
@@ -2264,7 +2333,7 @@ class SeccionRegistroActivos:
             propio = next((c for c in opciones
                            if c.get("id_empresa") == idemp), None) if idemp else None
             elegido = propio if propio is not None else (
-                opciones[0] if len(opciones) == 1 else None)
+                opciones[0] if len(opciones) == 1 else _mismo_activo(r, opciones))
             if elegido is None:
                 res.ambiguos.append((r, opciones))
                 continue
