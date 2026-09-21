@@ -2071,8 +2071,9 @@ class SeccionRegistroActivos:
 
         Todas y no solo las del levantamiento: la API no archiva los activos en la
         misma empresa que el portal (un monitor resguardado en Aske puede estar en
-        Abastecedora), y la búsqueda local ya es global. Son ~16 s; lo que no
-        aparezca aquí es lo único que después paga el respaldo por el portal.
+        Abastecedora), y la búsqueda local ya es global. Es UNA consulta sin
+        filtro de empresa (~6 s por todo el catálogo); si viene completa, el
+        respaldo por el portal —navegador y minutos— ya no hace falta.
         """
         from core import activos_sipp
 
@@ -2083,7 +2084,7 @@ class SeccionRegistroActivos:
         def avance(hechas: int, total: int) -> None:
             ui_loop.call_soon_threadsafe(
                 self._set_cargando, True,
-                f"Consultando el SIPP por API… {hechas}/{total} empresas")
+                f"Consultando el catálogo completo del SIPP… {hechas}/{total}")
 
         self._set_cargando(True, "Consultando el SIPP por API…")
         try:
@@ -2093,10 +2094,9 @@ class SeccionRegistroActivos:
             return (f"la API no respondió ({exc}); se comparó con la caché local",
                     False)
         self._set_cargando(False)
-        if res["errores"]:
-            nombres = ", ".join(e for e, _m in res["errores"][:3])
-            return (f"{len(res['errores'])} empresa(s) no respondieron por API "
-                    f"({nombres}); para ellas se usó la caché local", False)
+        if not res["completo"]:
+            return ("la API no devolvió el catálogo completo; lo que faltó se "
+                    "buscó con la caché local y el portal", False)
         return "", True
 
     async def _respaldo_portal(self) -> "ResultadoBusquedaSipp":

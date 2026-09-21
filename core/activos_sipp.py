@@ -156,47 +156,93 @@ def descargar_activos_api(id_empresa: int, empresa_nombre: str = "",
             "duplicadas": sorted(candidatos), "candidatos": candidatos}
 
 
+# Filas por página del barrido SIN filtro de empresa. Con 10 mil son 7 páginas
+# para todo el catálogo (~65 mil activos) y cada una tarda ~2-6 s: holgado frente
+# al timeout de 30 s de core/api. Más grandes no ganan tiempo y sí arriesgan.
+_TAM_PAGINA_TODO = 10_000
+
+
+def _normalizar_empresa(nombre: str) -> str:
+    """Nombre comparable: la API manda «SERVICIOS  EDUCATIVOS IMAA» con doble
+    espacio, y sin esto sus activos se quedarían fuera de la caché."""
+    return " ".join((nombre or "").split()).upper()
+
+
 def refrescar_todas_api(progreso=None, hilos: int = 6) -> dict:
-    """Trae por API el listado de TODAS las empresas y lo fusiona en la caché.
+    """Trae por API el catálogo COMPLETO, sin filtro de empresa, y lo fusiona.
 
     Es lo que hace que la búsqueda en el SIPP encuentre un activo aunque la API lo
     archive en una empresa distinta de la del levantamiento (ver
-    `descargar_activos_api`). Refrescar solo la empresa del registro —como se
-    hacía— nunca iba a encontrarlo.
+    `descargar_activos_api`).
 
-    Cuesta ~16 s para las 58 empresas (~65 mil activos) con 6 descargas en
-    paralelo; el respaldo por el portal tardaría minutos solo para unos cientos
-    de etiquetas. La red va en paralelo y la base en un solo hilo.
+    Una sola consulta sin el parámetro `empresa`: el endpoint devuelve entonces
+    todo el catálogo, paginado, con la empresa de cada fila. Antes se hacían 58
+    consultas —una por empresa— (~15 s), y antes aún el respaldo por el portal
+    consultaba etiqueta por etiqueta con un navegador (minutos). Así son ~6 s: la
+    primera página da el total y el resto se pide en paralelo. La base se escribe
+    en un solo hilo (SQLite no admite varios escritores).
 
-    `progreso(hechas, total)` se llama al terminar cada empresa, desde el hilo que
-    llama. Devuelve {empresas, activos, errores: [(empresa, motivo)]}; una empresa
-    que falla no detiene a las demás.
+    `progreso(hechas, total)` cuenta páginas y se llama desde el hilo que llama.
+    Devuelve {empresas, activos, completo, errores: [motivo], sin_empresa}.
+    `completo` es False si alguna página falló o faltaron filas: con eso el
+    llamador sabe que todavía le conviene el respaldo por el portal.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    from . import api
     from .empresas import ID_POR_EMPRESA
 
-    empresas = list(ID_POR_EMPRESA.items())
+    def pagina(n: int) -> list[dict]:
+        try:
+            resp = api.solicitar(_RUTA_API, params={
+                "page": n, "pageSize": _TAM_PAGINA_TODO})
+        except api.ErrorAPI as exc:
+            raise ErrorActivosSipp(str(exc)) from exc
+        return resp.get("data") or []
+
+    primera = pagina(1)
+    if not primera:
+        return {"empresas": 0, "activos": 0, "completo": False,
+                "errores": ["la API no devolvió activos"], "sin_empresa": 0}
+    try:
+        total = int(primera[0].get("total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    paginas = max(1, -(-total // _TAM_PAGINA_TODO)) if total else 1
+    filas, errores = list(primera), []
+    if callable(progreso):
+        progreso(1, paginas)
+    if paginas > 1:
+        with ThreadPoolExecutor(max_workers=hilos) as ex:
+            futuros = [ex.submit(pagina, n) for n in range(2, paginas + 1)]
+            for hechas, fut in enumerate(as_completed(futuros), 2):
+                try:
+                    filas.extend(fut.result())
+                except Exception as exc:  # noqa: BLE001 — se reporta, sigue
+                    errores.append(str(exc))
+                if callable(progreso):
+                    progreso(hechas, paginas)
+
+    ids = {_normalizar_empresa(n): i for n, i in ID_POR_EMPRESA.items()}
+    por_empresa: dict[int, tuple[str, list[dict]]] = {}
+    sin_empresa = 0
+    for f in filas:
+        nombre = (f.get("empresa") or "").strip()
+        idemp = ids.get(_normalizar_empresa(nombre))
+        if idemp is None:
+            sin_empresa += 1      # empresa que la herramienta no conoce
+            continue
+        por_empresa.setdefault(idemp, (nombre, []))[1].append(_fila_api(f))
+
     sello = datetime.now().strftime("%Y-%m-%d %H:%M")
-    activos, errores, hechas = 0, [], 0
-    with ThreadPoolExecutor(max_workers=hilos) as ex:
-        futuros = {ex.submit(_bajar_listado_api, idemp): (nombre, idemp)
-                   for nombre, idemp in empresas}
-        for fut in as_completed(futuros):
-            nombre, idemp = futuros[fut]
-            hechas += 1
-            try:
-                registros, _total, nombre_api = fut.result()
-            except Exception as exc:  # noqa: BLE001 — se reporta, sigue el resto
-                errores.append((nombre, str(exc)))
-            else:
-                if registros:
-                    db.fusionar_activos_sipp(idemp, nombre_api or nombre, registros,
-                                             sello, eliminar_ausentes=False)
-                    activos += len(registros)
-            if callable(progreso):
-                progreso(hechas, len(empresas))
-    return {"empresas": len(empresas), "activos": activos, "errores": errores}
+    activos = 0
+    for idemp, (nombre, registros) in por_empresa.items():
+        db.fusionar_activos_sipp(idemp, nombre, registros, sello,
+                                 eliminar_ausentes=False)
+        activos += len(registros)
+    completo = not errores and (not total or len(filas) >= total)
+    return {"empresas": len(por_empresa), "activos": activos,
+            "completo": completo, "errores": errores, "sin_empresa": sin_empresa}
 
 
 def _elegir_columna(cols: list[str], *claves: str) -> "int | None":
