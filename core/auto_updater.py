@@ -47,6 +47,22 @@ REPO = "Herramienta-integral-de-activos-fijos"
 NOMBRE_ASSET = "Instalador_ActivosFijos.exe"
 NOMBRE_DESCARGA = "nuevo_instalador.exe"
 NOMBRE_BAT = "actualizar_activos_fijos.bat"
+# Rastro que deja el .bat de la actualización. Sin esto, un instalador que falla
+# no deja NADA: la app se reinicia en la versión vieja y nadie sabe por qué.
+NOMBRE_RESULTADO = "actualizador_resultado.txt"
+NOMBRE_LOG_INSTALADOR = "actualizador_instalador.log"
+
+# Códigos de salida de Inno Setup, en lo que significan para quien usa la app.
+_CODIGOS_INNO = {
+    "1": "el instalador no pudo iniciarse",
+    "2": "la instalación se canceló",
+    "3": "error grave preparando la instalación",
+    "4": "error grave durante la instalación",
+    "5": ("la instalación se canceló: normalmente porque la aplicación seguía "
+          "abierta y no se pudieron reemplazar sus archivos"),
+    "6": "la instalación se interrumpió desde fuera (¿antivirus?)",
+    "8": "hace falta reiniciar Windows para terminar la instalación",
+}
 
 API = "https://api.github.com"
 API_VERSION = "2022-11-28"
@@ -194,15 +210,45 @@ class AutoUpdater:
         # la actualización lo sobrescribe en el sitio).
         exe = os.path.abspath(sys.executable)
         dir_exe = os.path.dirname(exe)
-        # /SILENT (no /VERYSILENT) para que Inno muestre su ventana de progreso y
-        # el usuario vea que se está instalando. 'ping -n 4' da ~3 s de espera de
-        # forma fiable en un proceso sin consola (a diferencia de 'timeout').
+        nombre_exe = os.path.basename(exe)
+        resultado = os.path.join(rutas.DATOS, NOMBRE_RESULTADO)
+        log_inno = os.path.join(rutas.DATOS, NOMBRE_LOG_INSTALADOR)
+        # Dos cosas que este .bat aprendió por las malas:
+        #
+        # 1) ESPERAR A QUE LA APP MUERA DE VERDAD. Antes esperaba 3 s fijos. Si el
+        #    proceso seguía vivo, Inno no podía reemplazar el .exe en uso y
+        #    abortaba —en silencio, por /SUPPRESSMSGBOXES—; el .bat reiniciaba la
+        #    versión VIEJA y borraba el instalador, así que no quedaba ni rastro y
+        #    el anti-bucle daba esa release por aplicada para siempre. Ahora sondea
+        #    el proceso hasta ~60 s.
+        # 2) DEJAR CONSTANCIA. El código de salida del instalador se guarda, y el
+        #    log de Inno también: es lo único que permite decir QUÉ pasó en vez de
+        #    «no se actualizó».
+        #
+        # /SILENT (no /VERYSILENT) para que Inno muestre su barra de progreso.
+        # 'ping -n' da esperas fiables en un proceso sin consola (a diferencia de
+        # 'timeout', que necesita una consola interactiva).
         contenido = (
             "@echo off\r\n"
-            "rem Espera ~3 s a que la aplicacion termine de cerrarse.\r\n"
-            "ping 127.0.0.1 -n 4 >nul\r\n"
-            f'"{ruta_instalador}" /SILENT /SUPPRESSMSGBOXES /NORESTART\r\n'
-            "rem Reinicia la app ya actualizada.\r\n"
+            "setlocal\r\n"
+            "rem Espera a que la aplicacion termine de cerrarse (hasta ~60 s).\r\n"
+            "set INTENTOS=0\r\n"
+            ":esperar\r\n"
+            f'tasklist /FI "IMAGENAME eq {nombre_exe}" 2>nul | '
+            f'find /I "{nombre_exe}" >nul\r\n'
+            "if errorlevel 1 goto instalar\r\n"
+            "set /a INTENTOS+=1\r\n"
+            "if %INTENTOS% GEQ 30 goto instalar\r\n"
+            "ping 127.0.0.1 -n 3 >nul\r\n"
+            "goto esperar\r\n"
+            ":instalar\r\n"
+            f'"{ruta_instalador}" /SILENT /SUPPRESSMSGBOXES /NORESTART '
+            f'/LOG="{log_inno}"\r\n'
+            # Entre paréntesis a propósito: 'echo %ERRORLEVEL%> fichero' con un
+            # código de UN dígito lo lee cmd como «redirige el flujo 5», y el
+            # archivo queda vacío. Con los paréntesis no hay ambigüedad.
+            f'(echo %ERRORLEVEL%)> "{resultado}"\r\n'
+            "rem Reinicia la app (actualizada si el instalador pudo).\r\n"
             f'start "" /D "{dir_exe}" "{exe}"\r\n'
             f'del "{ruta_instalador}"\r\n'
             'del "%~f0"\r\n'
@@ -314,6 +360,41 @@ class AutoUpdater:
         sin elevación), así que se usa siempre %TEMP%, que es escribible."""
         _ = getattr(sys, "frozen", False)  # ejecutándose como .exe de PyInstaller
         return tempfile.gettempdir()
+
+
+def _codigo_ultima_instalacion() -> str:
+    """Código con que terminó el instalador la última vez ("" si no hay rastro)."""
+    try:
+        with open(os.path.join(rutas.DATOS, NOMBRE_RESULTADO),
+                  encoding="utf-8", errors="ignore") as fh:
+            return fh.read().strip().split()[0]
+    except (OSError, IndexError):
+        return ""
+
+
+def permitir_reintento() -> None:
+    """Olvida el último intento, para que la release bloqueada se pueda instalar.
+
+    El anti-bucle es correcto mientras nadie mire: evita que una release cuyo
+    instalador no avanza se reintente sin fin. Pero convertía en definitivo lo que
+    casi siempre es temporal —la app seguía abierta, el antivirus se metió— y la
+    única salida era borrar un .json a mano. Cuando el usuario pide reintentar
+    explícitamente, esa protección sobra: ya hay alguien mirando."""
+    for nombre in (AutoUpdater._ruta_estado(),
+                   os.path.join(rutas.DATOS, NOMBRE_RESULTADO)):
+        try:
+            os.remove(nombre)
+        except OSError:
+            pass    # no existía, o no se puede borrar: se intenta igual
+
+
+def hay_intento_bloqueado() -> bool:
+    """Si hay una release marcada como intentada (la que el botón desbloquearía)."""
+    try:
+        with open(AutoUpdater._ruta_estado(), encoding="utf-8") as fh:
+            return bool(json.load(fh).get("ultimo_tag_aplicado"))
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 # ================================================================ diagnóstico
@@ -464,12 +545,30 @@ def diagnosticar() -> list[tuple[str, str, str]]:
     except (OSError, json.JSONDecodeError):
         ultimo = ""
     if ultimo:
+        codigo = _codigo_ultima_instalacion()
+        if codigo and codigo != "0":
+            detalle = (
+                f"Se intentó instalar la versión {ultimo} y el instalador terminó "
+                f"con el código {codigo}: {_CODIGOS_INNO.get(codigo, 'error no identificado')}.\n"
+                f"Detalle completo en:\n  {os.path.join(rutas.DATOS, NOMBRE_LOG_INSTALADOR)}")
+            estado_paso = "error"
+        elif codigo == "0":
+            detalle = (
+                f"Se instaló la versión {ultimo} sin errores. Si la versión de "
+                "arriba sigue siendo la anterior, se está abriendo otra copia de "
+                "la aplicación (revisa el paso «Instalación»).")
+            estado_paso = "aviso"
+        else:
+            detalle = (
+                f"Ya se intentó instalar la versión {ultimo}, pero no quedó "
+                "constancia de cómo terminó (el intento es anterior a esta "
+                "versión de la herramienta).")
+            estado_paso = "aviso"
         pasos.append((
-            "Último intento", "aviso",
-            f"Ya se intentó instalar la versión {ultimo}. Si la versión instalada "
-            "sigue siendo la anterior, esa release NO se volverá a ofrecer (es la "
-            "protección contra bucles). Para reintentarla, borra:\n  "
-            + AutoUpdater._ruta_estado()))
+            "Último intento", estado_paso,
+            detalle + "\nMientras la versión instalada no avance, esa release NO "
+            "se vuelve a ofrecer sola (es la protección contra bucles). El botón "
+            "«Reintentar instalación» de abajo la desbloquea."))
     else:
         pasos.append(("Último intento", "ok", "Sin intentos previos registrados."))
 
@@ -530,9 +629,9 @@ def diagnosticar() -> list[tuple[str, str, str]]:
         pasos.append((
             "Resultado", "error",
             f"Hay versión nueva ({tag}) pero está BLOQUEADA: ya se intentó "
-            "instalar y la versión no avanzó. Casi siempre es la instalación "
-            "duplicada del paso «Instalación». Corrige eso y borra el archivo "
-            "del paso «Último intento»."))
+            "instalar y la versión no avanzó. Mira el paso «Último intento» para "
+            "saber por qué. Cierra la aplicación si tienes otra ventana abierta y "
+            "usa «Reintentar instalación»."))
     else:
         pasos.append(("Resultado", "ok",
                       f"Hay versión nueva ({tag}) y se puede instalar."))

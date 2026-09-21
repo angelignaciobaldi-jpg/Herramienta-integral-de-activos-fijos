@@ -405,12 +405,40 @@ class AppActivosFijos:
         modal.cuerpo.controls = cuerpo
 
         async def copiar(_e=None) -> None:
-            await self.page.clipboard.set(reporte)
-            self.avisar("Diagnóstico copiado al portapapeles.", ft.Colors.GREEN_700)
+            from ui.comun import copiar_al_portapapeles
 
-        modal.set_acciones([
-            boton_herramienta("Copiar reporte", ft.Icons.CONTENT_COPY, copiar),
-            boton_primario("Cerrar", ft.Icons.CHECK, lambda _e: modal.cerrar())])
+            if await copiar_al_portapapeles(self.page, reporte):
+                self.avisar("Diagnóstico copiado al portapapeles.",
+                            ft.Colors.GREEN_700)
+            else:
+                # El texto sigue seleccionable en el propio modal: se dice, en vez
+                # de dejar al usuario esperando un portapapeles que no llegó.
+                self.avisar("No se pudo usar el portapapeles. Selecciona el texto "
+                            "del diagnóstico y cópialo con Ctrl+C.",
+                            ft.Colors.ORANGE_800, duracion=9000)
+
+        async def reintentar(_e=None) -> None:
+            """Olvida el intento bloqueado y vuelve a buscar, ya sin la traba."""
+            modal.cerrar()
+            auto_updater.permitir_reintento()
+            estado, detalle = await asyncio.to_thread(_comprobar_update_sync)
+            if estado == "disponible":
+                self._dialogo_actualizacion(detalle)
+            elif estado == "al_dia":
+                self.avisar("Ya tienes la última versión instalada.",
+                            ft.Colors.GREEN_700)
+            else:
+                await self._abrir_diagnostico_actualizacion(detalle)
+
+        acciones = [boton_herramienta("Copiar reporte", ft.Icons.CONTENT_COPY, copiar)]
+        # Solo cuando hay algo que desbloquear: un botón que no aplica confunde
+        # tanto como su ausencia cuando hace falta.
+        if auto_updater.hay_intento_bloqueado():
+            acciones.append(boton_herramienta(
+                "Reintentar instalación", ft.Icons.REPLAY, reintentar))
+        acciones.append(boton_primario("Cerrar", ft.Icons.CHECK,
+                                       lambda _e: modal.cerrar()))
+        modal.set_acciones(acciones)
         modal.abrir()
 
     def _dialogo_actualizacion(self, tag: str) -> None:
