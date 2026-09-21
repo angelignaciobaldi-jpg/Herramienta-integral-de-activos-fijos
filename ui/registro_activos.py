@@ -169,6 +169,8 @@ class ResultadoBusquedaSipp:
     choques: list = field(default_factory=list)
     # [(registro, activo, "sipp"|"aparte")] — lo que el usuario decidió.
     decisiones: list = field(default_factory=list)
+    # No aparecieron, pero sin el catálogo completo eso no prueba nada.
+    sin_confirmar: int = 0
 
 
 # Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
@@ -187,6 +189,41 @@ def _serie_buscable(serie: str | None) -> str:
     if limpia.upper() in _SERIES_VACIAS or len(limpia) < 5:
         return ""
     return limpia
+
+
+def _mismo_activo(r, opciones: list) -> "dict | None":
+    """Elige entre candidatos de VARIAS empresas cuando la duda es solo aparente.
+
+    Que una etiqueta aparezca en dos empresas casi nunca significa dos activos:
+    la API y el portal archivan el mismo equipo en empresas distintas (la de
+    compra y la de resguardo), así que el mismo monitor sale dos veces. Preguntar
+    por eso es ruido. Se decide sola cuando hay con qué:
+
+    1. La SERIE del levantamiento coincide con la de UN solo candidato: es ese.
+       (Así se descarta la maceta de Asamaz que comparte número con una laptop.)
+    2. Todos los candidatos tienen la MISMA serie: es un solo activo archivado dos
+       veces.
+    3. Sin serie, todos tienen el mismo insumo y el mismo resguardante: ídem.
+
+    Entre copias del mismo activo se prefiere la del resguardante del registro.
+    Devuelve None cuando SÍ son activos distintos: eso lo decide el usuario.
+    """
+    norm = lambda v: " ".join(str(v or "").upper().split())  # noqa: E731
+    serie = norm(_serie_buscable(r.no_serie))
+    if serie:
+        por_serie = [c for c in opciones if norm(c.get("serie")) == serie]
+        if len(por_serie) == 1:
+            return por_serie[0]
+    series = {norm(c.get("serie")) for c in opciones}
+    mismo = (len(series) == 1 and "" not in series) or (
+        len({norm(c.get("insumo")) for c in opciones}) == 1
+        and len({norm(c.get("empleado")) for c in opciones}) == 1
+        and norm(opciones[0].get("empleado")))
+    if not mismo:
+        return None
+    resp = norm(r.responsable)
+    return next((c for c in opciones if resp and norm(c.get("empleado")) == resp),
+                opciones[0])
 
 
 def _prefill_desde_sipp(info: dict) -> dict:
@@ -1918,27 +1955,38 @@ class SeccionRegistroActivos:
 
     # ------------------------------------------------------ búsqueda en SIPP
     async def _buscar(self, _e=None) -> None:
-        """Compara cada activo del levantamiento contra los activos REALES ya
-        descargados del SIPP: dado de alta si su ETIQUETA aparece en la caché.
+        """Compara cada activo del levantamiento contra el catálogo del SIPP.
 
-        La búsqueda es GENERAL: recorre las empresas descargadas, no solo la que
-        el registro tenga asignada. Antes, un activo cuya empresa estuviera mal
-        capturada —o vacía— salía «no dado de alta» aunque existiera en el SIPP, y
-        el RPA lo habría vuelto a crear.
+        El catálogo sale de la API, COMPLETO y sin filtro de empresa: la empresa
+        de cada activo la dice la propia API, así que no depende de qué empresas
+        haya descargado este equipo. Ya NO hay respaldo por el portal: abría un
+        navegador y consultaba etiqueta por etiqueta (minutos) para lo que la API
+        resuelve en segundos.
+
+        Sin API —no configurada o caída— se compara con la caché local, pero solo
+        para CONFIRMAR: lo que no aparece se deja como está en vez de marcarlo «no
+        dado de alta», porque la caché puede estar incompleta y esa marca es la que
+        invita al RPA a duplicar un activo que sí existe.
         """
         registros = db.listar_levantamiento()
         if not registros:
             self.app.avisar("No hay activos en el levantamiento para buscar.", ROJO)
             return
+
+        # Primero la API: en un equipo sin caché es lo que la llena, así que exigir
+        # caché antes le negaría la búsqueda a quien justo la puede hacer.
+        motivo_api, api_completa = await self._refrescar_cache_api()
         if not db.hay_activos_sipp():
             self.app.avisar(
-                "No hay activos del SIPP descargados con qué comparar. Corre "
-                "«Actualizar SIPP» de al menos una empresa.", ROJO, duracion=9000)
+                "No se pudo consultar el SIPP: " + (motivo_api or "sin catálogo") +
+                ", y este equipo no tiene activos descargados con qué comparar.",
+                ROJO, duracion=10000)
             return
 
         self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
         try:
-            res = await asyncio.to_thread(self._clasificar_contra_sipp, registros)
+            res = await asyncio.to_thread(self._clasificar_contra_sipp, registros,
+                                          api_completa)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._set_cargando(False)
             self.app.avisar(f"No se pudo buscar en el SIPP: {exc}", ROJO)
@@ -1971,29 +2019,15 @@ class SeccionRegistroActivos:
             self._refrescar()
             await self._avisar_etiquetas_adoptadas(res.adoptadas)
 
-        # Respaldo en el portal: lo que la caché no encontró puede existir en una
-        # empresa que nunca se descargó. Es la única forma de saberlo sin bajar el
-        # catálogo de las 58 empresas.
         self._refrescar()
-        portal = await self._respaldo_portal()
-        hallados_portal = portal.hechos
-        if portal.conflictos:
-            self._refrescar()
-            sin_resolver += await self._aplicar_decisiones_etiqueta(portal)
-            aparte += sum(1 for _r, _d, q in portal.decisiones if q == "aparte")
-            hallados_portal += sum(1 for _r, _d, q in portal.decisiones if q == "sipp")
-        if portal.adoptadas:
-            self._refrescar()
-            await self._avisar_etiquetas_adoptadas(portal.adoptadas)
-        # Lo del portal se suma a lo local para el resumen final.
-        res.adoptadas += portal.adoptadas
-        res.choques += portal.choques
 
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
         n_no = len(db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA))
         self._refrescar()
         msg = f"Búsqueda completada: {n_dado} dado(s) de alta, {n_no} sin dar de alta."
         extras = []
+        if motivo_api:
+            extras.append(f"{motivo_api}; se comparó con la caché local")
         if res.adoptadas:
             extras.append(f"{len(res.adoptadas)} sin etiqueta tomaron la del SIPP "
                           f"(coincidió el número de serie)")
@@ -2006,9 +2040,10 @@ class SeccionRegistroActivos:
                                 for r, etq in res.choques[:3])
             extras.append(f"{len(res.choques)} con etiqueta ya usada por otro "
                           f"registro ({detalle}); quedan pendientes")
-        if hallados_portal:
-            extras.append(f"{hallados_portal} encontrado(s) en otra empresa "
-                          f"consultando el portal")
+        if res.sin_confirmar:
+            extras.append(f"{res.sin_confirmar} no aparecen en la caché local y se "
+                          f"dejaron sin cambios: sin la API no se puede confirmar "
+                          f"que falten en el SIPP")
         if sin_resolver:
             # No quedan como «no dado de alta»: eso invitaría al RPA a duplicarlos.
             # Se quedan pendientes, que es lo que realmente son.
@@ -2018,159 +2053,40 @@ class SeccionRegistroActivos:
         self.app.avisar(msg, VERDE if not extras else NARANJA,
                         duracion=9000 if extras else 6000)
 
-    async def _respaldo_portal(self) -> "ResultadoBusquedaSipp":
-        """Consulta en el PORTAL las etiquetas que la caché local no encontró.
+    async def _refrescar_cache_api(self) -> tuple[str, bool]:
+        """Trae por API los activos de TODAS las empresas antes de comparar.
 
-        La búsqueda local solo ve las empresas descargadas; el listado del SIPP, en
-        cambio, se puede consultar sin ámbito y dice a qué empresa pertenece cada
-        etiqueta. Devuelve cuántas se encontraron.
+        Devuelve (motivo si NO se pudo, si se trajeron TODAS). Es
+        best-effort: si la API no está configurada o se cae, la búsqueda sigue
+        con la caché como esté, que es lo que hacía siempre.
 
-        Corre automáticamente al terminar la búsqueda, pero SOLO sobre lo que quedó
-        «no dado de alta» CON etiqueta: sin etiqueta no hay nada que preguntar, y
-        repetir lo ya resuelto sería pagar el portal por gusto.
-
-        Si el portal no devuelve nada para una etiqueta NO se toca el registro: el
-        listado oculta ciertos activos (bajas, fuera del alcance del usuario), así
-        que un vacío significa «no se pudo confirmar», no «no existe». Ya está
-        marcado como no dado de alta por la búsqueda local, que es la lectura
-        prudente.
-
-        Lo que se encuentra POR SERIE pasa por el mismo tamiz que la búsqueda
-        local (`_conciliar_por_serie`): adoptar la etiqueta del SIPP cuando no
-        había, y preguntar cuando hay dos etiquetas distintas.
+        Todas y no solo las del levantamiento: la API no archiva los activos en la
+        misma empresa que el portal (un monitor resguardado en Aske puede estar en
+        Abastecedora), y la búsqueda local ya es global. Es UNA consulta sin
+        filtro de empresa (~6 s por todo el catálogo); si viene completa, las
+        ausencias se pueden dar por confirmadas.
         """
-        # También entran los que no traen etiqueta pero sí serie: el listado del
-        # portal busca por cualquiera de las dos, y sin esto un activo sin rótulo
-        # legible nunca se llegaba a confirmar.
-        candidatos = [r for r in db.listar_levantamiento_por_estatus(db.EST_NO_DADO_ALTA)
-                      if (r.etiqueta or "").strip() or _serie_buscable(r.no_serie)]
-        res = ResultadoBusquedaSipp()
-        if not candidatos:
-            return res
-        creds = credenciales.cargar()
-        if not creds or not creds[0]:
-            self.app.avisar(
-                f"{len(candidatos)} activo(s) no están en la caché local. Para "
-                "buscarlas en otras empresas configura las credenciales del SIPP "
-                "(botón ⚙).", NARANJA, duracion=9000)
-            return res
-        usuario, contrasena = creds
+        from core import activos_sipp
 
-        total = len(candidatos)
-        bucle = BucleRpa()
-        ctrl = ControlRpa(bucle.loop)
+        if not activos_sipp.hay_api():
+            return "la API del SIPP no está configurada (botón ⚙)", False
         ui_loop = asyncio.get_running_loop()
 
-        txt = ft.Text(f"Conectando al SIPP… (0/{total})", size=13)
-        barra = ft.ProgressBar(value=0)
-        # El detalle de qué se está buscando va a la vista, no solo un contador:
-        # son varios minutos y el usuario necesita ver que avanza sobre SUS
-        # activos, no sobre una barra anónima.
-        lista = ft.ListView(spacing=4, expand=True, auto_scroll=True)
+        def avance(hechas: int, total: int) -> None:
+            ui_loop.call_soon_threadsafe(
+                self._set_cargando, True,
+                f"Consultando el catálogo completo del SIPP… {hechas}/{total}")
 
-        def pedir_detener(_e=None) -> None:
-            ctrl.detener()
-            btn_detener.disabled = True
-            btn_detener.content = "Deteniendo…"
-            modal.refrescar()
-
-        btn_detener = boton_herramienta("Detener", on_click=pedir_detener,
-                                        destructivo=True)
-        modal = Modal(self.page, "Buscando activos en otras empresas", ancho=620,
-                      subtitulo=f"{total} activo(s) fuera de la caché local",
-                      acciones=[btn_detener])
-        # Cada consulta recarga la grid por AJAX: ~4 s entre navegación y espera.
-        minutos = max(1, round(total * 4 / 60))
-        modal.cuerpo.controls = [
-            ft.Text("Estos activos no están en las empresas descargadas. Se "
-                    "consultan uno por uno en el catálogo del SIPP —por etiqueta y, "
-                    "si no aparece, por número de serie— sin filtro de empresa, "
-                    "para ver si pertenecen a otra.",
-                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
-            ft.Text(f"Son {total} consultas: unos {minutos} minuto(s). Puedes "
-                    "detenerlo cuando quieras; lo ya encontrado se conserva.",
-                    size=11, color=NARANJA, no_wrap=False),
-            txt, barra, ft.Container(lista, height=240),
-            ft.Text("Se abrirá un navegador; no lo cierres.", size=11, color=GRIS)]
-        modal.abrir()
-
-        def avance(i: int, r, resultado: str, color) -> None:
-            """Refleja el avance desde el hilo del RPA (marshalado a la UI)."""
-            def aplicar() -> None:
-                barra.value = i / total
-                txt.value = f"Consultando el portal… ({i}/{total})"
-                lista.controls.append(ft.Row(
-                    [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  "
-                             f"{r.etiqueta or r.no_serie or ''}",
-                             size=12, color=ft.Colors.ON_SURFACE, expand=True,
-                             no_wrap=False),
-                     ft.Text(resultado, size=11, color=color, no_wrap=False)],
-                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
-                modal.refrescar()
-            ui_loop.call_soon_threadsafe(aplicar)
-
-        encontrados: list = []
-        error = None
-
-        async def flujo() -> None:
-            nonlocal error
-            from core.rpa_sipp import SesionSipp, mensaje_amigable
-            try:
-                async with SesionSipp(headless=True) as sipp:
-                    await sipp.login(usuario, contrasena)
-                    # El catálogo no monta sin sesión configurada. CUÁL empresa da
-                    # igual —el ámbito se limpia antes de cada búsqueda—, pero
-                    # tiene que ser una que el usuario tenga: si la del registro
-                    # no aparece en su selector, se cae a la primera del catálogo
-                    # en vez de tumbar todo el respaldo.
-                    for intento in ((candidatos[0].empresa or "").strip(),
-                                    *NOMBRES_EMPRESAS):
-                        if not intento:
-                            continue
-                        try:
-                            await sipp.preparar_sesion_empresa(intento)
-                            break
-                        except ErrorSipp:
-                            continue
-                    else:
-                        raise ErrorSipp(
-                            "No se pudo configurar la sesión con ninguna empresa.")
-                    for i, r in enumerate(candidatos, 1):
-                        await ctrl.punto_control()
-                        filas = await sipp.buscar_activo_global(r.etiqueta or "")
-                        hallado_por_serie = False
-                        if not filas and _serie_buscable(r.no_serie):
-                            filas = await sipp.buscar_activo_global(
-                                serie=_serie_buscable(r.no_serie))
-                            hallado_por_serie = bool(filas)
-                        if filas:
-                            encontrados.append((r, filas[0], hallado_por_serie))
-                            avance(i, r,
-                                   f"en {filas[0].get('empresa') or '(sin empresa)'}",
-                                   VERDE)
-                        else:
-                            avance(i, r, "no aparece en el portal", GRIS)
-            except RpaDetenido:
-                pass
-            except Exception as exc:  # noqa: BLE001 — se reporta al usuario
-                error = mensaje_amigable(exc)
-
+        self._set_cargando(True, "Consultando el SIPP por API…")
         try:
-            await asyncio.wrap_future(bucle.enviar(flujo()))
-        finally:
-            bucle.cerrar()
-            modal.cerrar()
-
-        for r, datos, hallado_por_serie in encontrados:
-            if hallado_por_serie:
-                self._conciliar_por_serie(r, datos, res)
-            else:
-                self._aplicar_resultado_sipp(r, datos)
-                res.hechos += 1
-        if error:
-            self.app.avisar(f"La consulta al portal falló: {error}", NARANJA,
-                            duracion=9000)
-        return res
+            res = await asyncio.to_thread(activos_sipp.refrescar_todas_api, avance)
+        except Exception as exc:  # noqa: BLE001 — se sigue con la caché
+            self._set_cargando(False)
+            return f"la API no respondió ({exc})", False
+        self._set_cargando(False)
+        if not res["completo"]:
+            return "la API no devolvió el catálogo completo", False
+        return "", True
 
     def _marcar_no_dado_alta(self, r: "db.Levantamiento") -> None:
         db.actualizar_estatus_levantamiento(r.id, db.EST_NO_DADO_ALTA, None, None)
@@ -2208,7 +2124,8 @@ class SeccionRegistroActivos:
                 r.id, id_tipo_activo=id_tipo_nuevo, datos=prefill,
                 no_serie=serie_nueva, nombre_insumo=limpio)
 
-    def _clasificar_contra_sipp(self, registros: list) -> tuple:
+    def _clasificar_contra_sipp(self, registros: list,
+                                confirmar_ausentes: bool = True) -> tuple:
         """(hilo) Resuelve cada registro contra la caché del SIPP.
 
         Devuelve `(hechos, ambiguos, por_serie)`, con
@@ -2226,23 +2143,11 @@ class SeccionRegistroActivos:
         paso, activos que SÍ están en el SIPP salían «no dados de alta» y el RPA
         los habría duplicado.
         """
-        from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
 
-        # Refresco previo por API (HTTP, sin navegador ni login) de las empresas que
-        # los registros mencionan: la comparación es contra el SIPP de AHORA. Es
-        # best-effort; si la API no está configurada o falla, se usa la caché tal
-        # como esté, que es el comportamiento de siempre.
-        if activos_sipp.hay_api():
-            for nombre in {(r.empresa or "").strip() for r in registros}:
-                idemp = ID_POR_EMPRESA.get(nombre)
-                if idemp is None:
-                    continue
-                try:
-                    activos_sipp.descargar_activos_api(idemp, nombre)
-                except Exception:  # noqa: BLE001 — se cae a la caché existente
-                    pass
-
+        # El refresco por API ya NO va aquí: lo hace `_buscar` antes, sobre TODAS
+        # las empresas (ver `_refrescar_cache_api`). Refrescar solo las del
+        # levantamiento no encontraba lo que la API archiva en otra empresa.
         candidatos = db.activos_sipp_por_etiquetas(
             [(r.etiqueta or "") for r in registros])
         por_serie_cache = db.activos_sipp_por_series(
@@ -2257,14 +2162,20 @@ class SeccionRegistroActivos:
                 opciones = por_serie_cache.get(serie.upper(), []) if serie else []
                 hallado_por_serie = bool(opciones)
             if not opciones:
-                self._marcar_no_dado_alta(r)
-                res.hechos += 1
+                # Solo con el catálogo COMPLETO una ausencia prueba algo. Con una
+                # caché parcial, marcarlo «no dado de alta» es invitar al RPA a
+                # duplicar un activo que sí existe: se deja como estaba.
+                if confirmar_ausentes:
+                    self._marcar_no_dado_alta(r)
+                    res.hechos += 1
+                else:
+                    res.sin_confirmar += 1
                 continue
             idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
             propio = next((c for c in opciones
                            if c.get("id_empresa") == idemp), None) if idemp else None
             elegido = propio if propio is not None else (
-                opciones[0] if len(opciones) == 1 else None)
+                opciones[0] if len(opciones) == 1 else _mismo_activo(r, opciones))
             if elegido is None:
                 res.ambiguos.append((r, opciones))
                 continue
