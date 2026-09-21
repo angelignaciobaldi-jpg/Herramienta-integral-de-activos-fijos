@@ -2673,6 +2673,12 @@ class SeccionRegistroActivos:
                 fila["estatus"] = reporte_altas.ALTA
                 fila["observacion"] = (f"Etiqueta generada: {etiqueta_gen}"
                                        if etiqueta_gen else "Alta registrada")
+                # Se dice DÓNDE quedó lo que el insumo no aceptaba como detalle:
+                # quien busque la marca en su campo no la va a encontrar ahí.
+                if sipp.ultimos_en_descripcion:
+                    fila["observacion"] += (
+                        f" · {', '.join(sipp.ultimos_en_descripcion)} en la "
+                        f"Descripción (el insumo no tiene esos campos)")
             # Un registro con error (insumo no hallado en el modal, campo, red…)
             # NO aborta el lote: se anota y se sigue con el siguiente.
             except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
@@ -3831,6 +3837,10 @@ class SeccionRegistroActivos:
                         detalle = "; ".join(f"{rotulos.get(ng, ng)} → {motivo}"
                                             for ng, motivo in no_aplicados)
                         fila["observacion"] += f" Sin aplicar: {detalle}"
+                    if resultado.get("en_descripcion"):
+                        fila["observacion"] += (
+                            f" {', '.join(resultado['en_descripcion'])} en la "
+                            f"Descripción (el insumo no tiene esos campos).")
                     aplicados.append(r)
                 # Detenido a media captura: NADA se guardó de este activo (no se
                 # llegó a Guardar), así que queda pendiente tal cual para reanudar.

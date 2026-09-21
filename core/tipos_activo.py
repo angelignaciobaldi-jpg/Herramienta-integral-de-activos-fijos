@@ -140,6 +140,15 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 grupo="Resguardo"),
     CampoActivo("FH_ASIGNACION", "dt_FH_ASIGNACION", "Fecha de asignación", "date",
                 grupo="Resguardo"),
+    # Características que el inventario en Excel trae para CUALQUIER activo. En el
+    # SIPP son «Detalles Insumo» —existen o no según el insumo elegido—, así que
+    # se piden en todos los tipos y el RPA, si el insumo no tiene ese rótulo, las
+    # deja en la Descripción (ver SesionSipp._detalles_a_descripcion): el dato
+    # llega al SIPP de una u otra forma, en vez de perderse en silencio.
+    CampoActivo("marca", "", "Marca", "text", grupo="Detalles Insumo", detalle=True),
+    CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo", detalle=True),
+    CampoActivo("cliente", "", "Cliente", "text", grupo="Detalles Insumo",
+                detalle=True),
 ]
 
 # --- Campos EXTRA / OVERRIDE por tipo -----------------------------------------
@@ -206,14 +215,20 @@ def campos_de_tipo(id_tipo: "int | None") -> list[CampoActivo]:
 
     Un campo del tipo con la MISMA `clave` que un común lo REEMPLAZA (override);
     con clave nueva se AÑADE al final."""
-    resultado = {c.clave: c for c in CAMPOS_COMUNES}
-    if id_tipo is not None:
-        for campo in CAMPOS_POR_TIPO.get(id_tipo, []):
-            resultado[campo.clave] = campo
-    # Conserva el orden: primero comunes (en su orden), luego los extra nuevos.
-    orden = [c.clave for c in CAMPOS_COMUNES]
-    extra = [k for k in resultado if k not in orden]
-    return [resultado[k] for k in orden if k in resultado] + [resultado[k] for k in extra]
+    propios = CAMPOS_POR_TIPO.get(id_tipo, []) if id_tipo is not None else []
+    por_clave = {c.clave: c for c in propios}
+    # 1. Los comunes que NO son detalle, en su orden (con el override del tipo).
+    base = [por_clave.get(c.clave, c) for c in CAMPOS_COMUNES if not c.detalle]
+    en_base = {c.clave for c in base}
+    # 2. Lo del tipo, en el orden en que lo declara: es el de la captura real del
+    #    portal (Equipo informático: Marca, Modelo, Tipo… Cliente, Cargador), y
+    #    meter los detalles comunes delante lo desordenaría.
+    del_tipo = [c for c in propios if c.clave not in en_base]
+    en_tipo = {c.clave for c in del_tipo}
+    # 3. Los detalles comunes que el tipo no declaró (Marca/Modelo/Cliente en una
+    #    silla, Cliente en un vehículo).
+    resto = [c for c in CAMPOS_COMUNES if c.detalle and c.clave not in en_tipo]
+    return base + del_tipo + resto
 
 
 def nombre_tipo(id_tipo: "int | None") -> str:

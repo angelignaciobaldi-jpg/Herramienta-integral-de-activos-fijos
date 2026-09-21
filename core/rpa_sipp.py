@@ -294,7 +294,8 @@ _JS_LLENAR_CAMPOS_DETALLE = r"""(args) => {
         .replace(/\s+/g, ' ').replace(/\s*:\s*$/, '').trim().toLowerCase();
     const inputs = [...document.querySelectorAll(
         "[ng-model*='DE_VALORCAMPODETALLE']")].filter(el => el.offsetParent !== null);
-    const pend = items.map(it => ({et: norm(it.etiqueta), val: it.valor, ok: false}));
+    const pend = items.map(it => ({et: norm(it.etiqueta), orig: it.etiqueta,
+                                   val: it.valor, ok: false}));
     for (const inp of inputs) {
         // Etiqueta de la fila: se busca el <label> del contenedor más cercano;
         // si no hay, se usa el texto del contenedor (sin el propio input).
@@ -314,8 +315,8 @@ _JS_LLENAR_CAMPOS_DETALLE = r"""(args) => {
         p.ok = true;
     }
     return {
-        llenados: pend.filter(p => p.ok).map(p => p.et),
-        faltantes: pend.filter(p => !p.ok).map(p => p.et),
+        llenados: pend.filter(p => p.ok).map(p => p.orig),
+        faltantes: pend.filter(p => !p.ok).map(p => p.orig),
         inputs_detectados: inputs.length,
     };
 }"""
@@ -365,6 +366,9 @@ class SesionSipp:
         self.browser: Browser | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
+        # Características del último alta que el insumo no tenía y quedaron en la
+        # Descripción (ver `_detalles_a_descripcion`), para que el reporte lo diga.
+        self.ultimos_en_descripcion: list = []
 
     # ------------------------------------------------------ ciclo de vida
     async def iniciar(self) -> "SesionSipp":
@@ -830,6 +834,42 @@ class SesionSipp:
         page = self._exigir_pagina()
         return await page.evaluate(_JS_LLENAR_CAMPOS_DETALLE, {"items": items})
 
+    async def _detalles_a_descripcion(self, ng_descripcion: str, detalles: dict,
+                                      faltantes: list) -> list:
+        """Deja en la DESCRIPCIÓN las características que el insumo no tiene.
+
+        Marca, Modelo, Cliente… son «Detalles Insumo»: el SIPP los muestra o no
+        según el insumo elegido. La herramienta los pide para cualquier activo
+        porque el inventario en Excel los trae, pero si el insumo no tiene ese
+        rótulo el dato no tenía dónde caer y se perdía EN SILENCIO —el resultado
+        del llenado ni se miraba—. La Descripción existe en todos los tipos: ahí va
+        «Marca: HERMAN MILLER · Modelo: SILLA VERSUS OPERATIVA».
+
+        Se lee lo que el campo ya tiene y solo se agrega lo que no esté: así una
+        modificación repetida no apila el mismo texto una y otra vez. Devuelve los
+        rótulos que se movieron a la Descripción. Best-effort: si el campo no está,
+        no aborta el alta.
+        """
+        piezas = [(e, str(detalles.get(e) or "").strip()) for e in faltantes]
+        piezas = [(e, v) for e, v in piezas if v]
+        if not piezas:
+            return []
+        try:
+            actual = (await self._valor_actual(ng_descripcion)).strip()
+        except Exception:  # noqa: BLE001 — sin campo no hay dónde escribir
+            return []
+        nuevas = [(e, v) for e, v in piezas
+                  if f"{e}: {v}".upper() not in actual.upper()]
+        if not nuevas:
+            return [e for e, _v in piezas]      # ya estaban de una vez anterior
+        texto = " · ".join(f"{e}: {v}" for e, v in nuevas)
+        try:
+            await self.set_input(ng_descripcion,
+                                 f"{actual} · {texto}" if actual else texto)
+        except Exception:  # noqa: BLE001 — no aplicable aquí: no aborta el alta
+            return []
+        return [e for e, _v in piezas]
+
     # ------------------------------------------------ módulo de Activos Fijos
     async def ir_a_catalogo_activos(self) -> None:
         """Navega al catálogo de Activos Fijos (#/ActivosFijosNuevo) y espera a que
@@ -1089,8 +1129,12 @@ class SesionSipp:
             except Exception:  # noqa: BLE001 — campo no aplicable: se omite, no aborta
                 continue
 
+        self.ultimos_en_descripcion = []
         if detalles:
-            await self.llenar_campos_detalle(detalles)
+            res = await self.llenar_campos_detalle(detalles)
+            self.ultimos_en_descripcion = await self._detalles_a_descripcion(
+                "filtrosAgregar.de_DescripcionActivo", detalles,
+                res.get("faltantes") or [])
 
         # Factura + precio desde la bandeja de compras (best-effort): nunca aborta
         # el alta; solo actúa si la serie es válida y existe la entrada de compra.
@@ -1316,8 +1360,12 @@ class SesionSipp:
             campos, punto_control=punto_control)
         cambios.extend(mas_cambios)
 
+        en_descripcion = []
         if detalles:
-            await self.llenar_campos_detalle(detalles)
+            res = await self.llenar_campos_detalle(detalles)
+            en_descripcion = await self._detalles_a_descripcion(
+                "filtrosEditar.de_DescripcionActivo", detalles,
+                res.get("faltantes") or [])
 
         # Última salida limpia: detenerse AQUÍ deja el activo intacto en el portal,
         # porque nada se guarda hasta pulsar Guardar. Pasado este punto el cambio ya
@@ -1333,7 +1381,8 @@ class SesionSipp:
             "botón Guardar de la edición del activo")
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
-        return {"cambios": cambios, "no_aplicados": no_aplicados}
+        return {"cambios": cambios, "no_aplicados": no_aplicados,
+                "en_descripcion": en_descripcion}
 
     async def _cambiar_insumo_edicion(self, insumo_id) -> "tuple | None":
         """Cambia el insumo del activo abierto en la EDICIÓN. Devuelve el
