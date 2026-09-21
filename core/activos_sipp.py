@@ -184,8 +184,8 @@ def refrescar_todas_api(progreso=None, hilos: int = 6) -> dict:
 
     `progreso(hechas, total)` cuenta páginas y se llama desde el hilo que llama.
     Devuelve {empresas, activos, completo, errores: [motivo], sin_empresa}.
-    `completo` es False si alguna página falló o faltaron filas: con eso el
-    llamador sabe que todavía le conviene el respaldo por el portal.
+    `completo` es False si alguna página falló o faltaron filas: sin el
+    catálogo completo, que un activo no aparezca no prueba que falte en el SIPP.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
