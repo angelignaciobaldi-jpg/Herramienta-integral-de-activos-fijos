@@ -51,6 +51,15 @@ from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
 # Lado (px) de cada botón de acción de la tabla. Es el área táctil que Material
 # reserva para un IconButton: fijarle un `width` menor NO lo encoge —el widget
 # conserva su tamaño y se desborda—, así que la columna se dimensiona con este
+# Reparto de la fila de filtros. El ancho de cada campo se calcula al medir la
+# barra (`_ajustar_ancho_filtros`): entre el mínimo, donde el rótulo flotante
+# todavía se lee, y el máximo, donde estirarlos más solo deja campos enormes.
+_ANCHO_CHK = 210          # casilla «Cambios a mano en SIPP» (ancho fijo)
+_ANCHO_LIMPIAR = 150      # botón «Limpiar filtros» (aproximado, para el reparto)
+_FILTRO_MIN = 130
+_FILTRO_MAX = 172
+_SEP_FILTRO = 10          # el `spacing` de la fila
+
 # valor real. Fija el ancho mínimo de «Acciones», que debe caber las 6 posibles.
 _LADO_ACCION = 40
 
@@ -369,7 +378,9 @@ class SeccionRegistroActivos:
         # estándar de Material (los componentes no la tocan, para que Dropdown y
         # TextField sigan alineando sus bordes). El rótulo va FLOTANTE (encajado
         # en el borde), como en un modal, para no ganar altura sobre la fila.
-        _WF = 172
+        # Es el ancho de ARRANQUE: `_ajustar_ancho_filtros` lo recalcula en cuanto
+        # la barra se mide, y en cada cambio de tamaño de la ventana.
+        _WF = _FILTRO_MAX
 
         def _mk_dd(col, etiqueta):
             _, campo = campo_opciones(
@@ -388,9 +399,18 @@ class SeccionRegistroActivos:
         self.dd_f_empresa = _mk_dd("empresa", "Empresa")
         self.dd_f_sucursal = _mk_dd("sucursal", "Sucursal")
         self.dd_f_departamento = _mk_dd("departamento", "Departamento")
-        self.tf_f_insumo = _mk_tf("nombre_insumo", "Nombre insumo")
+        # Rótulos CORTOS: los tres van juntos, así que «Insumo · Etiqueta · Serie»
+        # se entiende igual que los nombres largos de las columnas, y es lo que
+        # permite que el campo se angoste sin que el texto se parta en dos
+        # renglones (a 130 px, «Nombre insumo» ya lo hacía).
+        self.tf_f_insumo = _mk_tf("nombre_insumo", "Insumo")
         self.tf_f_etiqueta = _mk_tf("etiqueta", "Etiqueta")
-        self.tf_f_serie = _mk_tf("no_serie", "No. de serie")
+        self.tf_f_serie = _mk_tf("no_serie", "Serie")
+        # Los seis campos se conservan para redimensionarlos con la ventana (ver
+        # `_ajustar_ancho_filtros`).
+        self._campos_filtro = [self.dd_f_empresa, self.dd_f_sucursal,
+                               self.dd_f_departamento, self.tf_f_insumo,
+                               self.tf_f_etiqueta, self.tf_f_serie]
         self._btn_limpiar_filtros = boton_herramienta(
             "Limpiar filtros", ft.Icons.FILTER_ALT_OFF, self._limpiar_filtros_col)
         self._chk_manuales = ft.Checkbox(
@@ -399,19 +419,27 @@ class SeccionRegistroActivos:
                     "cambiar en el portal (hoy: el empleado de resguardo, que va "
                     "por «Reasignación»)",
             on_change=self._alternar_filtro_manuales)
-        # «Limpiar filtros» NO va aquí: al final de la fila empujaba la casilla a
-        # un segundo renglón, con la fila de filtros a medias y un hueco enorme a
-        # la derecha. Va debajo, donde no compite por el ancho.
+        # «Limpiar filtros» va AL FINAL de la fila, después de la casilla: cuando
+        # el ancho no alcanza, los dos bajan juntos al segundo renglón y el bloque
+        # de filtros nunca pasa de dos líneas.
         self.barra_filtros = ft.Row(
             [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
              # Con ancho fijo: un Checkbox sin ancho reclama el de su etiqueta más
              # su holgura, y el Row lo empujaba a un segundo renglón teniendo
              # sitio de sobra.
-             ft.Container(self._chk_manuales, width=210)],
+             ft.Container(self._chk_manuales, width=_ANCHO_CHK),
+             self._btn_limpiar_filtros],
             spacing=10, run_spacing=10, wrap=True, expand=True,
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        # Envoltorio que SE MIDE: los campos no tienen un ancho bueno para todas
+        # las ventanas. Con uno fijo, en cuanto la ventana se angosta un poco la
+        # casilla cae a otro renglón y la fila queda a medias con un hueco al
+        # lado. Aquí se reparte el ancho real entre los seis.
+        self._caja_filtros = ft.Container(
+            self.barra_filtros, expand=True,
+            on_size_change=self._ajustar_ancho_filtros, size_change_interval=120)
 
         # Barra contextual de RPA (según la pestaña activa).
         self._barra_rpa = ft.Container()
@@ -492,13 +520,9 @@ class SeccionRegistroActivos:
                        run_spacing=8),
                 # Filtros por columna + la acción de RPA de la pestaña, en la MISMA
                 # línea: filtros a la izquierda, botón de RPA a la derecha.
-                ft.Row([self.barra_filtros, self._barra_rpa],
+                ft.Row([self._caja_filtros, self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                # Debajo y a la izquierda: es una acción sobre los filtros de
-                # arriba, no un filtro más, y así no les roba ancho.
-                ft.Row([self._btn_limpiar_filtros],
-                       alignment=ft.MainAxisAlignment.START),
                 # Antes iban superpuestos en un Stack con `expand`; como se
                 # alternan por `visible`, apilarlos basta y evita la altura sin
                 # acotar que un Stack expandido metería en la columna con scroll.
@@ -568,6 +592,33 @@ class SeccionRegistroActivos:
                                     self._filtros_col, self._ids_manuales)
 
     # ------------------------------------------------ filtros por columna
+    def _ajustar_ancho_filtros(self, e=None) -> None:
+        """Reparte el ancho medido entre los seis campos del filtro.
+
+        Con un ancho fijo, la casilla «Cambios a mano en SIPP» caía a otro
+        renglón en cuanto la ventana se angostaba —dejando la fila a medias y un
+        hueco a la derecha—, y volvía a subir al maximizar. Aquí los campos se
+        encogen hasta `_FILTRO_MIN` con tal de que todo quepa en UNA línea.
+
+        Por debajo de eso no se sigue apretando: ilegible no sirve de nada, así
+        que se deja que el `wrap` de la fila los acomode en dos renglones, que es
+        el comportamiento correcto en una ventana angosta.
+        """
+        ancho = getattr(e, "width", None) or 0
+        if ancho <= 0:
+            return
+        # Lo que queda para los campos: el ancho medido menos la casilla y los
+        # seis separadores (uno por hueco entre controles).
+        disponible = (ancho - _ANCHO_CHK - _ANCHO_LIMPIAR
+                      - _SEP_FILTRO * (len(self._campos_filtro) + 1))
+        nuevo = max(_FILTRO_MIN, min(_FILTRO_MAX,
+                                     int(disponible / len(self._campos_filtro))))
+        if self._campos_filtro and self._campos_filtro[0].width == nuevo:
+            return          # sin cambio: no se repinta
+        for campo in self._campos_filtro:
+            campo.width = nuevo
+        self._safe_update()
+
     def _set_filtro_col(self, columna: str, valor: str) -> None:
         """Aplica/actualiza el filtro de una columna y repinta desde la página 1."""
         valor = (valor or "").strip()
