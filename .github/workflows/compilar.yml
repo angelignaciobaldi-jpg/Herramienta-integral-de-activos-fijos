@@ -93,7 +93,11 @@ jobs:
           # sistema (ui/tema.py -> registrar_fuente). Con --add-data fijo, un repo
           # sin la carpeta tumbaría el build; así, agregarla no exige tocar el CI.
           if (Test-Path "Fuentes") { $datos += @("--add-data", "Fuentes:Fuentes") }
+          # --icon: sin él el .exe (y la ventana de Flet que lanza) llevaba el ícono
+          # genérico de Flet en la barra de tareas. construir.bat ya lo tenía; el
+          # CI, que es el que publica, no.
           flet pack app.py -n "ActivosFijos" -D $datos `
+            --icon "Imagenes\icon.ico" `
             --hidden-import openpyxl `
             --hidden-import truststore `
             --pyinstaller-build-args=--collect-all=playwright `
