@@ -688,6 +688,22 @@ def _vigilar_ventana(page: ft.Page) -> None:
     page.window.on_event = on_event
 
 
+def _ruta_icono() -> str:
+    """Ruta ABSOLUTA del ícono de la ventana ("" si no está).
+
+    Antes era "Imagenes/icon.ico", relativa: en la app instalada el directorio de
+    trabajo es la carpeta de instalación y PyInstaller deja los datos en
+    `_internal\\Imagenes\\`, así que la ruta no existía y la barra de tareas
+    mostraba el ícono genérico de Flet. Se busca donde de verdad está: junto a
+    los datos empaquetados y, de respaldo, en la raíz, donde lo copia el
+    instalador para los accesos directos."""
+    for ruta in (os.path.join(rutas.BUNDLE, "Imagenes", "icon.ico"),
+                 os.path.join(rutas.INSTALL, "icon.ico")):
+        if os.path.exists(ruta):
+            return ruta
+    return ""
+
+
 async def main(page: ft.Page) -> None:
     page.title = TITULO_APP
     page.locale_configuration = ft.LocaleConfiguration(
@@ -695,7 +711,9 @@ async def main(page: ft.Page) -> None:
                            ft.Locale("en", "US")],
         current_locale=ft.Locale("es", "MX"),
     )
-    page.window.icon = "Imagenes/icon.ico"
+    icono = _ruta_icono()
+    if icono:
+        page.window.icon = icono
     # Ancho mínimo = media pantalla en 1920 (el caso angosto real al acoplar la
     # ventana). Por debajo, un tablero de alta densidad deja de ser legible y no
     # tiene caso reacomodarlo; ver DISENO.md.
