@@ -10,11 +10,11 @@ con Inno Setup. Flujo:
      por la API de assets privados
      (GET /repos/{owner}/{repo}/releases/assets/{asset_id}) con
      `Accept: application/octet-stream`. Lo guarda como `nuevo_instalador.exe`.
-  4. Escribe un .bat temporal que espera ~3 s (a que la app cierre con
-     sys.exit()), corre el instalador en modo silencioso de Inno Setup
-     (`/SILENT /SUPPRESSMSGBOXES /NORESTART`), REINICIA la app ya actualizada y
-     luego se borra a sí mismo y al instalador. El .bat se lanza desacoplado para
-     sobrevivir al cierre.
+  4. Escribe un .bat temporal, lo lanza con consola oculta y termina el proceso
+     (os._exit). El .bat espera a que la app muera —y la remata si no—, corre el
+     instalador en modo silencioso de Inno Setup, guarda su código de salida y
+     su log, REINICIA la app y se borra a sí mismo y al instalador (ver
+     `aplicar_y_salir`).
 
 Sin dependencias externas: usa solo la librería estándar (urllib), apto para
 empaquetar con PyInstaller.
@@ -200,10 +200,11 @@ class AutoUpdater:
 
     # ------------------------------------------- aplicar y reiniciar
     def aplicar_y_salir(self, ruta_instalador: str) -> None:
-        """Escribe el .bat, lo lanza desacoplado y cierra la app (sys.exit()).
+        """Escribe el .bat, lo lanza desacoplado y TERMINA el proceso (os._exit).
 
-        El .bat espera ~3 s, corre el instalador mostrando su barra de progreso
-        (/SILENT), REINICIA la app ya actualizada y se autolimpia."""
+        El .bat espera a que la app muera (y la remata si no), corre el
+        instalador mostrando su barra de progreso (/SILENT), REINICIA la app ya
+        actualizada y se autolimpia."""
         ruta_instalador = os.path.abspath(ruta_instalador)
         ruta_bat = os.path.join(self._dir_temporal(), NOMBRE_BAT)
         # Ruta de la app a reiniciar tras instalar (el mismo .exe en ejecución;
@@ -213,36 +214,53 @@ class AutoUpdater:
         nombre_exe = os.path.basename(exe)
         resultado = os.path.join(rutas.DATOS, NOMBRE_RESULTADO)
         log_inno = os.path.join(rutas.DATOS, NOMBRE_LOG_INSTALADOR)
-        # Dos cosas que este .bat aprendió por las malas:
+        # Lo que este .bat aprendió por las malas (cada punto es un equipo que no
+        # se actualizó, con log de Inno de por medio):
         #
-        # 1) ESPERAR A QUE LA APP MUERA DE VERDAD. Antes esperaba 3 s fijos. Si el
-        #    proceso seguía vivo, Inno no podía reemplazar el .exe en uso y
-        #    abortaba —en silencio, por /SUPPRESSMSGBOXES—; el .bat reiniciaba la
-        #    versión VIEJA y borraba el instalador, así que no quedaba ni rastro y
-        #    el anti-bucle daba esa release por aplicada para siempre. Ahora sondea
-        #    el proceso hasta ~60 s.
-        # 2) DEJAR CONSTANCIA. El código de salida del instalador se guarda, y el
-        #    log de Inno también: es lo único que permite decir QUÉ pasó en vez de
-        #    «no se actualizó».
+        # 1) LA APP NO SE CIERRA SOLA. Se lanzaba desde un manejador de Flet con
+        #    sys.exit(), que Flet atrapa como cualquier excepción: el proceso
+        #    seguía vivo. Inno encontraba «ActivosFijos» usando sus archivos,
+        #    abortaba por /SUPPRESSMSGBOXES y el .bat reiniciaba la versión vieja.
+        #    Ahora el proceso termina con os._exit, el .bat espera hasta ~20 s y, si
+        #    sigue algo vivo (la ventana de Flutter es otro proceso con el mismo
+        #    nombre), lo REMATA. Sin /T: el árbol de la app incluye a este .bat.
+        #    Además Inno recibe /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS para lo
+        #    que quede (p. ej. el node.exe del RPA, que vive dentro de la carpeta).
+        # 2) DEJAR CONSTANCIA. El código de salida del instalador y el log de Inno
+        #    se guardan: es lo único que permite decir QUÉ pasó.
+        # 3) SIN VENTANAS. El .bat corre con una consola OCULTA (CREATE_NO_WINDOW,
+        #    abajo). Lanzado sin consola, cada comando —tasklist, find, ping—
+        #    abría su propia ventana de Terminal, una tras otra.
         #
         # /SILENT (no /VERYSILENT) para que Inno muestre su barra de progreso.
         # 'ping -n' da esperas fiables en un proceso sin consola (a diferencia de
         # 'timeout', que necesita una consola interactiva).
+        #
+        # Las herramientas van con RUTA ABSOLUTA de System32: con solo el nombre,
+        # un PATH que tenga antes utilidades de Unix (Git, MSYS) resuelve `find`
+        # al de Unix, que no entiende /I, y la espera daba a la app por cerrada
+        # desde la primera vuelta.
+        sis = r"%SystemRoot%\System32"
         contenido = (
             "@echo off\r\n"
             "setlocal\r\n"
-            "rem Espera a que la aplicacion termine de cerrarse (hasta ~60 s).\r\n"
+            "rem Espera a que la aplicacion termine de cerrarse (hasta ~20 s).\r\n"
             "set INTENTOS=0\r\n"
             ":esperar\r\n"
-            f'tasklist /FI "IMAGENAME eq {nombre_exe}" 2>nul | '
-            f'find /I "{nombre_exe}" >nul\r\n'
+            f'"{sis}\\tasklist.exe" /FI "IMAGENAME eq {nombre_exe}" 2>nul | '
+            f'"{sis}\\find.exe" /I "{nombre_exe}" >nul\r\n'
             "if errorlevel 1 goto instalar\r\n"
             "set /a INTENTOS+=1\r\n"
-            "if %INTENTOS% GEQ 30 goto instalar\r\n"
-            "ping 127.0.0.1 -n 3 >nul\r\n"
+            "if %INTENTOS% GEQ 10 goto rematar\r\n"
+            f'"{sis}\\PING.EXE" 127.0.0.1 -n 3 >nul\r\n'
             "goto esperar\r\n"
+            ":rematar\r\n"
+            "rem Sigue viva: se cierra a la fuerza (el usuario ya acepto actualizar).\r\n"
+            f'"{sis}\\taskkill.exe" /F /IM "{nombre_exe}" >nul 2>&1\r\n'
+            f'"{sis}\\PING.EXE" 127.0.0.1 -n 3 >nul\r\n'
             ":instalar\r\n"
             f'"{ruta_instalador}" /SILENT /SUPPRESSMSGBOXES /NORESTART '
+            "/CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /NORESTARTAPPLICATIONS "
             f'/LOG="{log_inno}"\r\n'
             # Entre paréntesis a propósito: 'echo %ERRORLEVEL%> fichero' con un
             # código de UN dígito lo lee cmd como «redirige el flujo 5», y el
@@ -254,14 +272,19 @@ class AutoUpdater:
             'del "%~f0"\r\n'
         )
         try:
-            with open(ruta_bat, "w", encoding="ascii") as fh:
+            # newline="": el contenido ya trae \r\n, y el modo texto de Windows
+            # lo convertía en \r\r\n.
+            with open(ruta_bat, "w", encoding="ascii", newline="") as fh:
                 fh.write(contenido)
         except OSError as exc:
             raise ErrorActualizacion(f"No se pudo crear el script de actualización: {exc}") from exc
 
         flags = 0
         if os.name == "nt":
-            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            # CREATE_NO_WINDOW y no DETACHED_PROCESS: con DETACHED el .bat no tiene
+            # consola, y Windows le crea una NUEVA —visible— a cada comando que
+            # lanza. Con la consola oculta los comandos la heredan y no se ve nada.
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         subprocess.Popen(
             ["cmd", "/c", ruta_bat],
             creationflags=flags,
@@ -270,7 +293,11 @@ class AutoUpdater:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        sys.exit(0)
+        # os._exit y no sys.exit: esto se llama desde un manejador de Flet, que
+        # atrapa el SystemExit como cualquier otra excepción y el proceso SIGUE
+        # VIVO, con sus archivos abiertos. Es lo que hacía abortar al instalador.
+        # La base no pierde nada: cada escritura se confirma al momento.
+        os._exit(0)
 
     # ---------------------------------------------------- orquestación
     def buscar_y_descargar(self, al_iniciar_descarga=None) -> str | None:
