@@ -399,10 +399,16 @@ class SeccionRegistroActivos:
                     "cambiar en el portal (hoy: el empleado de resguardo, que va "
                     "por «Reasignación»)",
             on_change=self._alternar_filtro_manuales)
+        # «Limpiar filtros» NO va aquí: al final de la fila empujaba la casilla a
+        # un segundo renglón, con la fila de filtros a medias y un hueco enorme a
+        # la derecha. Va debajo, donde no compite por el ancho.
         self.barra_filtros = ft.Row(
             [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
-             self._chk_manuales, self._btn_limpiar_filtros],
+             # Con ancho fijo: un Checkbox sin ancho reclama el de su etiqueta más
+             # su holgura, y el Row lo empujaba a un segundo renglón teniendo
+             # sitio de sobra.
+             ft.Container(self._chk_manuales, width=210)],
             spacing=10, run_spacing=10, wrap=True, expand=True,
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -489,6 +495,10 @@ class SeccionRegistroActivos:
                 ft.Row([self.barra_filtros, self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                # Debajo y a la izquierda: es una acción sobre los filtros de
+                # arriba, no un filtro más, y así no les roba ancho.
+                ft.Row([self._btn_limpiar_filtros],
+                       alignment=ft.MainAxisAlignment.START),
                 # Antes iban superpuestos en un Stack con `expand`; como se
                 # alternan por `visible`, apilarlos basta y evita la altura sin
                 # acotar que un Stack expandido metería en la columna con scroll.
