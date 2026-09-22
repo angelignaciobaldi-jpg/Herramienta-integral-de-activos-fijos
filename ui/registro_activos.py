@@ -51,6 +51,15 @@ from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
 # Lado (px) de cada botón de acción de la tabla. Es el área táctil que Material
 # reserva para un IconButton: fijarle un `width` menor NO lo encoge —el widget
 # conserva su tamaño y se desborda—, así que la columna se dimensiona con este
+# Reparto de la fila de filtros. El ancho de cada campo se calcula al medir la
+# barra (`_ajustar_ancho_filtros`): entre el mínimo, donde el rótulo flotante
+# todavía se lee, y el máximo, donde estirarlos más solo deja campos enormes.
+_ANCHO_CHK = 210          # casilla «Cambios a mano en SIPP» (ancho fijo)
+_ANCHO_LIMPIAR = 150      # botón «Limpiar filtros» (aproximado, para el reparto)
+_FILTRO_MIN = 130
+_FILTRO_MAX = 172
+_SEP_FILTRO = 10          # el `spacing` de la fila
+
 # valor real. Fija el ancho mínimo de «Acciones», que debe caber las 6 posibles.
 _LADO_ACCION = 40
 
@@ -189,6 +198,25 @@ def _serie_buscable(serie: str | None) -> str:
     if limpia.upper() in _SERIES_VACIAS or len(limpia) < 5:
         return ""
     return limpia
+
+
+def _color_fila(es_parcial: bool, modificado: bool) -> "str | None":
+    """Fondo de la fila en el listado.
+
+    - ÁMBAR: posible coincidencia; el activo todavía no se confirma en el SIPP.
+    - AZUL: tiene cambios hechos aquí que aún no se envían al portal. Sin esto,
+      un registro editado en la ficha o reconciliado con «Comparar SIPP vs Excel»
+      se veía igual que los demás y había que entrar uno por uno para saber
+      cuáles faltaban por mandar.
+
+    La duda gana al cambio pendiente: mientras no se sepa si es el mismo activo,
+    eso es lo primero que hay que resolver.
+    """
+    if es_parcial:
+        return ft.Colors.with_opacity(0.12, NARANJA)
+    if modificado:
+        return ft.Colors.with_opacity(0.18, AZUL)
+    return None
 
 
 def _mismo_activo(r, opciones: list) -> "dict | None":
@@ -338,6 +366,11 @@ class SeccionRegistroActivos:
         # distintos; texto (insumo/etiqueta/serie) como "contiene". Se combinan
         # entre sí; el filtrado lo hace SQLite.
         self._filtros_col: dict = {}
+        # Ids de los registros que hay que cambiar A MANO en el SIPP. No es
+        # un filtro de SQL: sale de comparar el levantamiento con la foto del
+        # portal, así que se calcula al activarlo y se pasa a la consulta.
+        self._solo_manuales = False
+        self._ids_manuales: "list[int] | None" = None
         # Rótulo corto para la opción "sin filtro" (así no se corta en el combo).
         self._TODOS = {"empresa": "Todas", "sucursal": "Todas",
                        "departamento": "Todos"}
@@ -345,7 +378,9 @@ class SeccionRegistroActivos:
         # estándar de Material (los componentes no la tocan, para que Dropdown y
         # TextField sigan alineando sus bordes). El rótulo va FLOTANTE (encajado
         # en el borde), como en un modal, para no ganar altura sobre la fila.
-        _WF = 172
+        # Es el ancho de ARRANQUE: `_ajustar_ancho_filtros` lo recalcula en cuanto
+        # la barra se mide, y en cada cambio de tamaño de la ventana.
+        _WF = _FILTRO_MAX
 
         def _mk_dd(col, etiqueta):
             _, campo = campo_opciones(
@@ -364,18 +399,47 @@ class SeccionRegistroActivos:
         self.dd_f_empresa = _mk_dd("empresa", "Empresa")
         self.dd_f_sucursal = _mk_dd("sucursal", "Sucursal")
         self.dd_f_departamento = _mk_dd("departamento", "Departamento")
-        self.tf_f_insumo = _mk_tf("nombre_insumo", "Nombre insumo")
+        # Rótulos CORTOS: los tres van juntos, así que «Insumo · Etiqueta · Serie»
+        # se entiende igual que los nombres largos de las columnas, y es lo que
+        # permite que el campo se angoste sin que el texto se parta en dos
+        # renglones (a 130 px, «Nombre insumo» ya lo hacía).
+        self.tf_f_insumo = _mk_tf("nombre_insumo", "Insumo")
         self.tf_f_etiqueta = _mk_tf("etiqueta", "Etiqueta")
-        self.tf_f_serie = _mk_tf("no_serie", "No. de serie")
+        self.tf_f_serie = _mk_tf("no_serie", "Serie")
+        # Los seis campos se conservan para redimensionarlos con la ventana (ver
+        # `_ajustar_ancho_filtros`).
+        self._campos_filtro = [self.dd_f_empresa, self.dd_f_sucursal,
+                               self.dd_f_departamento, self.tf_f_insumo,
+                               self.tf_f_etiqueta, self.tf_f_serie]
         self._btn_limpiar_filtros = boton_herramienta(
             "Limpiar filtros", ft.Icons.FILTER_ALT_OFF, self._limpiar_filtros_col)
+        self._chk_manuales = ft.Checkbox(
+            label="Cambios a mano en SIPP", value=False,
+            tooltip="Solo los activos con algo que la herramienta no puede "
+                    "cambiar en el portal (hoy: el empleado de resguardo, que va "
+                    "por «Reasignación»)",
+            on_change=self._alternar_filtro_manuales)
+        # «Limpiar filtros» va AL FINAL de la fila, después de la casilla: cuando
+        # el ancho no alcanza, los dos bajan juntos al segundo renglón y el bloque
+        # de filtros nunca pasa de dos líneas.
         self.barra_filtros = ft.Row(
             [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
+             # Con ancho fijo: un Checkbox sin ancho reclama el de su etiqueta más
+             # su holgura, y el Row lo empujaba a un segundo renglón teniendo
+             # sitio de sobra.
+             ft.Container(self._chk_manuales, width=_ANCHO_CHK),
              self._btn_limpiar_filtros],
             spacing=10, run_spacing=10, wrap=True, expand=True,
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        # Envoltorio que SE MIDE: los campos no tienen un ancho bueno para todas
+        # las ventanas. Con uno fijo, en cuanto la ventana se angosta un poco la
+        # casilla cae a otro renglón y la fila queda a medias con un hueco al
+        # lado. Aquí se reparte el ancho real entre los seis.
+        self._caja_filtros = ft.Container(
+            self.barra_filtros, expand=True,
+            on_size_change=self._ajustar_ancho_filtros, size_change_interval=120)
 
         # Barra contextual de RPA (según la pestaña activa).
         self._barra_rpa = ft.Container()
@@ -456,7 +520,7 @@ class SeccionRegistroActivos:
                        run_spacing=8),
                 # Filtros por columna + la acción de RPA de la pestaña, en la MISMA
                 # línea: filtros a la izquierda, botón de RPA a la derecha.
-                ft.Row([self.barra_filtros, self._barra_rpa],
+                ft.Row([self._caja_filtros, self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 # Antes iban superpuestos en un Stack con `expand`; como se
@@ -520,10 +584,41 @@ class SeccionRegistroActivos:
         return None if self._tab == _TAB_TODOS else self._tab
 
     def _ids_actuales(self) -> list[int]:
-        """Ids de TODO lo que cumple pestaña + filtro (sin traer las filas)."""
-        return db.ids_levantamiento(self._estatus_tab(), self._filtro, self._filtros_col)
+        """Ids de TODO lo que cumple pestaña + filtro (sin traer las filas).
+
+        Incluye el filtro de «cambios a mano en SIPP»: «Seleccionar todos» debe
+        marcar lo que se está viendo, no lo que había sin ese filtro."""
+        return db.ids_levantamiento(self._estatus_tab(), self._filtro,
+                                    self._filtros_col, self._ids_manuales)
 
     # ------------------------------------------------ filtros por columna
+    def _ajustar_ancho_filtros(self, e=None) -> None:
+        """Reparte el ancho medido entre los seis campos del filtro.
+
+        Con un ancho fijo, la casilla «Cambios a mano en SIPP» caía a otro
+        renglón en cuanto la ventana se angostaba —dejando la fila a medias y un
+        hueco a la derecha—, y volvía a subir al maximizar. Aquí los campos se
+        encogen hasta `_FILTRO_MIN` con tal de que todo quepa en UNA línea.
+
+        Por debajo de eso no se sigue apretando: ilegible no sirve de nada, así
+        que se deja que el `wrap` de la fila los acomode en dos renglones, que es
+        el comportamiento correcto en una ventana angosta.
+        """
+        ancho = getattr(e, "width", None) or 0
+        if ancho <= 0:
+            return
+        # Lo que queda para los campos: el ancho medido menos la casilla y los
+        # seis separadores (uno por hueco entre controles).
+        disponible = (ancho - _ANCHO_CHK - _ANCHO_LIMPIAR
+                      - _SEP_FILTRO * (len(self._campos_filtro) + 1))
+        nuevo = max(_FILTRO_MIN, min(_FILTRO_MAX,
+                                     int(disponible / len(self._campos_filtro))))
+        if self._campos_filtro and self._campos_filtro[0].width == nuevo:
+            return          # sin cambio: no se repinta
+        for campo in self._campos_filtro:
+            campo.width = nuevo
+        self._safe_update()
+
     def _set_filtro_col(self, columna: str, valor: str) -> None:
         """Aplica/actualiza el filtro de una columna y repinta desde la página 1."""
         valor = (valor or "").strip()
@@ -536,9 +631,30 @@ class SeccionRegistroActivos:
         self._pagina = 0
         self._refrescar()
 
+    def _alternar_filtro_manuales(self, e=None) -> None:
+        """Activa/desactiva «solo los que hay que cambiar a mano en el SIPP».
+
+        Los ids se recalculan CADA VEZ que se activa: la lista cambia al reasignar
+        en el portal y volver a buscar, o al reconciliar conservando el SIPP."""
+        self._solo_manuales = bool(self._chk_manuales.value)
+        self._ids_manuales = self._calcular_ids_manuales() if self._solo_manuales else None
+        self._pagina = 0
+        self._refrescar()
+
+    @staticmethod
+    def _calcular_ids_manuales() -> list[int]:
+        """Ids con diferencias que el RPA no puede empujar (ver
+        comparacion_sipp.campos_manuales). Solo mira los dados de alta: sin foto
+        del SIPP no hay con qué comparar."""
+        return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                if comparacion_sipp.campos_manuales(r)]
+
     def _limpiar_filtros_col(self, _e=None) -> None:
         """Quita todos los filtros por columna y reinicia los controles."""
         self._filtros_col = {}
+        self._solo_manuales = False
+        self._ids_manuales = None
+        self._chk_manuales.value = False
         self.tf_f_insumo.value = self.tf_f_etiqueta.value = self.tf_f_serie.value = ""
         self.dd_f_empresa.value = self._TODOS["empresa"]
         self.dd_f_sucursal.value = self._TODOS["sucursal"]
@@ -570,13 +686,14 @@ class SeccionRegistroActivos:
     def _refrescar(self) -> None:
         """Repinta SOLO la página actual, pidiéndosela ya recortada a SQLite."""
         estatus, filtro = self._estatus_tab(), self._filtro
-        total = db.contar_levantamiento(estatus, filtro, self._filtros_col)
+        ids = self._ids_manuales
+        total = db.contar_levantamiento(estatus, filtro, self._filtros_col, ids)
         # Ajusta la página si quedó fuera de rango (p. ej. tras filtrar o borrar).
         ultima = max(0, (total - 1) // self._por_pagina) if total else 0
         self._pagina = min(max(0, self._pagina), ultima)
         pagina = db.listar_levantamiento_pagina(
             estatus, filtro, self._por_pagina, self._pagina * self._por_pagina,
-            self._filtros_col)
+            self._filtros_col, ids)
         # Ids visibles: evita re-consultar la tabla en cada clic de checkbox.
         self._ids_pagina = [r.id for r in pagina]
         # `refrescar=False`: el `_safe_update()` del final de este método ya
@@ -672,6 +789,20 @@ class SeccionRegistroActivos:
             etiqueta, color = _ESTATUS_UI.get(r.estatus_registro, ("—", GRIS))
             estatus = ft.Text(etiqueta, size=12, color=color,
                               weight=ft.FontWeight.W_500)
+        # Lo que la herramienta NO puede cambiar en el SIPP (hoy, el empleado de
+        # resguardo: va por «Reasignación»). Se marca en la misma celda del
+        # estatus para que se vea en el listado general, sin abrir activo por
+        # activo, y el detalle va en el tooltip.
+        manuales = comparacion_sipp.campos_manuales(r) if info else []
+        if manuales:
+            detalle = " · ".join(f"{d.campo.etiqueta}: {d.excel} (SIPP: {d.sipp})"
+                                 for d in manuales)
+            estatus = ft.Row(
+                [ft.Icon(ft.Icons.PERSON_SEARCH, size=16, color=NARANJA,
+                         tooltip=f"Hay que cambiarlo a mano en el SIPP — {detalle}"),
+                 estatus],
+                spacing=4, tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER)
         capturado = r.id_tipo_activo is not None
         foto = _foto_del_registro(r)
         tiene_imagen = bool(foto)
@@ -749,7 +880,7 @@ class SeccionRegistroActivos:
             r.no_serie or "—",
             estatus,
             acciones,
-        ], bgcolor=ft.Colors.with_opacity(0.12, NARANJA) if es_parcial else None)
+        ], bgcolor=_color_fila(es_parcial, bool(r.modificado)))
 
     def _set_ubic(self, id_lev: int, empresa: "str | None" = None,
                   sucursal: "str | None" = None, departamento: "str | None" = None,
@@ -847,7 +978,8 @@ class SeccionRegistroActivos:
         Cuentan lo MISMO que muestra la tabla, filtros incluidos: con el filtro de
         insumo puesto en «laptop», la pestaña decía 166 junto a nueve filas, y eso
         se lee como registros perdidos, no como un filtro activo."""
-        c = db.contar_levantamiento_por_estatus(self._filtro, self._filtros_col)
+        c = db.contar_levantamiento_por_estatus(self._filtro, self._filtros_col,
+                                                self._ids_manuales)
         conteos = {_TAB_TODOS: c.get("total", 0),
                    db.EST_DADO_ALTA: c.get(db.EST_DADO_ALTA, 0),
                    db.EST_NO_DADO_ALTA: c.get(db.EST_NO_DADO_ALTA, 0)}
@@ -1181,16 +1313,14 @@ class SeccionRegistroActivos:
             if no_empujables:
                 # El empleado merece su propia explicación: no es que haya que
                 # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
-                # portal lo mueve a su flujo de Reasignación). Decir «se elige a
-                # mano allá» mandaba al usuario a buscar un botón que no existe.
-                # El empleado merece su propia explicación: no es que haya que
-                # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
                 # portal lo manda a su flujo de Reasignación). Decir «se elige a
                 # mano allá» mandaba al usuario a buscar un botón que no existe.
                 partes = []
                 if any("mpleado" in c for c in no_empujables):
                     partes.append("El empleado de resguardo se cambia con "
-                                  "«Reasignación», no en la edición del activo.")
+                                  "«Reasignación», no en la edición del activo. "
+                                  "El activo queda marcado en el listado (casilla "
+                                  "«Cambios a mano en SIPP»).")
                 if insumo_sin_catalogo:
                     partes.append("El insumo no está en el catálogo del SIPP con "
                                   "ese nombre exacto: elígelo en la ficha del "

@@ -784,13 +784,24 @@ COLUMNAS_FILTRABLES = _FILTRO_EXACTO + _FILTRO_CONTIENE
 
 
 def _filtro_sql(estatus: str | None, filtro: str,
-                filtros: dict | None = None) -> tuple[str, list]:
+                filtros: dict | None = None,
+                ids: "list[int] | None" = None) -> tuple[str, list]:
     """Arma el WHERE compartido por las consultas paginadas del levantamiento.
 
     `filtro` es la búsqueda global (varios campos). `filtros` son los filtros por
     columna: {columna: valor} — exacto para las categóricas, contiene para texto.
+    `ids` acota a esos registros: es para los filtros que NO se pueden expresar en
+    SQL porque comparan el levantamiento contra la foto del SIPP (p. ej. «los que
+    hay que cambiar a mano en el portal»); la pantalla calcula los ids y los pasa
+    aquí para que la paginación siga siendo de SQLite. Una lista VACÍA filtra a
+    cero, que es lo correcto: no hay ninguno.
     """
     cond, params = [], []
+    if ids is not None:
+        if not ids:
+            return " WHERE 0", []
+        cond.append(f"id IN ({','.join('?' * len(ids))})")
+        params += list(ids)
     if estatus:
         cond.append("estatus_registro = ?")
         params.append(estatus)
@@ -830,11 +841,12 @@ _ORDEN_LEV = " ORDER BY creado_en DESC, id DESC"
 
 def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
                                 limite: int = 25, offset: int = 0,
-                                filtros: dict | None = None) -> list[Levantamiento]:
+                                filtros: dict | None = None,
+                                ids: "list[int] | None" = None) -> list[Levantamiento]:
     """Devuelve SOLO la página pedida. Con inventarios de miles de activos,
     materializar la tabla completa para mostrar 25 filas es el mayor costo de la
     pantalla; aquí el filtrado y el recorte los hace SQLite."""
-    where, params = _filtro_sql(estatus, filtro, filtros)
+    where, params = _filtro_sql(estatus, filtro, filtros, ids)
     with _conectar() as con:
         filas = con.execute(
             f"SELECT * FROM levantamiento{where}{_ORDEN_LEV} LIMIT ? OFFSET ?",
@@ -843,26 +855,29 @@ def listar_levantamiento_pagina(estatus: str | None = None, filtro: str = "",
 
 
 def contar_levantamiento(estatus: str | None = None, filtro: str = "",
-                         filtros: dict | None = None) -> int:
+                         filtros: dict | None = None,
+                         ids: "list[int] | None" = None) -> int:
     """Cuántos registros cumplen el filtro (para la paginación)."""
-    where, params = _filtro_sql(estatus, filtro, filtros)
+    where, params = _filtro_sql(estatus, filtro, filtros, ids)
     with _conectar() as con:
         return con.execute(
             f"SELECT COUNT(*) FROM levantamiento{where}", params).fetchone()[0]
 
 
 def ids_levantamiento(estatus: str | None = None, filtro: str = "",
-                      filtros: dict | None = None) -> list[int]:
+                      filtros: dict | None = None,
+                      ids: "list[int] | None" = None) -> list[int]:
     """Ids de todos los registros que cumplen el filtro (para 'Seleccionar todos'
     sin traer las filas completas)."""
-    where, params = _filtro_sql(estatus, filtro, filtros)
+    where, params = _filtro_sql(estatus, filtro, filtros, ids)
     with _conectar() as con:
         return [f[0] for f in con.execute(
             f"SELECT id FROM levantamiento{where}", params).fetchall()]
 
 
 def contar_levantamiento_por_estatus(filtro: str = "",
-                                     filtros: dict | None = None) -> dict[str, int]:
+                                     filtros: dict | None = None,
+                                     ids: "list[int] | None" = None) -> dict[str, int]:
     """Devuelve {estatus: cantidad} más 'total'. Es una sola consulta agregada:
     con miles de registros, listar la tabla completa solo para contarla es caro.
 
@@ -870,7 +885,7 @@ def contar_levantamiento_por_estatus(filtro: str = "",
     pestañas, al lado de la tabla: contar sobre todo el inventario mientras la
     tabla muestra lo filtrado hacía leer «166» junto a nueve filas, que se lee
     como datos perdidos."""
-    where, params = _filtro_sql(None, filtro, filtros)
+    where, params = _filtro_sql(None, filtro, filtros, ids)
     with _conectar() as con:
         filas = con.execute(
             "SELECT estatus_registro, COUNT(*) AS n FROM levantamiento"
