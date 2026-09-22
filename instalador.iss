@@ -21,6 +21,11 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 ; 'lowest' = no solicita elevacion (sin UAC). Requisito para actualizar sin admin.
 PrivilegesRequired=lowest
+; Al terminar, avisa al shell (SHChangeNotify) para que vuelva a leer los iconos.
+; Windows los guarda en cache POR RUTA: las versiones anteriores se compilaron sin
+; icono propio, y como la ruta del .exe no cambia, la barra de tareas seguia
+; mostrando el de PyInstaller aunque el archivo nuevo ya trajera el nuestro.
+ChangesAssociations=yes
 
 [Files]
 ; Carpeta de salida de flet pack/PyInstaller (onedir). El nombre 'ActivosFijos'
@@ -41,5 +46,9 @@ Name: "{group}\Herramientas Activos Fijos"; Filename: "{app}\ActivosFijos.exe"; 
 Name: "{autodesktop}\Herramientas Activos Fijos"; Filename: "{app}\ActivosFijos.exe"; WorkingDir: "{app}"; IconFilename: "{app}\icon.ico"; AppUserModelID: "QuetzalticSolutions.HerramientasActivosFijos"
 
 [Run]
+; Refresca la cache de iconos del usuario (herramienta de Windows, sin admin). Va
+; ademas de ChangesAssociations porque este corre TAMBIEN en la actualizacion
+; silenciosa, que es justo donde el icono viejo se quedaba pegado.
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden skipifdoesntexist
 ; Ejecuta la app al terminar la instalacion (no en modo silencioso/actualizacion).
 Filename: "{app}\ActivosFijos.exe"; Description: "{cm:LaunchProgram,Herramientas Activos Fijos}"; Flags: nowait postinstall skipifsilent
