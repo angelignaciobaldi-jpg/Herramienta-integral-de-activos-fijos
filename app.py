@@ -363,9 +363,11 @@ class AppActivosFijos:
         self.page.update()
         if estado == "disponible":
             self.marcar_actualizacion_disponible(detalle)
-            self._dialogo_actualizacion(detalle)
+            await self._dialogo_actualizacion(detalle)
         elif estado == "al_dia":
-            self.avisar("Ya tienes la última versión instalada.", ft.Colors.GREEN_700)
+            self.avisar(
+                f"Ya tienes la última versión instalada ({_version_actual()}).",
+                ft.Colors.GREEN_700)
         else:
             # NO se dice «al día»: no se pudo comprobar. Se abre el diagnóstico,
             # que es la única forma de ver qué pasa en un equipo ajeno.
@@ -423,9 +425,9 @@ class AppActivosFijos:
             auto_updater.permitir_reintento()
             estado, detalle = await asyncio.to_thread(_comprobar_update_sync)
             if estado == "disponible":
-                self._dialogo_actualizacion(detalle)
+                await self._dialogo_actualizacion(detalle)
             elif estado == "al_dia":
-                self.avisar("Ya tienes la última versión instalada.",
+                self.avisar(f"Ya tienes la última versión instalada ({_version_actual()}).",
                             ft.Colors.GREEN_700)
             else:
                 await self._abrir_diagnostico_actualizacion(detalle)
@@ -441,33 +443,51 @@ class AppActivosFijos:
         modal.set_acciones(acciones)
         modal.abrir()
 
-    def _dialogo_actualizacion(self, tag: str) -> None:
+    async def _dialogo_actualizacion(self, tag: str) -> None:
+        """Ofrece la versión nueva diciendo QUÉ trae, para decidir si aplicarla ya.
+
+        Sin la lista, «Hay una nueva versión (1.1.6)» obligaba a actualizar a
+        ciegas —y la app se cierra al hacerlo—. La lista sale de GitHub y es
+        best-effort: si no se puede consultar, el modal se muestra igual, sin ella.
+        """
+        from core import auto_updater
+        from ui.componentes import Modal, boton_herramienta, boton_primario
+
+        cambios = await asyncio.to_thread(auto_updater.notas_de_version, tag)
+
         def aplicar(_e=None) -> None:
-            self.page.pop_dialog()
+            modal.cerrar()
             self.page.run_task(self._aplicar_update, tag)
 
-        self.page.show_dialog(
-            ft.AlertDialog(
-                modal=True,
-                title=ft.Row(
-                    [ft.Icon(ft.Icons.SYSTEM_UPDATE, color=ft.Colors.PRIMARY),
-                     ft.Text("Actualización disponible", weight=ft.FontWeight.BOLD)],
-                    spacing=10,
-                ),
-                content=ft.Text(
-                    f"Hay una nueva versión ({tag}).\n\n"
-                    "Al aplicarla, la aplicación se cerrará y se volverá a abrir "
-                    "automáticamente ya actualizada. Guarda tus pendientes antes "
-                    "de continuar.",
-                ),
-                actions=[
-                    ft.TextButton("Ahora no", on_click=lambda e: self.page.pop_dialog()),
-                    ft.FilledButton("Aplicar actualización", icon=ft.Icons.SYSTEM_UPDATE,
-                                    on_click=aplicar),
-                ],
-                actions_alignment=ft.MainAxisAlignment.END,
-            )
-        )
+        cuerpo = [ft.Text(f"Hay una nueva versión: {tag}. Tienes la "
+                          f"{_version_actual()}.", size=14,
+                          weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE)]
+        if cambios:
+            cuerpo.append(ft.Text("Qué trae:", size=13, weight=ft.FontWeight.W_600,
+                                  color=ft.Colors.ON_SURFACE))
+            cuerpo.append(ft.Column(
+                [ft.Row([ft.Icon(ft.Icons.CHECK, size=16, color=ft.Colors.PRIMARY),
+                         ft.Text(c, size=13, color=ft.Colors.ON_SURFACE,
+                                 no_wrap=False, expand=True)],
+                        spacing=8, vertical_alignment=ft.CrossAxisAlignment.START)
+                 for c in cambios],
+                spacing=8, tight=True))
+        cuerpo.append(ft.Text(
+            "Al aplicarla, la aplicación se cerrará y se volverá a abrir "
+            "automáticamente ya actualizada. Guarda tus pendientes antes de "
+            "continuar.", size=12, color=ft.Colors.ON_SURFACE_VARIANT,
+            no_wrap=False))
+
+        # Alto según los renglones: fijo, una lista corta dejaba medio modal en
+        # blanco. El tope lo mantiene dentro de la ventana con la lista completa.
+        alto = min(460, 180 + 28 * len(cambios))
+        modal = Modal(self.page, "Actualización disponible", ancho=640,
+                      alto_cuerpo=alto, subtitulo=f"Versión {tag}")
+        modal.cuerpo.controls = cuerpo
+        modal.set_acciones([
+            boton_herramienta("Ahora no", on_click=lambda _e: modal.cerrar()),
+            boton_primario("Aplicar actualización", ft.Icons.SYSTEM_UPDATE, aplicar)])
+        modal.abrir()
 
     async def _aplicar_update(self, tag: str) -> None:
         from core.auto_updater import AutoUpdater
@@ -493,7 +513,9 @@ class AppActivosFijos:
             return
         if ruta is None:
             self.page.pop_dialog()
-            self.avisar("Ya tienes la última versión instalada.", ft.Colors.GREEN_700)
+            self.avisar(
+                f"Ya tienes la última versión instalada ({_version_actual()}).",
+                ft.Colors.GREEN_700)
             return
         AutoUpdater().aplicar_y_salir(ruta)
 
@@ -528,6 +550,13 @@ async def _splash_descargando(page: ft.Page, tag: str) -> None:
         f"Descargando e instalando la versión {tag}.\n"
         "La aplicación se reiniciará automáticamente al terminar.",
     )
+
+
+def _version_actual() -> str:
+    """Versión instalada. Import perezoso: el tope de app.py solo carga flet y
+    core.rutas, para que un módulo roto no impida arrancar el actualizador."""
+    from core.version import __version__
+    return __version__
 
 
 def _comprobar_update_sync() -> tuple[str, str]:

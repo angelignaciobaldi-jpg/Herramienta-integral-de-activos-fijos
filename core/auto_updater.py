@@ -362,6 +362,63 @@ class AutoUpdater:
         return tempfile.gettempdir()
 
 
+# Prefijo convencional del commit -> cómo se le dice al usuario. Lo que no está
+# aquí (docs, chore, refactor, test…) es trabajo interno y no se lista.
+_TIPOS_CAMBIO = {"feat": "Nuevo", "fix": "Corregido", "perf": "Más rápido"}
+_RE_PREFIJO = re.compile(r"^(\w+)(?:\([^)]*\))?!?:\s*(.+)$")
+# Tope de renglones: el modal es para decidir si actualizar ahora, no un historial.
+_MAX_CAMBIOS = 12
+
+
+def notas_de_version(tag_nuevo: str, version_actual: str = VERSION_ACTUAL) -> list[str]:
+    """Qué trae la versión nueva, en renglones listos para mostrar. Nunca lanza.
+
+    Sale de los COMMITS entre la versión instalada y la nueva (API compare de
+    GitHub), no de la nota de la release: las notas hasta hoy dicen «ok» o son un
+    párrafo, y los commits de este repo ya describen cada cambio en español. Así
+    la lista existe aunque nadie la escriba al publicar, y cubre TODAS las
+    versiones que el equipo se saltó, no solo la última.
+
+    Se quitan los merges y el trabajo interno, y el prefijo técnico se traduce:
+    «fix: la búsqueda borraba…» -> «Corregido: la búsqueda borraba…».
+    Devuelve [] si no se puede consultar (sin token, sin red, versión local sin
+    tag como la de desarrollo): el modal se muestra igual, solo sin la lista.
+    """
+    try:
+        actualizador = AutoUpdater()
+        url = (f"{API}/repos/{actualizador.owner}/{actualizador.repo}/compare/"
+               f"{urllib.parse.quote(version_actual)}...{urllib.parse.quote(tag_nuevo)}")
+        datos = json.loads(actualizador._pedir(url, "application/vnd.github+json"))
+    except Exception:  # noqa: BLE001 — sin lista, pero la actualización sigue
+        return []
+    renglones, vistos = [], set()
+    for c in datos.get("commits", []):
+        if len(c.get("parents") or []) > 1:
+            continue                        # merge de un PR: no dice qué cambió
+        titulo = ((c.get("commit") or {}).get("message") or "").splitlines()
+        titulo = titulo[0].strip() if titulo else ""
+        m = _RE_PREFIJO.match(titulo)
+        if m:
+            etiqueta = _TIPOS_CAMBIO.get(m.group(1).lower())
+            if etiqueta is None:
+                continue                    # trabajo interno
+            texto = m.group(2).strip()
+            renglon = f"{etiqueta}: {texto[:1].upper()}{texto[1:]}"
+        elif titulo:
+            renglon = titulo
+        else:
+            continue
+        if renglon not in vistos:
+            vistos.add(renglon)
+            renglones.append(renglon)
+    # Lo más reciente primero: si hay que recortar, que se pierda lo más viejo.
+    renglones.reverse()
+    if len(renglones) > _MAX_CAMBIOS:
+        resto = len(renglones) - _MAX_CAMBIOS
+        renglones = renglones[:_MAX_CAMBIOS] + [f"…y {resto} cambio(s) más."]
+    return renglones
+
+
 def _codigo_ultima_instalacion() -> str:
     """Código con que terminó el instalador la última vez ("" si no hay rastro)."""
     try:
