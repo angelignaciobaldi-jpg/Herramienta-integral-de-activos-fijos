@@ -63,8 +63,16 @@ CAMPOS: list[CampoComparable] = [
     CampoComparable("nb_NombreInsumo", "Insumo", "insumo",
                     clave_datos="nb_NombreInsumo", columna="nombre_insumo",
                     modal="insumo"),
+    # La empresa SÍ se puede cambiar en la edición del portal, igual que la
+    # sucursal: se fija en el RESGUARDO del activo (`id_EmpresaResguardo`). El
+    # valor no sale de este `ng_model` —lo inyecta `_payload_alta` desde la
+    # columna del registro—, pero declararlo es lo que la marca como empujable.
+    # Darla por no empujable mandaba al usuario a cambiarla a mano en el portal
+    # para algo que la herramienta ya sabía hacer. No confundir con el EMPLEADO,
+    # que es lo único que la edición no permite tocar (va por Reasignación).
     CampoComparable("empresa", "Empresa", "empresa", columna="empresa",
-                    empujable=False),
+                    control="select",
+                    ng_model="filtrosAgregar.id_EmpresaResguardo"),
     # La sucursal SÍ viaja al SIPP: el RPA la fija en el RESGUARDO del activo
     # (`id_SucursalResguardo`, que el formulario de edición sí expone). El valor no
     # sale de este `ng_model` —lo inyecta `_payload_alta` desde la columna del
@@ -206,6 +214,22 @@ def comparar(registro) -> list[Diferencia]:
 def campos_distintos(registro) -> list[Diferencia]:
     """Solo los campos que difieren."""
     return [d for d in comparar(registro) if d.difiere]
+
+
+def campos_manuales(registro) -> list[Diferencia]:
+    """Diferencias que la herramienta NO puede llevar al SIPP por su cuenta.
+
+    Hoy es el EMPLEADO de resguardo: la edición del activo no lo deja cambiar, el
+    portal lo manda a su flujo de «Reasignación». Que aparezca aquí significa que
+    el dato del levantamiento sigue sin coincidir con el del SIPP, así que alguien
+    tiene que entrar al portal a hacerlo: el listado lo marca para que no se
+    descubra activo por activo.
+
+    Deja de aparecer solo cuando los dos lados coinciden: al reasignar en el
+    portal y volver a «Buscar en SIPP», o al conservar el valor del SIPP en la
+    comparación."""
+    return [d for d in campos_distintos(registro)
+            if not (d.campo.empujable and (d.campo.ng_model or d.campo.modal))]
 
 
 def hay_diferencias(registro) -> bool:
