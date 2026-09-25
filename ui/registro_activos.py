@@ -2597,7 +2597,7 @@ class SeccionRegistroActivos:
             padding=ft.Padding.symmetric(horizontal=10, vertical=6))
 
         lista = ft.ListView(spacing=8, expand=True)
-        for fila in filas:
+        for n, fila in enumerate(filas, 1):
             textos = [t for _v, t in fila["opciones"]]
             # `preseleccion`: la opción que ya viene marcada. Se usa donde hay una
             # respuesta razonable por defecto (el activo que el SIPP propone), para
@@ -2609,8 +2609,15 @@ class SeccionRegistroActivos:
             campos[fila["clave"]] = (dd, dict(zip(textos, [v for v, _t in fila["opciones"]])))
             lista.controls.append(ft.Container(
                 ft.Column(
-                    [ft.Text(fila["titulo"], size=13, weight=ft.FontWeight.W_600,
-                             color=ft.Colors.ON_SURFACE, no_wrap=False),
+                    # Numerado: con decenas de renglones, es lo que permite decir
+                    # «voy en el 23» al revisarlos o al comentarlos con alguien.
+                    [ft.Row([ft.Text(f"{n}.", size=13, weight=ft.FontWeight.W_700,
+                                     color=GRIS, width=26),
+                             ft.Text(fila["titulo"], size=13,
+                                     weight=ft.FontWeight.W_600, expand=True,
+                                     color=ft.Colors.ON_SURFACE, no_wrap=False)],
+                            spacing=0,
+                            vertical_alignment=ft.CrossAxisAlignment.START),
                      ft.Row([_lado(fila["sipp"]), _lado(fila["levantamiento"]),
                              ft.Container(dd, width=250)],
                             spacing=12,
