@@ -54,7 +54,10 @@ from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
 # Reparto de la fila de filtros. El ancho de cada campo se calcula al medir la
 # barra (`_ajustar_ancho_filtros`): entre el mínimo, donde el rótulo flotante
 # todavía se lee, y el máximo, donde estirarlos más solo deja campos enormes.
-_ANCHO_CHK = 210          # casilla «Cambios a mano en SIPP» (ancho fijo)
+# Opciones del filtro «Por revisar» (marcas que el listado pinta aparte).
+_MARCA_TODAS = "Todos"
+_MARCA_PARCIAL = "Posible coincidencia"
+_MARCA_MANUAL = "Cambios a mano en SIPP"
 _ANCHO_LIMPIAR = 150      # botón «Limpiar filtros» (aproximado, para el reparto)
 _FILTRO_MIN = 130
 _FILTRO_MAX = 172
@@ -377,8 +380,8 @@ class SeccionRegistroActivos:
         # Ids de los registros que hay que cambiar A MANO en el SIPP. No es
         # un filtro de SQL: sale de comparar el levantamiento con la foto del
         # portal, así que se calcula al activarlo y se pasa a la consulta.
-        self._solo_manuales = False
-        self._ids_manuales: "list[int] | None" = None
+        self._marca = ""                      # marca elegida en «Por revisar»
+        self._ids_marcados: "list[int] | None" = None
         # Rótulo corto para la opción "sin filtro" (así no se corta en el combo).
         self._TODOS = {"empresa": "Todas", "sucursal": "Todas",
                        "departamento": "Todos"}
@@ -419,25 +422,23 @@ class SeccionRegistroActivos:
         self._campos_filtro = [self.dd_f_empresa, self.dd_f_sucursal,
                                self.dd_f_departamento, self.tf_f_insumo,
                                self.tf_f_etiqueta, self.tf_f_serie]
+        # Un DESPLEGABLE y no varias casillas: las marcas se revisan de una en
+        # una —primero las posibles coincidencias, luego lo que hay que hacer a
+        # mano— y cada casilla nueva se comía el ancho de la fila de filtros.
+        _, self._dd_marca = campo_opciones(
+            "Por revisar", [_MARCA_TODAS, _MARCA_PARCIAL, _MARCA_MANUAL],
+            valor=_MARCA_TODAS, width=_WF, flotante=True,
+            on_change=self._cambiar_marca)
+        self._campos_filtro.append(self._dd_marca)
         self._btn_limpiar_filtros = boton_herramienta(
             "Limpiar filtros", ft.Icons.FILTER_ALT_OFF, self._limpiar_filtros_col)
-        self._chk_manuales = ft.Checkbox(
-            label="Cambios a mano en SIPP", value=False,
-            tooltip="Solo los activos con algo que la herramienta no puede "
-                    "cambiar en el portal (hoy: el empleado de resguardo, que va "
-                    "por «Reasignación»)",
-            on_change=self._alternar_filtro_manuales)
         # «Limpiar filtros» va AL FINAL de la fila, después de la casilla: cuando
         # el ancho no alcanza, los dos bajan juntos al segundo renglón y el bloque
         # de filtros nunca pasa de dos líneas.
         self.barra_filtros = ft.Row(
             [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
-             # Con ancho fijo: un Checkbox sin ancho reclama el de su etiqueta más
-             # su holgura, y el Row lo empujaba a un segundo renglón teniendo
-             # sitio de sobra.
-             ft.Container(self._chk_manuales, width=_ANCHO_CHK),
-             self._btn_limpiar_filtros],
+             self._dd_marca, self._btn_limpiar_filtros],
             spacing=10, run_spacing=10, wrap=True, expand=True,
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -597,7 +598,7 @@ class SeccionRegistroActivos:
         Incluye el filtro de «cambios a mano en SIPP»: «Seleccionar todos» debe
         marcar lo que se está viendo, no lo que había sin ese filtro."""
         return db.ids_levantamiento(self._estatus_tab(), self._filtro,
-                                    self._filtros_col, self._ids_manuales)
+                                    self._filtros_col, self._ids_marcados)
 
     # ------------------------------------------------ filtros por columna
     def _ajustar_ancho_filtros(self, e=None) -> None:
@@ -617,7 +618,7 @@ class SeccionRegistroActivos:
             return
         # Lo que queda para los campos: el ancho medido menos la casilla y los
         # seis separadores (uno por hueco entre controles).
-        disponible = (ancho - _ANCHO_CHK - _ANCHO_LIMPIAR
+        disponible = (ancho - _ANCHO_LIMPIAR
                       - _SEP_FILTRO * (len(self._campos_filtro) + 1))
         nuevo = max(_FILTRO_MIN, min(_FILTRO_MAX,
                                      int(disponible / len(self._campos_filtro))))
@@ -639,30 +640,38 @@ class SeccionRegistroActivos:
         self._pagina = 0
         self._refrescar()
 
-    def _alternar_filtro_manuales(self, e=None) -> None:
-        """Activa/desactiva «solo los que hay que cambiar a mano en el SIPP».
+    def _cambiar_marca(self, e=None) -> None:
+        """Filtra por la marca elegida en «Por revisar».
 
-        Los ids se recalculan CADA VEZ que se activa: la lista cambia al reasignar
-        en el portal y volver a buscar, o al reconciliar conservando el SIPP."""
-        self._solo_manuales = bool(self._chk_manuales.value)
-        self._ids_manuales = self._calcular_ids_manuales() if self._solo_manuales else None
+        Los ids se recalculan CADA VEZ: las dos listas cambian solas al resolver
+        una coincidencia, al reasignar en el portal o al volver a buscar. Son
+        filtros que NO se pueden escribir en SQL —salen de comparar el
+        levantamiento contra la foto del SIPP—, así que se calculan aquí y se le
+        pasan a la consulta, que sigue paginando en SQLite."""
+        self._marca = (self._dd_marca.value or "").strip()
+        self._ids_marcados = self._ids_de_marca(self._marca)
         self._pagina = 0
         self._refrescar()
 
     @staticmethod
-    def _calcular_ids_manuales() -> list[int]:
-        """Ids con diferencias que el RPA no puede empujar (ver
-        comparacion_sipp.campos_manuales). Solo mira los dados de alta: sin foto
-        del SIPP no hay con qué comparar."""
-        return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
-                if comparacion_sipp.campos_manuales(r)]
+    def _ids_de_marca(marca: str) -> "list[int] | None":
+        """Ids de la marca pedida (None = sin filtro)."""
+        if marca == _MARCA_PARCIAL:
+            # Posible coincidencia: se reconoció por un parecido (la serie, casi
+            # siempre) y falta que alguien confirme si es el mismo activo.
+            return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                    if (r.info_sipp() or {}).get("parcial")]
+        if marca == _MARCA_MANUAL:
+            return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                    if comparacion_sipp.campos_manuales(r)]
+        return None
 
     def _limpiar_filtros_col(self, _e=None) -> None:
         """Quita todos los filtros por columna y reinicia los controles."""
         self._filtros_col = {}
-        self._solo_manuales = False
-        self._ids_manuales = None
-        self._chk_manuales.value = False
+        self._marca = ""
+        self._ids_marcados = None
+        self._dd_marca.value = _MARCA_TODAS
         self.tf_f_insumo.value = self.tf_f_etiqueta.value = self.tf_f_serie.value = ""
         self.dd_f_empresa.value = self._TODOS["empresa"]
         self.dd_f_sucursal.value = self._TODOS["sucursal"]
@@ -694,7 +703,7 @@ class SeccionRegistroActivos:
     def _refrescar(self) -> None:
         """Repinta SOLO la página actual, pidiéndosela ya recortada a SQLite."""
         estatus, filtro = self._estatus_tab(), self._filtro
-        ids = self._ids_manuales
+        ids = self._ids_marcados
         total = db.contar_levantamiento(estatus, filtro, self._filtros_col, ids)
         # Ajusta la página si quedó fuera de rango (p. ej. tras filtrar o borrar).
         ultima = max(0, (total - 1) // self._por_pagina) if total else 0
@@ -989,7 +998,7 @@ class SeccionRegistroActivos:
         insumo puesto en «laptop», la pestaña decía 166 junto a nueve filas, y eso
         se lee como registros perdidos, no como un filtro activo."""
         c = db.contar_levantamiento_por_estatus(self._filtro, self._filtros_col,
-                                                self._ids_manuales)
+                                                self._ids_marcados)
         conteos = {_TAB_TODOS: c.get("total", 0),
                    db.EST_DADO_ALTA: c.get(db.EST_DADO_ALTA, 0),
                    db.EST_NO_DADO_ALTA: c.get(db.EST_NO_DADO_ALTA, 0)}
