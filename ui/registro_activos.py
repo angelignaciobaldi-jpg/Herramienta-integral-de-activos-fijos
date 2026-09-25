@@ -182,6 +182,8 @@ class ResultadoBusquedaSipp:
     sin_confirmar: int = 0
     # [(registro, activo del SIPP)] — la serie se PARECE pero no es idéntica.
     parciales: list = field(default_factory=list)
+    # [(registro, [activos])] — sin etiqueta ni serie, reconocidos por su dueño.
+    por_responsable: list = field(default_factory=list)
 
 
 # Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
@@ -2169,6 +2171,26 @@ class SeccionRegistroActivos:
             sin_resolver += await self._aplicar_decisiones_etiqueta(res)
             aparte = sum(1 for _r, _d, q in (res.decisiones or []) if q == "aparte")
 
+        # Sin etiqueta ni serie, pero el responsable ya tiene uno igual en el SIPP.
+        por_responsable = 0
+        if res.por_responsable:
+            self._refrescar()
+            elegidos = await self._resolver_por_responsable(res.por_responsable)
+            for r, datos in elegidos:
+                etq = (datos.get("etiqueta") or "").strip()
+                # Dos filas pueden elegir el MISMO activo del portal (dos sillas de
+                # la misma persona, dos candidatos iguales). La segunda no se
+                # empareja: se reporta y queda pendiente, en vez de dejar dos
+                # registros apuntando a una etiqueta.
+                if not db.adoptar_etiqueta_levantamiento(r.id, etq):
+                    db.actualizar_estatus_levantamiento(
+                        r.id, db.EST_PENDIENTE, None, None)
+                    res.choques.append((r, etq))
+                    continue
+                self._aplicar_resultado_sipp(r, datos)
+                por_responsable += 1
+            sin_resolver += len(res.por_responsable) - len(elegidos)
+
         # Etiquetas adoptadas del SIPP: no se pregunta, pero se informa.
         if res.adoptadas:
             self._refrescar()
@@ -2183,6 +2205,9 @@ class SeccionRegistroActivos:
         extras = []
         if motivo_api:
             extras.append(f"{motivo_api}; se comparó con la caché local")
+        if por_responsable:
+            extras.append(f"{por_responsable} se reconocieron por su responsable "
+                          f"(no traían etiqueta ni serie)")
         if res.parciales:
             extras.append(f"{len(res.parciales)} con un número de serie PARECIDO al "
                           f"de un activo del SIPP: quedaron como posible "
@@ -2315,6 +2340,10 @@ class SeccionRegistroActivos:
         # Índice de TODAS las series cacheadas, para el repaso tolerante de abajo.
         # Se arma una sola vez por búsqueda (son decenas de miles de activos).
         indices_serie = activos_sipp.indice_series()
+        # Para el último recurso (responsable + insumo). `usadas` evita ofrecer el
+        # mismo activo del portal a dos filas distintas del levantamiento.
+        indice_responsable = activos_sipp.indice_por_responsable()
+        usadas = db.etiquetas_en_uso_levantamiento()
         res = ResultadoBusquedaSipp()
         for r in registros:
             etq = (r.etiqueta or "").strip()
@@ -2340,6 +2369,20 @@ class SeccionRegistroActivos:
                     res.parciales.append((r, aprox[0]))
                     res.hechos += 1
                     continue
+            if not opciones and not etq and not _serie_buscable(r.no_serie):
+                # Sin etiqueta NI serie no queda con qué identificarlo, salvo de
+                # quién es y qué es. Si su responsable ya tiene uno igual en el
+                # SIPP, se pregunta antes de crear otro (ver
+                # `_resolver_por_responsable`). Queda PENDIENTE hasta que alguien
+                # responda: así el RPA no lo da de alta mientras tanto.
+                iguales = activos_sipp.buscar_por_responsable(
+                    r.responsable, r.nombre_insumo, indice_responsable, usadas)
+                if iguales:
+                    db.actualizar_estatus_levantamiento(
+                        r.id, db.EST_PENDIENTE, None, None)
+                    res.por_responsable.append((r, iguales))
+                    res.hechos += 1
+                    continue
             if not opciones:
                 # Solo con el catálogo COMPLETO una ausencia prueba algo. Con una
                 # caché parcial, marcarlo «no dado de alta» es invitar al RPA a
@@ -2358,6 +2401,7 @@ class SeccionRegistroActivos:
             if elegido is None:
                 res.ambiguos.append((r, opciones))
                 continue
+            usadas.add((elegido.get("etiqueta") or "").strip().upper())
             if hallado_por_serie:
                 self._conciliar_por_serie(r, elegido, res)
             else:
@@ -2509,6 +2553,107 @@ class SeccionRegistroActivos:
         modal.abrir()
         return await decision
 
+    async def _decidir_en_tabla(self, titulo: str, explicacion: str, filas: list,
+                                ancho: int = 980) -> dict:
+        """Modal de decisiones lado a lado: el SIPP contra el levantamiento.
+
+        `filas`: [{"clave": …, "titulo": str, "sipp": [(rótulo, valor)],
+                   "levantamiento": [(rótulo, valor)], "opciones": [(valor, texto)]}]
+        Devuelve {clave: valor elegido} SOLO de las decididas; lo que se deje sin
+        elegir no se toca.
+
+        En tabla y no en párrafos porque la pregunta siempre es la misma —¿es este
+        activo o no?— y contestarla exige comparar los mismos campos de los dos
+        lados. Con el detalle en prosa había que reconstruir mentalmente la
+        comparación en cada renglón.
+        """
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+        campos: dict = {}
+
+        def responder(valor) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        def _lado(datos: list, color_rotulo=GRIS) -> ft.Control:
+            return ft.Column(
+                [ft.Row([ft.Text(f"{rot}:", size=11, color=color_rotulo, width=86),
+                         ft.Text(str(val or "—"), size=12, no_wrap=False, expand=True,
+                                 color=ft.Colors.ON_SURFACE)],
+                        spacing=6, vertical_alignment=ft.CrossAxisAlignment.START)
+                 for rot, val in datos],
+                spacing=2, tight=True, expand=True)
+
+        encabezado = ft.Container(
+            ft.Row([ft.Text("EN EL SIPP", size=11, weight=ft.FontWeight.W_700,
+                            color=GRIS, expand=True),
+                    ft.Text("EN EL LEVANTAMIENTO", size=11, weight=ft.FontWeight.W_700,
+                            color=GRIS, expand=True),
+                    ft.Container(ft.Text("¿QUÉ HACEMOS?", size=11,
+                                         weight=ft.FontWeight.W_700, color=GRIS),
+                                 width=250)],
+                   spacing=12),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6))
+
+        lista = ft.ListView(spacing=8, expand=True)
+        for fila in filas:
+            textos = [t for _v, t in fila["opciones"]]
+            _, dd = campo_opciones("Elige", textos, flotante=True, width=238)
+            campos[fila["clave"]] = (dd, dict(zip(textos, [v for v, _t in fila["opciones"]])))
+            lista.controls.append(ft.Container(
+                ft.Column(
+                    [ft.Text(fila["titulo"], size=13, weight=ft.FontWeight.W_600,
+                             color=ft.Colors.ON_SURFACE, no_wrap=False),
+                     ft.Row([_lado(fila["sipp"]), _lado(fila["levantamiento"]),
+                             ft.Container(dd, width=250)],
+                            spacing=12,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+                    spacing=6, tight=True),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=8))
+
+        def _confirmar(_e=None) -> None:
+            responder({clave: mapa[dd.value] for clave, (dd, mapa) in campos.items()
+                       if dd.value in mapa})
+
+        modal = Modal(self.page, titulo, ancho=ancho,
+                      subtitulo=f"{len(filas)} activo(s) por decidir",
+                      alto_cuerpo=540, al_cerrar=lambda: responder({}))
+        modal.cuerpo.controls = [
+            ft.Text(explicacion, size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Text("Lo que dejes sin decidir queda PENDIENTE: no se marca como "
+                    "«sin dar de alta», porque el RPA lo daría de alta y quedaría "
+                    "duplicado en el SIPP.", size=11, color=GRIS, no_wrap=False),
+            encabezado,
+            ft.Container(lista, height=380)]
+        modal.set_acciones([
+            boton_herramienta("Dejar pendientes", on_click=lambda _e: responder({})),
+            boton_primario("Aplicar", ft.Icons.CHECK, _confirmar)])
+        modal.abrir()
+        return await decision
+
+    @staticmethod
+    def _resumen_sipp(datos: dict) -> list:
+        """Los campos del activo del SIPP que se muestran al decidir."""
+        return [("Insumo", datos.get("insumo")),
+                ("Etiqueta", datos.get("etiqueta")),
+                ("Serie", datos.get("serie")),
+                ("Resguardo", datos.get("empleado")),
+                ("Empresa", " · ".join(p for p in (datos.get("empresa"),
+                                                   datos.get("sucursal")) if p))]
+
+    @staticmethod
+    def _resumen_levantamiento(r: "db.Levantamiento") -> list:
+        """Los mismos campos, del lado del levantamiento, para comparar."""
+        return [("Insumo", r.nombre_insumo),
+                ("Etiqueta", r.etiqueta or "—"),
+                ("Serie", r.no_serie or "—"),
+                ("Resguardo", r.responsable),
+                ("Empresa", " · ".join(p for p in (r.empresa, r.sucursal) if p))]
+
     async def _resolver_conflictos_etiqueta(self, conflictos: list) -> list:
         """Pregunta, activo por activo, qué hacer cuando la serie coincide pero la
         etiqueta no.
@@ -2524,72 +2669,70 @@ class SeccionRegistroActivos:
           serie. Se conserva la etiqueta levantada y el activo queda para darse de
           alta en el SIPP.
         """
-        decision: asyncio.Future = asyncio.get_running_loop().create_future()
-        campos: dict = {}          # id de registro -> (registro, activo, dropdown)
-        OPC_SIPP = "Es el mismo activo: usar la etiqueta del SIPP"
-        OPC_APARTE = "Es otro activo: registrarlo aparte con su etiqueta"
+        filas = [{
+            "clave": r.id,
+            "titulo": f"{r.nombre_insumo or '(sin insumo)'}  ·  serie {r.no_serie}",
+            "sipp": self._resumen_sipp(datos),
+            "levantamiento": self._resumen_levantamiento(r),
+            "opciones": [("sipp", "Es el mismo: usar la etiqueta del SIPP"),
+                         ("aparte", "Es otro activo: registrarlo aparte")],
+        } for r, datos in conflictos]
+        elegido = await self._decidir_en_tabla(
+            "Misma serie, etiqueta distinta",
+            "El número de serie de estos activos ya está en el SIPP, pero con otra "
+            "etiqueta. Puede ser el mismo activo reetiquetado, o dos activos "
+            "distintos con la serie repetida: eso no se puede deducir del dato.",
+            filas)
+        return [(r, datos, elegido[r.id]) for r, datos in conflictos
+                if r.id in elegido]
 
-        def responder(valor) -> None:
-            if decision.done():
-                return
-            decision.set_result(valor)
-            modal.cerrar()
+    async def _resolver_por_responsable(self, candidatos: list) -> list:
+        """Pregunta por los activos que solo se pudieron reconocer por su DUEÑO.
 
-        lista = ft.ListView(spacing=10, expand=True)
-        for r, datos in conflictos:
-            _, dd = campo_opciones("¿Qué hacemos?", [OPC_SIPP, OPC_APARTE],
-                                   flotante=True)
-            campos[r.id] = (r, datos, dd)
-            lista.controls.append(ft.Container(
-                ft.Column(
-                    [ft.Row([ft.Icon(ft.Icons.RULE, size=16, color=NARANJA),
-                             ft.Text(f"{r.nombre_insumo or '(sin insumo)'}  ·  "
-                                     f"serie {r.no_serie}", size=13,
-                                     weight=ft.FontWeight.W_600,
-                                     color=ft.Colors.ON_SURFACE, expand=True)],
-                            spacing=6),
-                     ft.Text(f"Etiqueta levantada: {r.etiqueta}", size=11,
-                             color=GRIS, no_wrap=False),
-                     ft.Text(f"En el SIPP esa serie es {datos.get('etiqueta')}"
-                             + (f"  ·  {datos.get('insumo')}" if datos.get("insumo") else "")
-                             + (f"  ·  {datos.get('empresa')}" if datos.get("empresa") else "")
-                             + (f"  ·  {datos.get('empleado')}" if datos.get("empleado") else ""),
-                             size=11, color=GRIS, no_wrap=False),
-                     dd],
-                    spacing=6, tight=True),
-                padding=ft.Padding.symmetric(horizontal=10, vertical=10),
-                bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
-                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                border_radius=8))
+        `candidatos`: [(registro, [activos del SIPP])]. Devuelve
+        [(registro, activo elegido)] de los que el usuario dio por el mismo.
 
-        def _confirmar(_e=None) -> None:
-            elegidos = []
-            for r, datos, dd in campos.values():
-                if dd.value == OPC_SIPP:
-                    elegidos.append((r, datos, "sipp"))
-                elif dd.value == OPC_APARTE:
-                    elegidos.append((r, datos, "aparte"))
-            responder(elegidos)
-
-        modal = Modal(self.page, "Misma serie, etiqueta distinta",
-                      ancho=760,
-                      subtitulo=f"{len(conflictos)} activo(s) por decidir",
-                      alto_cuerpo=520, al_cerrar=lambda: responder([]))
-        modal.cuerpo.controls = [
-            ft.Text("El número de serie de estos activos ya está en el SIPP, pero "
-                    "con otra etiqueta. Puede ser el mismo activo reetiquetado, o "
-                    "dos activos distintos con la serie repetida: eso no se puede "
-                    "deducir del dato.", size=12, color=ft.Colors.ON_SURFACE,
-                    no_wrap=False),
-            ft.Text("Lo que dejes sin decidir queda PENDIENTE: no se marca como "
-                    "«sin dar de alta», porque el RPA lo daría de alta y quedaría "
-                    "duplicado en el SIPP.", size=11, color=GRIS, no_wrap=False),
-            ft.Container(lista, height=340)]
-        modal.set_acciones([
-            boton_herramienta("Dejar pendientes", on_click=lambda _e: responder([])),
-            boton_primario("Aplicar", ft.Icons.CHECK, _confirmar)])
-        modal.abrir()
-        return await decision
+        Es el caso del teclado sin etiqueta ni serie: en el levantamiento solo hay
+        «TECLADO de JUAN CARLOS RIVAS LUGO», y en el SIPP esa persona ya tiene un
+        teclado resguardado. Puede ser ese mismo —y darlo de alta lo duplicaría— o
+        uno nuevo que todavía no está en el portal. Sin etiqueta ni serie no hay
+        forma de saberlo desde el dato: lo decide quien conoce el inventario.
+        """
+        filas = []
+        for r, opciones in candidatos:
+            ops = [(str(i), f"Es {a.get('etiqueta')} ({a.get('insumo') or 'sin insumo'})")
+                   for i, a in enumerate(opciones)]
+            ops.append(("nuevo", "Es otro activo: darlo de alta"))
+            # Con varios candidatos se listan todos en la columna del SIPP; el
+            # desplegable los nombra por etiqueta para poder elegir cuál es.
+            sipp = self._resumen_sipp(opciones[0])
+            if len(opciones) > 1:
+                sipp.append(("Otros", ", ".join(a.get("etiqueta") or "—"
+                                                for a in opciones[1:])))
+            filas.append({
+                "clave": r.id,
+                "titulo": (f"{r.nombre_insumo or '(sin insumo)'}  ·  "
+                           f"{r.responsable or 'sin responsable'}"),
+                "sipp": sipp,
+                "levantamiento": self._resumen_levantamiento(r),
+                "opciones": ops,
+            })
+        elegido = await self._decidir_en_tabla(
+            "Sin etiqueta ni serie: ¿es el que ya está en el SIPP?",
+            "Estos activos del levantamiento no traen etiqueta ni número de serie, "
+            "y su responsable YA tiene uno igual resguardado en el SIPP. Si es el "
+            "mismo y se da de alta, quedaría duplicado en el portal.",
+            filas)
+        salida = []
+        for r, opciones in candidatos:
+            valor = elegido.get(r.id)
+            if valor is None:
+                continue
+            if valor == "nuevo":
+                self._marcar_no_dado_alta(r)
+            else:
+                salida.append((r, opciones[int(valor)]))
+        return salida
 
     async def _avisar_etiquetas_adoptadas(self, adoptadas: list) -> None:
         """Informa qué etiquetas se tomaron del SIPP. No pregunta: informa.

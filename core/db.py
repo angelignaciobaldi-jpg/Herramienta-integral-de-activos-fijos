@@ -1622,6 +1622,31 @@ def series_sipp() -> list[tuple[str, int, str]]:
             "WHERE IFNULL(serie,'') <> ''")]
 
 
+def resguardos_sipp() -> list[tuple[str, str, int, str]]:
+    """(empleado, insumo, id_empresa, etiqueta) de lo cacheado que tenga empleado.
+
+    Es el índice para reconocer un activo del levantamiento que llega SIN etiqueta
+    y SIN serie: lo único que queda para reconocerlo es de quién es y qué es.
+    Ligero como `series_sipp`: los datos completos se piden después."""
+    with _conectar() as con:
+        return [(f["empleado"], f["insumo"], f["id_empresa"], f["etiqueta"])
+                for f in con.execute(
+                    "SELECT empleado, insumo, id_empresa, etiqueta FROM activos_sipp "
+                    "WHERE IFNULL(empleado,'') <> ''")]
+
+
+def etiquetas_en_uso_levantamiento() -> set:
+    """Etiquetas del SIPP que ALGÚN registro del levantamiento ya tiene tomadas.
+
+    Sirve para no ofrecer dos veces el mismo activo del portal: si un teclado del
+    SIPP ya quedó emparejado con una fila, no puede ser también el de otra."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT IFNULL(etiqueta,''), IFNULL(id_activo_sipp,'') FROM levantamiento"
+        ).fetchall()
+    return {v.strip().upper() for f in filas for v in f if v and v.strip()}
+
+
 def activo_sipp(id_empresa: int, etiqueta: str) -> "dict | None":
     """Un activo cacheado concreto, con todos sus campos."""
     candidatos = activos_sipp_por_etiquetas([etiqueta])

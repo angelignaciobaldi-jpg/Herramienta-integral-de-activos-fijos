@@ -433,3 +433,39 @@ def _activos(claves: list) -> list[dict]:
         if activo:
             salida.append(activo)
     return salida
+
+
+# ------------------------------- reconocer por RESPONSABLE + INSUMO
+def _norm_texto(valor: str) -> str:
+    """Texto comparable: sin acentos, sin dobles espacios y en mayúsculas."""
+    import unicodedata
+    t = unicodedata.normalize("NFD", (valor or "").upper())
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    return " ".join(t.split())
+
+
+def indice_por_responsable() -> dict:
+    """{(empleado, insumo) -> [(id_empresa, etiqueta)]} de lo cacheado.
+
+    Es el último recurso para reconocer un activo: cuando el levantamiento no
+    trae etiqueta NI serie, lo único que queda es de quién es y qué es. No basta
+    para darlo por bueno —una persona puede tener tres teclados iguales—, pero sí
+    para preguntar antes de crear uno nuevo en el SIPP."""
+    idx: dict = {}
+    for empleado, insumo, id_empresa, etiqueta in db.resguardos_sipp():
+        clave = (_norm_texto(empleado), _norm_texto(insumo))
+        if all(clave):
+            idx.setdefault(clave, []).append((id_empresa, etiqueta))
+    return idx
+
+
+def buscar_por_responsable(responsable: str, insumo: str, indice: dict,
+                           excluir: set | None = None) -> list[dict]:
+    """Activos del SIPP de ese responsable con ese insumo.
+
+    `excluir` son etiquetas ya emparejadas con otra fila del levantamiento: el
+    mismo activo del portal no puede ser el de dos filas."""
+    claves = indice.get((_norm_texto(responsable), _norm_texto(insumo)), [])
+    fuera = excluir or set()
+    return [a for a in _activos(claves)
+            if (a.get("etiqueta") or "").strip().upper() not in fuera]
