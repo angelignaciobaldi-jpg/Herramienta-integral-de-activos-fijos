@@ -415,13 +415,15 @@ class SeccionRegistroActivos:
         # permite que el campo se angoste sin que el texto se parta en dos
         # renglones (a 130 px, «Nombre insumo» ya lo hacía).
         self.tf_f_insumo = _mk_tf("nombre_insumo", "Insumo")
+        self.tf_f_responsable = _mk_tf("responsable", "Responsable")
         self.tf_f_etiqueta = _mk_tf("etiqueta", "Etiqueta")
         self.tf_f_serie = _mk_tf("no_serie", "Serie")
         # Los seis campos se conservan para redimensionarlos con la ventana (ver
         # `_ajustar_ancho_filtros`).
         self._campos_filtro = [self.dd_f_empresa, self.dd_f_sucursal,
                                self.dd_f_departamento, self.tf_f_insumo,
-                               self.tf_f_etiqueta, self.tf_f_serie]
+                               self.tf_f_responsable, self.tf_f_etiqueta,
+                               self.tf_f_serie]
         # Un DESPLEGABLE y no varias casillas: las marcas se revisan de una en
         # una —primero las posibles coincidencias, luego lo que hay que hacer a
         # mano— y cada casilla nueva se comía el ancho de la fila de filtros.
@@ -437,8 +439,8 @@ class SeccionRegistroActivos:
         # de filtros nunca pasa de dos líneas.
         self.barra_filtros = ft.Row(
             [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
-             self.tf_f_insumo, self.tf_f_etiqueta, self.tf_f_serie,
-             self._dd_marca, self._btn_limpiar_filtros],
+             self.tf_f_insumo, self.tf_f_responsable, self.tf_f_etiqueta,
+             self.tf_f_serie, self._dd_marca, self._btn_limpiar_filtros],
             spacing=10, run_spacing=10, wrap=True, expand=True,
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -673,6 +675,7 @@ class SeccionRegistroActivos:
         self._ids_marcados = None
         self._dd_marca.value = _MARCA_TODAS
         self.tf_f_insumo.value = self.tf_f_etiqueta.value = self.tf_f_serie.value = ""
+        self.tf_f_responsable.value = ""
         self.dd_f_empresa.value = self._TODOS["empresa"]
         self.dd_f_sucursal.value = self._TODOS["sucursal"]
         self.dd_f_departamento.value = self._TODOS["departamento"]

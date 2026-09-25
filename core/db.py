@@ -779,7 +779,8 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
 # desplegables de valores distintos); de texto = CONTIENE. Lista blanca: solo estas
 # columnas son filtrables (evita inyección al construir el SQL con el nombre).
 _FILTRO_EXACTO = ("empresa", "sucursal", "departamento")
-_FILTRO_CONTIENE = ("nombre_insumo", "etiqueta", "no_serie", "ubicacion")
+_FILTRO_CONTIENE = ("nombre_insumo", "responsable", "etiqueta", "no_serie",
+                    "ubicacion")
 COLUMNAS_FILTRABLES = _FILTRO_EXACTO + _FILTRO_CONTIENE
 
 
