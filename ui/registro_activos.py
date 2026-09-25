@@ -240,7 +240,11 @@ def _mismo_activo(r, opciones: list) -> "dict | None":
     Entre copias del mismo activo se prefiere la del resguardante del registro.
     Devuelve None cuando SÍ son activos distintos: eso lo decide el usuario.
     """
-    norm = lambda v: " ".join(str(v or "").upper().split())  # noqa: E731
+    from core import activos_sipp
+
+    # La MISMA normalización que usa el cruce por responsable: sin acentos ni
+    # puntuación. El SIPP escribe «ESCRITORIO.» y el levantamiento «ESCRITORIO».
+    norm = activos_sipp._norm_texto
     serie = norm(_serie_buscable(r.no_serie))
     if serie:
         por_serie = [c for c in opciones if norm(c.get("serie")) == serie]

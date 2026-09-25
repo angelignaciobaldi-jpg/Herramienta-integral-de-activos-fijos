@@ -437,10 +437,17 @@ def _activos(claves: list) -> list[dict]:
 
 # ------------------------------- reconocer por RESPONSABLE + INSUMO
 def _norm_texto(valor: str) -> str:
-    """Texto comparable: sin acentos, sin dobles espacios y en mayúsculas."""
+    """Texto comparable: sin acentos, sin puntuación y sin dobles espacios.
+
+    La puntuación importa: el SIPP tiene «ESCRITORIO.» con punto final (54
+    insumos así) y el levantamiento «ESCRITORIO». Comparados tal cual, el activo
+    no se reconocía y salía como no dado de alta. La puntuación se cambia por un
+    espacio, no se borra, para que «mini-split» y «mini split» coincidan sin
+    convertirse en «minisplit»."""
     import unicodedata
     t = unicodedata.normalize("NFD", (valor or "").upper())
     t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    t = "".join(c if c.isalnum() else " " for c in t)
     return " ".join(t.split())
 
 
