@@ -79,6 +79,13 @@ class DatosImagen:
         return bool(self.numero_ambiguo)
 
 
+# Marca de copia al final del nombre: « (1)», «(12)».
+# Largo mínimo para creer que un sufijo del nombre identifica un activo. Las
+# etiquetas del SIPP tienen 5, 7 o 10 dígitos y las series casi siempre más.
+_LARGO_IDENTIFICADOR = 4
+_RE_COPIA = re.compile(r"\s*\(\d{1,3}\)\s*$")
+
+
 def parsear_nombre(nombre_archivo: str) -> DatosImagen:
     """Deduce insumo y ETIQUETA del nombre de la imagen.
 
@@ -102,6 +109,15 @@ def parsear_nombre(nombre_archivo: str) -> DatosImagen:
         que su última palabra se registre como serie.
     """
     base = os.path.splitext(os.path.basename(str(nombre_archivo or "")))[0].strip()
+    if not base:
+        return DatosImagen(insumo="", base=base)
+    # «(1)», «(2)»… al final NO son parte del nombre: son la marca de copia que
+    # ponen Windows, OneDrive y el propio aplanado del ZIP cuando dos archivos se
+    # llaman igual. Leerla como número de serie descartaba la foto: el
+    # emparejador creía que nombraba OTRO activo (ver
+    # `_trae_identificador_ajeno`), y con 51 escritorios repetidos eso era la
+    # mitad del levantamiento.
+    base = _RE_COPIA.sub("", base).strip()
     if not base:
         return DatosImagen(insumo="", base=base)
     # Se corta por el separador MÁS A LA DERECHA de los tres admitidos.
@@ -253,8 +269,13 @@ def _trae_identificador_ajeno(archivo: str, registro) -> bool:
     """
     datos = parsear_nombre(archivo)
     sufijo = _clave_id(datos.etiqueta or datos.serie or datos.numero_ambiguo)
-    if not sufijo:
-        return False   # el nombre no dice más: no hay motivo para descartarla
+    if len(sufijo) < _LARGO_IDENTIFICADOR:
+        # Ni etiqueta ni serie tienen tres caracteres: «SILLA 1.jpg» y
+        # «ESCRITORIO 2.jpg» están enumerando las tres sillas de una persona, no
+        # nombrando un activo distinto. Tratarlo como identificador ajeno
+        # descartaba justo las fotos que la carpeta del responsable sí podía
+        # ubicar.
+        return False
     propios = {p for p in (_clave_id(registro.etiqueta),
                            _clave_id(registro.no_serie)) if p}
     if not propios:
