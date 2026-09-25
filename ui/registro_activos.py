@@ -180,6 +180,8 @@ class ResultadoBusquedaSipp:
     decisiones: list = field(default_factory=list)
     # No aparecieron, pero sin el catálogo completo eso no prueba nada.
     sin_confirmar: int = 0
+    # [(registro, activo del SIPP)] — la serie se PARECE pero no es idéntica.
+    parciales: list = field(default_factory=list)
 
 
 # Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
@@ -793,7 +795,9 @@ class SeccionRegistroActivos:
         # resguardo: va por «Reasignación»). Se marca en la misma celda del
         # estatus para que se vea en el listado general, sin abrir activo por
         # activo, y el detalle va en el tooltip.
-        manuales = comparacion_sipp.campos_manuales(r) if info else []
+        # En una POSIBLE coincidencia no se marca: el activo ni siquiera está
+        # confirmado, y comparar contra un candidato sin confirmar sería ruido.
+        manuales = comparacion_sipp.campos_manuales(r) if info and not es_parcial else []
         if manuales:
             detalle = " · ".join(f"{d.campo.etiqueta}: {d.excel} (SIPP: {d.sipp})"
                                  for d in manuales)
@@ -1348,6 +1352,11 @@ class SeccionRegistroActivos:
         etq_sipp = str(info.get("etiqueta_sipp") or info.get("etiqueta") or "").strip()
         sim = info.get("similitud")
         sim_txt = f"{round(float(sim) * 100)}%" if sim is not None else "—"
+        # La coincidencia puede venir de la ETIQUETA (parecido de texto) o del
+        # NÚMERO DE SERIE (escrito distinto o con un carácter de más). Se compara
+        # el dato que de verdad se parece: enseñar etiquetas cuando lo que casó
+        # fue la serie deja al usuario sin ver en qué se basó la sospecha.
+        por_serie = info.get("campo_parcial") == "serie"
 
         def fila(etq, valor):
             return ft.Row(
@@ -1356,13 +1365,28 @@ class SeccionRegistroActivos:
                  ft.Text(str(valor or "—"), size=13, selectable=True, expand=True)],
                 vertical_alignment=ft.CrossAxisAlignment.START)
 
+        if por_serie:
+            explicacion = ("El número de serie del levantamiento se parece al de un "
+                           "activo del SIPP, pero no es idéntico (un carácter de más "
+                           "o de menos). Si es el mismo activo y se da de alta, "
+                           "quedaría DUPLICADO en el SIPP. Revisa y decide:")
+            comparacion = [
+                fila("Serie del levantamiento", reg.no_serie or "—"),
+                fila("Serie en el SIPP", info.get("serie_sipp") or info.get("serie")),
+                fila("Etiqueta en el SIPP", etq_sipp),
+            ]
+        else:
+            explicacion = ("La etiqueta del levantamiento se parece a una del SIPP, "
+                           "pero no es idéntica (posible error de dedo o un dígito "
+                           "faltante). Revisa el detalle y decide:")
+            comparacion = [
+                fila("Etiqueta del levantamiento", reg.etiqueta or "—"),
+                fila("Etiqueta en el SIPP", f"{etq_sipp}   (similitud {sim_txt})"),
+            ]
         cuerpo = [
-            ft.Text("La etiqueta del levantamiento se parece a una del SIPP, pero no "
-                    "es idéntica (posible error de dedo o un dígito faltante). "
-                    "Revisa el detalle y decide:", size=12, color=GRIS),
+            ft.Text(explicacion, size=12, color=GRIS, no_wrap=False),
             ft.Divider(),
-            fila("Etiqueta del levantamiento", reg.etiqueta or "—"),
-            fila("Etiqueta en el SIPP", f"{etq_sipp}   (similitud {sim_txt})"),
+            *comparacion,
             ft.Divider(),
             fila("Insumo (SIPP)", info.get("insumo")),
             fila("No. de serie (SIPP)", info.get("serie")),
@@ -1400,7 +1424,8 @@ class SeccionRegistroActivos:
         confirmado (sin marca de parcial) y se precarga su detalle."""
         db.fijar_etiqueta_levantamiento(reg.id, etq_sipp)
         datos_sipp = {k: v for k, v in info.items()
-                      if k not in ("parcial", "similitud", "etiqueta_sipp")}
+                      if k not in ("parcial", "similitud", "etiqueta_sipp",
+                                   "campo_parcial", "serie_sipp")}
         db.actualizar_estatus_levantamiento(
             reg.id, db.EST_DADO_ALTA, etq_sipp, datos_sipp)
         # Prefill del tipo/detalle si aún no hay captura (ya es una coincidencia
@@ -2158,6 +2183,10 @@ class SeccionRegistroActivos:
         extras = []
         if motivo_api:
             extras.append(f"{motivo_api}; se comparó con la caché local")
+        if res.parciales:
+            extras.append(f"{len(res.parciales)} con un número de serie PARECIDO al "
+                          f"de un activo del SIPP: quedaron como posible "
+                          f"coincidencia, resuélvelos antes de dar de alta")
         if res.adoptadas:
             extras.append(f"{len(res.adoptadas)} sin etiqueta tomaron la del SIPP "
                           f"(coincidió el número de serie)")
@@ -2273,6 +2302,7 @@ class SeccionRegistroActivos:
         paso, activos que SÍ están en el SIPP salían «no dados de alta» y el RPA
         los habría duplicado.
         """
+        from core import activos_sipp
         from core.empresas import ID_POR_EMPRESA
 
         # El refresco por API ya NO va aquí: lo hace `_buscar` antes, sobre TODAS
@@ -2282,6 +2312,9 @@ class SeccionRegistroActivos:
             [(r.etiqueta or "") for r in registros])
         por_serie_cache = db.activos_sipp_por_series(
             [_serie_buscable(r.no_serie) for r in registros])
+        # Índice de TODAS las series cacheadas, para el repaso tolerante de abajo.
+        # Se arma una sola vez por búsqueda (son decenas de miles de activos).
+        indices_serie = activos_sipp.indice_series()
         res = ResultadoBusquedaSipp()
         for r in registros:
             etq = (r.etiqueta or "").strip()
@@ -2291,6 +2324,22 @@ class SeccionRegistroActivos:
                 serie = _serie_buscable(r.no_serie)
                 opciones = por_serie_cache.get(serie.upper(), []) if serie else []
                 hallado_por_serie = bool(opciones)
+            if not opciones and _serie_buscable(r.no_serie):
+                # La serie tal cual no apareció: puede estar escrita distinto
+                # (guiones, espacios) o con un carácter de más. Sin este repaso, el
+                # activo salía «no dado de alta» y el RPA lo duplicaba en el SIPP.
+                aprox, exacta = activos_sipp.buscar_por_serie(
+                    r.no_serie, indices_serie)
+                if aprox and exacta:
+                    opciones, hallado_por_serie = aprox, True
+                elif aprox:
+                    # Parecida, no idéntica: NO se decide sola. Queda como posible
+                    # coincidencia (ámbar, con su botón «Resolver»), que además la
+                    # saca de la lista de altas: mejor preguntar que duplicar.
+                    self._marcar_posible_coincidencia(r, aprox[0])
+                    res.parciales.append((r, aprox[0]))
+                    res.hechos += 1
+                    continue
             if not opciones:
                 # Solo con el catálogo COMPLETO una ausencia prueba algo. Con una
                 # caché parcial, marcarlo «no dado de alta» es invitar al RPA a
@@ -2315,6 +2364,21 @@ class SeccionRegistroActivos:
                 self._aplicar_resultado_sipp(r, elegido)
                 res.hechos += 1
         return res
+
+    def _marcar_posible_coincidencia(self, r: "db.Levantamiento", datos: dict) -> None:
+        """Deja el registro como POSIBLE coincidencia por número de serie.
+
+        No lo da por dado de alta ni por nuevo: lo pinta en ámbar con su botón
+        «Resolver», donde el usuario ve las dos series y decide. Lo importante es
+        que deja de ser «no dado de alta», que es lo que el RPA usa para crear
+        activos: una serie parecida es motivo suficiente para no arriesgar un
+        duplicado en el SIPP."""
+        info = dict(datos, parcial=True, campo_parcial="serie",
+                    etiqueta_sipp=(datos.get("etiqueta") or "").strip(),
+                    serie_sipp=(datos.get("serie") or "").strip())
+        db.actualizar_estatus_levantamiento(
+            r.id, db.EST_DADO_ALTA, (datos.get("etiqueta") or "").strip() or None,
+            info)
 
     def _conciliar_por_serie(self, r: "db.Levantamiento", datos: dict,
                              res: "ResultadoBusquedaSipp") -> None:

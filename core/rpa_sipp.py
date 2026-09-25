@@ -330,8 +330,8 @@ class SesionSipp:
     # PRODUCTIVO: el RPA da de alta y modifica activos REALES, y las etiquetas que
     # consume el alta son consecutivos que no se recuperan. Al probar cambios del
     # flujo, cámbialo a `test` y regrésalo antes de publicar.
-    BASE_URL = "https://sipp.petroil.com.mx"
-    # BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
+    # BASE_URL = "https://sipp.petroil.com.mx"   # PRODUCTIVO
+    BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
     # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
     # BASE_URL = "https://dev.sipp.petroil.dev"    # desarrollo
     URL_LOGIN = BASE_URL + "/login.html"

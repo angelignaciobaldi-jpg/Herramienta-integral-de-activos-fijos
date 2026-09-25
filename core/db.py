@@ -1610,6 +1610,27 @@ def _activos_sipp_por(campo: str, valores: list[str]) -> dict[str, list[dict]]:
     return salida
 
 
+def series_sipp() -> list[tuple[str, int, str]]:
+    """(serie, id_empresa, etiqueta) de TODO lo cacheado que tenga serie.
+
+    Ligero a propósito: son ~65 mil activos y quien la usa solo necesita indexar
+    las series para comparar; los datos completos se piden después, y solo de los
+    pocos que coincidan."""
+    with _conectar() as con:
+        return [(f["serie"], f["id_empresa"], f["etiqueta"]) for f in con.execute(
+            "SELECT serie, id_empresa, etiqueta FROM activos_sipp "
+            "WHERE IFNULL(serie,'') <> ''")]
+
+
+def activo_sipp(id_empresa: int, etiqueta: str) -> "dict | None":
+    """Un activo cacheado concreto, con todos sus campos."""
+    candidatos = activos_sipp_por_etiquetas([etiqueta])
+    for a in candidatos.get((etiqueta or "").strip().upper(), []):
+        if a.get("id_empresa") == id_empresa:
+            return a
+    return None
+
+
 def hay_activos_sipp() -> bool:
     """¿Hay algún activo del SIPP descargado, de la empresa que sea?
 

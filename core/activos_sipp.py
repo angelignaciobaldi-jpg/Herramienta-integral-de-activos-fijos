@@ -17,6 +17,7 @@ entorno de pruebas está vacío, así que no se fijan índices rígidos).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 
 from . import db
@@ -341,3 +342,94 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
         id_empresa, nombre_final or empresa_nombre or "", registros,
         actualizado_en=datetime.now().strftime("%Y-%m-%d %H:%M"))
     return {"guardados": guardados, "total": len(filas)}
+
+
+# ------------------------------------------- búsqueda por NÚMERO DE SERIE
+# Longitud mínima para fiarse de una serie al compararla: por debajo, cualquier
+# parecido es casualidad.
+_MIN_SERIE = 6
+# Cola que se usa como índice para las coincidencias aproximadas. Ocho caracteres
+# distinguen de sobra entre 65 mil activos y sobreviven a un prefijo de más.
+_COLA = 8
+_NO_ALNUM = re.compile(r"[^A-Z0-9]")
+
+
+def normalizar_serie(serie: str) -> str:
+    """La serie sin puntuación ni espacios, en mayúsculas.
+
+    «BZZMH4ZT-300845», «bzzmh4zt 300845» y «BZZMH4ZT300845» son la MISMA serie
+    escrita distinto; compararlas tal cual dejaba al activo como no dado de alta
+    y el RPA lo volvía a crear en el SIPP."""
+    return _NO_ALNUM.sub("", (serie or "").upper())
+
+
+def indice_series() -> tuple[dict, dict]:
+    """Índices de las series cacheadas: (por serie normalizada, por su cola).
+
+    Solo guardan (id_empresa, etiqueta) —no el activo entero— porque son decenas
+    de miles y los datos completos se piden después, solo de los que coincidan.
+    """
+    exactas: dict[str, list] = {}
+    colas: dict[str, list] = {}
+    for serie, id_empresa, etiqueta in db.series_sipp():
+        n = normalizar_serie(serie)
+        if len(n) < _MIN_SERIE:
+            continue
+        clave = (id_empresa, etiqueta)
+        exactas.setdefault(n, []).append(clave)
+        if len(n) >= _COLA:
+            colas.setdefault(n[-_COLA:], []).append(clave)
+    return exactas, colas
+
+
+def buscar_por_serie(serie: str, indices: tuple[dict, dict]) -> tuple[list[dict], bool]:
+    """Activos del SIPP con esa serie. Devuelve (activos, es_exacta).
+
+    - EXACTA: la misma serie, aunque esté escrita con guiones o espacios.
+    - APROXIMADA: una contiene a la otra (un carácter de más al inicio o al
+      final, como «MP265665» y «SMP265665»). No se da por buena sola: el
+      llamador la marca como POSIBLE coincidencia para que la confirme una
+      persona. Vale la pena aunque a veces falle: el costo de no detectarla es
+      un activo duplicado en el SIPP, y el de detectarla de más, una pregunta.
+    """
+    n = normalizar_serie(serie)
+    if len(n) < _MIN_SERIE:
+        return [], False
+    exactas, colas = indices
+    if n in exactas:
+        return _activos(exactas[n]), True
+    candidatos = []
+    for clave in colas.get(n[-_COLA:], []) if len(n) >= _COLA else []:
+        candidatos.append(clave)
+    # Prefijo/sufijo de más o de menos (no cubierto por la cola cuando el cambio
+    # está al final).
+    for variante in (n[1:], n[:-1]):
+        if len(variante) >= _MIN_SERIE:
+            candidatos += exactas.get(variante, [])
+    vistos, unicos = set(), []
+    for clave in candidatos:
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        unicos.append(clave)
+    activos = [a for a in _activos(unicos)
+               if _parecidas(n, normalizar_serie(a.get("serie")))]
+    return activos, False
+
+
+def _parecidas(a: str, b: str) -> bool:
+    """Una contiene a la otra y difieren en poco (hasta dos caracteres)."""
+    if not a or not b or a == b:
+        return a == b
+    largo, corto = (a, b) if len(a) >= len(b) else (b, a)
+    return corto in largo and len(largo) - len(corto) <= 2
+
+
+def _activos(claves: list) -> list[dict]:
+    """Los activos completos de [(id_empresa, etiqueta)]."""
+    salida = []
+    for id_empresa, etiqueta in claves:
+        activo = db.activo_sipp(id_empresa, etiqueta)
+        if activo:
+            salida.append(activo)
+    return salida
