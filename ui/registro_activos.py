@@ -2599,7 +2599,13 @@ class SeccionRegistroActivos:
         lista = ft.ListView(spacing=8, expand=True)
         for fila in filas:
             textos = [t for _v, t in fila["opciones"]]
-            _, dd = campo_opciones("Elige", textos, flotante=True, width=238)
+            # `preseleccion`: la opción que ya viene marcada. Se usa donde hay una
+            # respuesta razonable por defecto (el activo que el SIPP propone), para
+            # que el usuario solo toque las filas que son la excepción.
+            inicial = next((t for v, t in fila["opciones"]
+                            if v == fila.get("preseleccion")), None)
+            _, dd = campo_opciones("Elige", textos, valor=inicial, flotante=True,
+                                   width=238)
             campos[fila["clave"]] = (dd, dict(zip(textos, [v for v, _t in fila["opciones"]])))
             lista.controls.append(ft.Container(
                 ft.Column(
@@ -2698,17 +2704,39 @@ class SeccionRegistroActivos:
         uno nuevo que todavía no está en el portal. Sin etiqueta ni serie no hay
         forma de saberlo desde el dato: lo decide quien conoce el inventario.
         """
+        from core import activos_sipp
+
         filas = []
+        # Reparto: dos sillas de la misma persona en el levantamiento y dos en el
+        # SIPP son dos activos distintos, no el mismo dos veces. A cada fila del
+        # grupo se le propone una etiqueta DIFERENTE, en orden; si hay más filas
+        # que activos en el portal, las que sobran se proponen como nuevas.
+        siguiente: dict = {}
         for r, opciones in candidatos:
-            ops = [(str(i), f"Es {a.get('etiqueta')} ({a.get('insumo') or 'sin insumo'})")
-                   for i, a in enumerate(opciones)]
+            grupo = (activos_sipp._norm_texto(r.responsable),
+                     activos_sipp._norm_texto(r.nombre_insumo))
+            i = siguiente.get(grupo, 0)
+            siguiente[grupo] = i + 1
+            propuesto = opciones[i] if i < len(opciones) else None
+            ops = [(str(j), f"Es {a.get('etiqueta')} ({a.get('insumo') or 'sin insumo'})")
+                   for j, a in enumerate(opciones)]
             ops.append(("nuevo", "Es otro activo: darlo de alta"))
-            # Con varios candidatos se listan todos en la columna del SIPP; el
-            # desplegable los nombra por etiqueta para poder elegir cuál es.
-            sipp = self._resumen_sipp(opciones[0])
-            if len(opciones) > 1:
-                sipp.append(("Otros", ", ".join(a.get("etiqueta") or "—"
-                                                for a in opciones[1:])))
+            # La columna del SIPP muestra el activo PROPUESTO; los demás del grupo
+            # se nombran debajo, porque el desplegable deja cambiarlo.
+            if propuesto is None:
+                # Más filas que activos en el portal: a esta no le toca ninguno, así
+                # que la columna lo dice en vez de enseñar uno que ya se propuso en
+                # otro renglón.
+                sipp = [("Propuesta", "Ninguna: los de esta persona ya se "
+                                      "proponen en los renglones de arriba"),
+                        ("En el SIPP", ", ".join(a.get("etiqueta") or "—"
+                                                 for a in opciones))]
+            else:
+                sipp = self._resumen_sipp(propuesto)
+                otros = [a.get("etiqueta") or "—" for a in opciones
+                         if a is not propuesto]
+                if otros:
+                    sipp.append(("Otros", ", ".join(otros)))
             filas.append({
                 "clave": r.id,
                 "titulo": (f"{r.nombre_insumo or '(sin insumo)'}  ·  "
@@ -2716,6 +2744,7 @@ class SeccionRegistroActivos:
                 "sipp": sipp,
                 "levantamiento": self._resumen_levantamiento(r),
                 "opciones": ops,
+                "preseleccion": str(i) if propuesto is not None else "nuevo",
             })
         elegido = await self._decidir_en_tabla(
             "Sin etiqueta ni serie: ¿es el que ya está en el SIPP?",
