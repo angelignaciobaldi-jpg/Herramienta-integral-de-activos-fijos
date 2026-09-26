@@ -55,6 +55,21 @@ Ejemplos cartas responsivas/
 # Inventarios reales en Excel (pesados y con datos del negocio)
 *.xlsx
 
+# ZIP de fotos del levantamiento que se dejan en la raíz para revisarlos
+# (OneDrive_2026-09-25.zip y parecidos): cientos de MB de fotos reales.
+*.zip
+# …y sus carpetas ya extraídas.
+OneDrive_*/
+# Fotos sueltas dejadas en la raíz al probar el emparejamiento. Solo la RAÍZ:
+# `Imagenes/` son los recursos de la app (logos, icono) y sí van al repo.
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
+/*.bmp
+/*.tif
+/*.tiff
+/*.heic
 # Imágenes extraídas de los ZIP de levantamiento (datos reales)
 imagenes_levantamiento/
 # Imágenes del insumo adjuntadas en la captura (se suben al SIPP; datos reales)
