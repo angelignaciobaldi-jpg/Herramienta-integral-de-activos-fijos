@@ -43,6 +43,35 @@
 > Las variantes con sufijo `_EDITAR` (`filtrosEditar.*`, `FH_*_EDITAR`) son el
 > mismo modelo para el flujo de edición.
 
+### Fotografía del activo (alta y edición)
+
+| Formulario | Input | `ng-change` |
+|---|---|---|
+| Alta | `#ar_ArchivoSoporte` | `subirFotografia(this)` |
+| Edición | `#ar_ArchivoSoporteEditar` | `subirFotografiaEditar(this)` |
+| Consulta | `#ar_ArchivoSoporte` (deshabilitado) | `subirFotografiaEditar(this)` |
+
+El id se repite entre la edición y la consulta, así que el localizador fiable es
+el `ng-change` **más** `:not([disabled])`.
+
+Reglas del portal (`js/controllers/ActivosFijosNuevo.js`), todas validadas en el
+navegador y no en el servidor:
+
+- Máximo **3 fotos** por activo y **2 MB** por archivo, solo JPG/JPEG/PNG/PDF. Lo
+  que no cumple dispara un *alert* y el input se limpia: no sube nada y deja el
+  aviso encima del formulario.
+- Las fotos viven en `$scope.ar_ArchivosFotografias`. Borrar una
+  (`borrarFotografiaEdit`) **no la quita del arreglo**: le deja `nombre` y `ruta`
+  en blanco. Al guardar, los huecos se emparejan por POSICIÓN con
+  `$scope.fotografias` para conservar su `id_Fotografia`, así que reutilizar un
+  hueco ACTUALIZA esa foto en vez de crear otra.
+- La subida es asíncrona (el archivo va a un almacenamiento externo): la foto
+  solo existe cuando el servidor responde y aparece en el arreglo. Guardar antes
+  la pierde sin avisar.
+- Al guardar la edición, si el activo lleva alguna foto el portal **exige**
+  empleado de resguardo; sin él aborta con un mensaje en línea y no se guarda
+  nada del activo.
+
 ### Bloque de depreciación (`formB.*`)
 
 | Campo | Significado |

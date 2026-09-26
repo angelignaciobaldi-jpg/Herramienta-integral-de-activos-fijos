@@ -3068,6 +3068,10 @@ class SeccionRegistroActivos:
                     fila["observacion"] += (
                         f" · {', '.join(sipp.ultimos_en_descripcion)} en la "
                         f"Descripción (el insumo no tiene esos campos)")
+                # Una foto que el portal no admitió (pesa de más, formato raro)
+                # se perdía en silencio: el alta salía «correcta» sin imagen.
+                if sipp.ultimo_aviso_fotos:
+                    fila["observacion"] += f" · {sipp.ultimo_aviso_fotos}"
             # Un registro con error (insumo no hallado en el modal, campo, red…)
             # NO aborta el lote: se anota y se sigue con el siguiente.
             except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
@@ -4100,6 +4104,56 @@ class SeccionRegistroActivos:
             return quedan
         return pendientes
 
+    async def _preguntar_fotografias(self, pendientes: list) -> "str | None":
+        """¿Qué hacer con la fotografía de los activos que se van a modificar?
+
+        Devuelve «omitir», «faltantes» (solo donde el SIPP no tenga foto) o
+        «reemplazar», o None si el usuario cancela la corrida.
+
+        Se pregunta UNA vez por corrida y no activo por activo porque el proceso
+        corre desatendido; y se pregunta, en vez de decidirlo la herramienta, porque
+        reemplazar BORRA la fotografía que el SIPP ya tenía —que pudo subirla otra
+        persona— y agregar no toca nada. Solo aparece si hay algo que subir: sin
+        fotos en el levantamiento, no hay decisión que tomar.
+        """
+        con_foto = [r for r in pendientes if self._imagenes_para_alta(r)]
+        if not con_foto:
+            return "omitir"
+
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor: str) -> None:
+            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
+            # que vuelve a entrar aquí (ver `_confirmar_etiquetas_repetidas`).
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        modal = Modal(self.page, "Fotografía de los activos", ancho=640,
+                      al_cerrar=lambda: responder("cancelar"))
+        modal.cuerpo.controls = [
+            ft.Text(f"{len(con_foto)} de los {len(pendientes)} activos por modificar "
+                    "tienen fotografía en la herramienta. El SIPP admite hasta 3 por "
+                    "activo.", size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Text("«Solo si falta» no toca las que ya estén en el SIPP: sube la "
+                    "foto únicamente a los activos sin ninguna. «Reemplazar» "
+                    "sustituye las que el activo tenga por las del levantamiento.",
+                    size=11, color=GRIS, no_wrap=False)]
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder("cancelar")),
+            boton_herramienta("Sin fotos",
+                              on_click=lambda _e: responder("omitir")),
+            boton_secundario("Reemplazar", ft.Icons.SWAP_HORIZ,
+                             lambda _e: responder("reemplazar")),
+            boton_primario("Solo si falta", ft.Icons.ADD_A_PHOTO,
+                           lambda _e: responder("faltantes")),
+        ])
+        modal.abrir()
+
+        eleccion = await decision
+        return None if eleccion == "cancelar" else eleccion
+
     @staticmethod
     def _pendientes_modificacion() -> list:
         """Activos dados de alta con cambios locales por enviar. Se relee de la base
@@ -4135,6 +4189,12 @@ class SeccionRegistroActivos:
             return
         if not pendientes:
             self.app.avisar("No quedó ningún activo por enviar.", NARANJA)
+            return
+
+        # Qué hacer con las fotos. Va junto al resto de las preguntas, ANTES de
+        # abrir el navegador: a media corrida no hay quién conteste.
+        modo_fotos = await self._preguntar_fotografias(pendientes)
+        if modo_fotos is None:
             return
 
         total = len(pendientes)
@@ -4203,7 +4263,10 @@ class SeccionRegistroActivos:
                 try:
                     resultado = await sipp.modificar_activo(
                         r.etiqueta, r.no_serie, campos, detalles,
-                        punto_control=ctrl.punto_control, insumo_id=insumo_id)
+                        punto_control=ctrl.punto_control, insumo_id=insumo_id,
+                        imagenes=(self._imagenes_para_alta(r)
+                                  if modo_fotos != "omitir" else None),
+                        reemplazar_fotos=(modo_fotos == "reemplazar"))
                     no_aplicados = resultado["no_aplicados"]
                     db.actualizar_datos_levantamiento(r.id, modificado=False)
                     fila["ok"] = True
@@ -4230,6 +4293,10 @@ class SeccionRegistroActivos:
                         fila["observacion"] += (
                             f" {', '.join(resultado['en_descripcion'])} en la "
                             f"Descripción (el insumo no tiene esos campos).")
+                    # La foto se dice SIEMPRE que se intentó: subida, reemplazada
+                    # o no admitida. Es lo que el usuario vino a verificar.
+                    if resultado.get("fotos"):
+                        fila["observacion"] += f" {resultado['fotos']}."
                     aplicados.append(r)
                 # Detenido a media captura: NADA se guardó de este activo (no se
                 # llegó a Guardar), así que queda pendiente tal cual para reanudar.
