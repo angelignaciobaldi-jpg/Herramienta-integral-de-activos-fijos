@@ -779,7 +779,8 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
 # desplegables de valores distintos); de texto = CONTIENE. Lista blanca: solo estas
 # columnas son filtrables (evita inyección al construir el SQL con el nombre).
 _FILTRO_EXACTO = ("empresa", "sucursal", "departamento")
-_FILTRO_CONTIENE = ("nombre_insumo", "etiqueta", "no_serie", "ubicacion")
+_FILTRO_CONTIENE = ("nombre_insumo", "responsable", "etiqueta", "no_serie",
+                    "ubicacion")
 COLUMNAS_FILTRABLES = _FILTRO_EXACTO + _FILTRO_CONTIENE
 
 
@@ -1608,6 +1609,52 @@ def _activos_sipp_por(campo: str, valores: list[str]) -> dict[str, list[dict]]:
                 salida.setdefault(
                     (f[campo] or "").strip().upper(), []).append(base)
     return salida
+
+
+def series_sipp() -> list[tuple[str, int, str]]:
+    """(serie, id_empresa, etiqueta) de TODO lo cacheado que tenga serie.
+
+    Ligero a propósito: son ~65 mil activos y quien la usa solo necesita indexar
+    las series para comparar; los datos completos se piden después, y solo de los
+    pocos que coincidan."""
+    with _conectar() as con:
+        return [(f["serie"], f["id_empresa"], f["etiqueta"]) for f in con.execute(
+            "SELECT serie, id_empresa, etiqueta FROM activos_sipp "
+            "WHERE IFNULL(serie,'') <> ''")]
+
+
+def resguardos_sipp() -> list[tuple[str, str, int, str]]:
+    """(empleado, insumo, id_empresa, etiqueta) de lo cacheado que tenga empleado.
+
+    Es el índice para reconocer un activo del levantamiento que llega SIN etiqueta
+    y SIN serie: lo único que queda para reconocerlo es de quién es y qué es.
+    Ligero como `series_sipp`: los datos completos se piden después."""
+    with _conectar() as con:
+        return [(f["empleado"], f["insumo"], f["id_empresa"], f["etiqueta"])
+                for f in con.execute(
+                    "SELECT empleado, insumo, id_empresa, etiqueta FROM activos_sipp "
+                    "WHERE IFNULL(empleado,'') <> ''")]
+
+
+def etiquetas_en_uso_levantamiento() -> set:
+    """Etiquetas del SIPP que ALGÚN registro del levantamiento ya tiene tomadas.
+
+    Sirve para no ofrecer dos veces el mismo activo del portal: si un teclado del
+    SIPP ya quedó emparejado con una fila, no puede ser también el de otra."""
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT IFNULL(etiqueta,''), IFNULL(id_activo_sipp,'') FROM levantamiento"
+        ).fetchall()
+    return {v.strip().upper() for f in filas for v in f if v and v.strip()}
+
+
+def activo_sipp(id_empresa: int, etiqueta: str) -> "dict | None":
+    """Un activo cacheado concreto, con todos sus campos."""
+    candidatos = activos_sipp_por_etiquetas([etiqueta])
+    for a in candidatos.get((etiqueta or "").strip().upper(), []):
+        if a.get("id_empresa") == id_empresa:
+            return a
+    return None
 
 
 def hay_activos_sipp() -> bool:

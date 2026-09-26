@@ -79,6 +79,13 @@ class DatosImagen:
         return bool(self.numero_ambiguo)
 
 
+# Marca de copia al final del nombre: « (1)», «(12)».
+# Largo mínimo para creer que un sufijo del nombre identifica un activo. Las
+# etiquetas del SIPP tienen 5, 7 o 10 dígitos y las series casi siempre más.
+_LARGO_IDENTIFICADOR = 4
+_RE_COPIA = re.compile(r"\s*\(\d{1,3}\)\s*$")
+
+
 def parsear_nombre(nombre_archivo: str) -> DatosImagen:
     """Deduce insumo y ETIQUETA del nombre de la imagen.
 
@@ -102,6 +109,15 @@ def parsear_nombre(nombre_archivo: str) -> DatosImagen:
         que su última palabra se registre como serie.
     """
     base = os.path.splitext(os.path.basename(str(nombre_archivo or "")))[0].strip()
+    if not base:
+        return DatosImagen(insumo="", base=base)
+    # «(1)», «(2)»… al final NO son parte del nombre: son la marca de copia que
+    # ponen Windows, OneDrive y el propio aplanado del ZIP cuando dos archivos se
+    # llaman igual. Leerla como número de serie descartaba la foto: el
+    # emparejador creía que nombraba OTRO activo (ver
+    # `_trae_identificador_ajeno`), y con 51 escritorios repetidos eso era la
+    # mitad del levantamiento.
+    base = _RE_COPIA.sub("", base).strip()
     if not base:
         return DatosImagen(insumo="", base=base)
     # Se corta por el separador MÁS A LA DERECHA de los tres admitidos.
@@ -194,7 +210,31 @@ def _mismo_empleado(a: frozenset, b: frozenset) -> bool:
     """
     if not a or not b:
         return False
-    return (a <= b or b <= a) and len(a & b) >= 2
+    if (a <= b or b <= a) and len(a & b) >= 2:
+        return True
+    # Una palabra mal escrita no debería romper el emparejado: la carpeta decía
+    # «EFREEN VILLAREAL CORONEL» y el levantamiento «EFREEN VILLARREAL CORONEL»
+    # —una R—, y sus 12 fotos se quedaban sin activo. Se exige que TODAS las
+    # palabras del nombre corto emparejen, exactas o casi (una letra de
+    # diferencia), y al menos dos exactas: con una sola coincidencia exacta,
+    # «JESUS JAVIER RODRIGUEZ» y «JESUS MANUEL RODRIGUEZ» pasarían por la misma
+    # persona.
+    corto, largo = (a, b) if len(a) <= len(b) else (b, a)
+    if len(a & b) < 2:
+        return False
+    return all(any(_casi_igual(x, y) for y in largo) for x in corto)
+
+
+def _casi_igual(a: str, b: str) -> bool:
+    """Dos palabras iguales salvo un dedazo (una letra de más, de menos o
+    cambiada). Se exige longitud mínima: en palabras cortas, una letra cambia el
+    nombre («ANA» y «ANI»)."""
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 5 or abs(len(a) - len(b)) > 1:
+        return False
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.88
 
 
 def _carpetas_de(ruta: str, raiz: str) -> list[str]:
@@ -229,8 +269,13 @@ def _trae_identificador_ajeno(archivo: str, registro) -> bool:
     """
     datos = parsear_nombre(archivo)
     sufijo = _clave_id(datos.etiqueta or datos.serie or datos.numero_ambiguo)
-    if not sufijo:
-        return False   # el nombre no dice más: no hay motivo para descartarla
+    if len(sufijo) < _LARGO_IDENTIFICADOR:
+        # Ni etiqueta ni serie tienen tres caracteres: «SILLA 1.jpg» y
+        # «ESCRITORIO 2.jpg» están enumerando las tres sillas de una persona, no
+        # nombrando un activo distinto. Tratarlo como identificador ajeno
+        # descartaba justo las fotos que la carpeta del responsable sí podía
+        # ubicar.
+        return False
     propios = {p for p in (_clave_id(registro.etiqueta),
                            _clave_id(registro.no_serie)) if p}
     if not propios:
@@ -336,7 +381,9 @@ def emparejar_imagenes(entradas: list, registros: list, raiz: str = "",
                 break
 
     # --- Paso 2: insumo DENTRO de los registros del responsable ------------
-    for par in pares:
+    # Por nombre de archivo: el reparto de varias fotos iguales entre varios
+    # registros iguales debe ser el mismo cada vez que se corra.
+    for par in sorted(pares, key=lambda p: p.archivo.upper()):
         if par.emparejado:
             continue
         nombre_carpeta, ids_emp = responsables[id(par)]
@@ -347,14 +394,23 @@ def emparejar_imagenes(entradas: list, registros: list, raiz: str = "",
                      if rid not in usados
                      and _clave_id(por_id[rid].nombre_insumo)
                      and _clave_id(por_id[rid].nombre_insumo) in base]
-        if len(coinciden) != 1:
+        if not coinciden:
             continue
-        registro = por_id[coinciden[0]]
+        # Gana el insumo MÁS ESPECÍFICO: «SILLA SECRETARIAL.jpg» contiene también
+        # «SILLA», y son dos insumos distintos.
+        largo = max(len(_clave_id(por_id[rid].nombre_insumo)) for rid in coinciden)
+        finalistas = [rid for rid in coinciden
+                      if len(_clave_id(por_id[rid].nombre_insumo)) == largo]
+        # Entre varios del MISMO insumo y la MISMA persona da igual cuál: son
+        # intercambiables (dos sillas iguales de Juan, sin serie que las
+        # distinga). Se toma el primero libre, así las fotos «SILLA 1, SILLA 2,
+        # SILLA 3» se reparten una por registro en vez de quedarse todas fuera.
+        registro = por_id[finalistas[0]]
         if _trae_identificador_ajeno(par.archivo, registro):
             continue    # la foto nombra otro activo: no es de este
-        par.id_registro = coinciden[0]
+        par.id_registro = registro.id
         par.motivo = f"insumo · carpeta de {nombre_carpeta}"
-        usados.add(coinciden[0])
+        usados.add(registro.id)
 
     # --- Paso 3: nombre del insumo, con desempate por el usuario -----------
     candidatas: dict = {}
