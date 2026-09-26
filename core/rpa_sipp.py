@@ -48,7 +48,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from core import certificados, rutas
+from core import certificados, imagenes_sipp, rutas
 
 # Carpeta del proyecto (para guardar diagnósticos del RPA en desarrollo).
 _PROYECTO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -322,6 +322,37 @@ _JS_LLENAR_CAMPOS_DETALLE = r"""(args) => {
 }"""
 
 
+# --- JavaScript que se evalúa en el portal para las fotografías ---------------
+# El portal guarda las fotos del activo en `ar_ArchivosFotografias` (scope del
+# controlador ActivosFijosNuevo). Un hueco con nombre/ruta en blanco es una foto
+# BORRADA que conserva su lugar; solo cuentan las que tienen ambos.
+ESTADO_FOTOS_JS = """(sel) => {
+    const el = document.querySelector(sel);
+    if (!el || !window.angular) return null;
+    const sc = angular.element(el).scope();
+    if (!sc) return null;
+    const fotos = sc.ar_ArchivosFotografias || [];
+    const emp = (sc.filtrosEditar || {}).id_EmpleadoResguardo;
+    return {
+        reales: fotos.filter((f) => f && f.nombre && f.ruta).length,
+        empleado: emp ? String(emp) : "",
+    };
+}"""
+
+LIBERAR_FOTOS_JS = """(sel) => {
+    const el = document.querySelector(sel);
+    if (!el || !window.angular) return 0;
+    const sc = angular.element(el).scope();
+    if (!sc) return 0;
+    let n = 0;
+    (sc.ar_ArchivosFotografias || []).forEach((f) => {
+        if (f && (f.nombre || f.ruta)) { f.nombre = ''; f.ruta = ''; n++; }
+    });
+    if (n) { try { sc.$apply(); } catch (e) { sc.$applyAsync(); } }
+    return n;
+}"""
+
+
 class SesionSipp:
     """Maneja una sesión automatizada del SIPP: navegador, login y selección
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
@@ -339,6 +370,15 @@ class SesionSipp:
     # Rutas SPA del módulo de Activos Fijos (confirmadas en el DOM real).
     URL_CATALOGO_ACTIVOS = BASE_URL + "/index.cfm#/ActivosFijosNuevo"
     URL_BANDEJA_COMPRAS = BASE_URL + "/index.cfm#/BandejaCompraActivos"
+
+    # --- Fotografía del activo ---
+    # El alta y la edición tienen inputs DISTINTOS, y el mismo id (`ar_ArchivoSoporte`)
+    # se repite en el formulario de consulta, que está deshabilitado. Por eso el
+    # localizador es el ng-change + `:not([disabled])`: identifica el formulario y
+    # descarta la copia de solo lectura.
+    SEL_FOTO_ALTA = "input[ng-change='subirFotografia(this)']:not([disabled])"
+    SEL_FOTO_EDICION = ("input[ng-change='subirFotografiaEditar(this)']"
+                        ":not([disabled])")
 
     # --- Tiempos de espera (ms) ---
     TIMEOUT_NAV = 30_000        # navegación / carga de página
@@ -369,6 +409,7 @@ class SesionSipp:
         # Características del último alta que el insumo no tenía y quedaron en la
         # Descripción (ver `_detalles_a_descripcion`), para que el reporte lo diga.
         self.ultimos_en_descripcion: list = []
+        self.ultimo_aviso_fotos: str = ""
 
     # ------------------------------------------------------ ciclo de vida
     async def iniciar(self) -> "SesionSipp":
@@ -1041,6 +1082,142 @@ class SesionSipp:
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
+    # ------------------------------------------------------- fotografías
+    async def _estado_fotografias(self, selector: str) -> "dict | None":
+        """Fotos que YA tiene el activo abierto y si hay empleado de resguardo.
+
+        Se lee del scope de AngularJS y no del DOM porque la lista de fotos
+        (`ar_ArchivosFotografias`) solo se pinta dentro de un `ng-if`, y sus huecos
+        vacíos —los que deja borrar una foto— no se pintan en absoluto: contar
+        miniaturas daría un número distinto al que usa el portal para decidir si
+        acepta la subida.
+
+        El empleado viene junto porque al guardar la edición el portal EXIGE
+        empleado de resguardo si el activo lleva alguna foto: sin él, Guardar aborta
+        con un mensaje en línea y no se guarda NADA del activo, ni los campos. Mejor
+        saberlo antes de subir la foto que perder la modificación entera.
+
+        Devuelve None si no se pudo leer (otra versión del portal): quien llama
+        sigue adelante a ciegas, que es como se hacía antes.
+        """
+        try:
+            return await self._exigir_pagina().evaluate(
+                ESTADO_FOTOS_JS, selector)
+        except Exception:  # noqa: BLE001 — sin lectura se sigue a ciegas
+            return None
+
+    async def _liberar_fotografias(self, selector: str) -> int:
+        """Vacía los huecos de las fotos que el activo ya tiene, para reemplazarlas.
+
+        Hace lo mismo que el botón de borrar del portal (`borrarFotografiaEdit`):
+        deja el hueco con nombre y ruta en blanco en vez de quitarlo del arreglo.
+        Eso importa: al guardar, el portal empareja los huecos POR POSICIÓN con las
+        fotos existentes para conservar su `id_Fotografia`, así que un hueco
+        reutilizado ACTUALIZA la foto en vez de crear otra. Se hace por scope y no
+        por clic porque cada borrado del portal abre su propio diálogo de
+        confirmación, y aquí ya se confirmó con el usuario antes de arrancar.
+        """
+        try:
+            return await self._exigir_pagina().evaluate(
+                LIBERAR_FOTOS_JS, selector)
+        except Exception:  # noqa: BLE001 — no crítico: se intenta subir igual
+            return 0
+
+    async def _esperar_fotografias(self, selector: str, objetivo: int) -> int:
+        """Espera a que el portal termine de subir las fotos. Devuelve cuántas hay
+        (o -1 si no se pudo leer el estado).
+
+        Cada archivo viaja a un almacenamiento externo y solo cuando responde el
+        servidor aparece en `ar_ArchivosFotografias`; pulsar Guardar antes las
+        pierde sin avisar. Por eso se espera al ARREGLO y no un tiempo fijo.
+        """
+        page = self._exigir_pagina()
+        for _ in range(60):  # ~30 s: son subidas reales, no un repintado
+            estado = await self._estado_fotografias(selector)
+            if estado is None:
+                return -1
+            if estado["reales"] >= objetivo:
+                return estado["reales"]
+            await page.wait_for_timeout(500)
+        estado = await self._estado_fotografias(selector)
+        return estado["reales"] if estado else -1
+
+    async def subir_fotografias(self, selector: str, imagenes: "list | None",
+                                reemplazar: bool = False,
+                                detallar_exito: bool = True) -> str:
+        """Sube las fotos al formulario abierto (alta o edición). Best-effort.
+
+        Devuelve un texto para el reporte —vacío si no hay nada que decir—: cuántas
+        subieron, cuáles se reemplazaron y por qué alguna quedó fuera. Que una foto
+        no suba no debe tumbar el alta ni la modificación, pero sí tiene que
+        constar: antes se perdía en silencio.
+
+        `reemplazar`: vacía las fotos que el activo ya tiene en el SIPP antes de
+        subir las nuevas. Lo decide el usuario al arrancar la corrida, porque es la
+        diferencia entre agregar la foto que faltaba y sustituir la que hay.
+
+        `detallar_exito`: con False, callar cuando todo salió bien. En el ALTA la
+        foto es una parte más del alta y anunciarla en cada fila solo estorba; en la
+        MODIFICACIÓN es justo lo que el usuario fue a comprobar, así que se dice.
+        """
+        rutas, avisos = imagenes_sipp.preparar(imagenes)
+        if not rutas:
+            return "; ".join(avisos)
+
+        page = self._exigir_pagina()
+        estado = await self._estado_fotografias(selector)
+        previas = estado["reales"] if estado else 0
+        reemplazadas = 0
+        if estado is not None:
+            if selector == self.SEL_FOTO_EDICION and not estado["empleado"]:
+                return ("No se subió la fotografía: el SIPP la condiciona a que el "
+                        "activo tenga empleado de resguardo, y este no lo tiene.")
+            if previas and not reemplazar:
+                # Sin reemplazo no se AGREGA a lo que ya hay: subir una segunda foto
+                # del mismo activo solo llena los 3 huecos de copias parecidas y
+                # deja al de al lado sin espacio. Es lo que el usuario eligió al
+                # arrancar («Solo si falta»).
+                return (f"No se subió la fotografía: el activo ya tiene "
+                        f"{previas} en el SIPP.")
+            if reemplazar and previas:
+                reemplazadas = await self._liberar_fotografias(selector)
+                previas -= reemplazadas
+            libres = imagenes_sipp.MAXIMO - previas
+            if libres <= 0:
+                return (f"No se subió la fotografía: el activo ya tiene "
+                        f"{imagenes_sipp.MAXIMO} en el SIPP.")
+            if len(rutas) > libres:
+                avisos.append(f"Solo cabían {libres} fotografía(s) más en el SIPP.")
+                rutas = rutas[:libres]
+
+        try:
+            await page.set_input_files(selector, rutas)
+        except Exception as exc:  # noqa: BLE001 — no crítico: se reporta y sigue
+            avisos.append("No se pudo adjuntar la fotografía: "
+                          + mensaje_amigable(exc))
+            return "; ".join(avisos)
+
+        subidas = await self._esperar_fotografias(selector, previas + len(rutas))
+        if subidas < 0:  # sin lectura del scope: se le da su tiempo y a ciegas
+            await page.wait_for_timeout(1500 * len(rutas))
+            hechas = len(rutas)
+        else:
+            hechas = max(0, subidas - previas)
+        partes = []
+        if hechas and not detallar_exito and not avisos:
+            return ""
+        if hechas:
+            partes.append(f"{hechas} fotografía(s) subida(s)"
+                          + (f", {reemplazadas} reemplazada(s)" if reemplazadas
+                             else ""))
+        elif reemplazadas:
+            partes.append(f"{reemplazadas} fotografía(s) quitada(s), pero la nueva "
+                          "no terminó de subir")
+        else:
+            partes.append("La fotografía no terminó de subir")
+        partes.extend(avisos)
+        return "; ".join(partes)
+
     async def alta_activo(self, tipo_nombre: str, campos: list,
                           detalles: "dict | None" = None,
                           insumo_id=None, empleado_id=None,
@@ -1161,16 +1338,10 @@ class SesionSipp:
             except Exception:  # noqa: BLE001 — no aplica: se omite
                 pass
 
-        # Imágenes/soporte del insumo (Fotografía, máx 3): se suben al input de
-        # archivo del alta (ng-change="subirFotografia(this)"). Best-effort.
-        rutas_img = [p for p in (imagenes or []) if p and os.path.exists(p)][:3]
-        if rutas_img:
-            try:
-                await page.set_input_files(
-                    "input[ng-change='subirFotografia(this)']", rutas_img)
-                await page.wait_for_timeout(1000)  # ng-change subirFotografia procesa
-            except Exception:  # noqa: BLE001 — no crítico: se omite
-                pass
+        # Imágenes/soporte del insumo (Fotografía, máx 3). Best-effort: una foto
+        # que no entre no debe costar el alta entera.
+        self.ultimo_aviso_fotos = await self.subir_fotografias(
+            self.SEL_FOTO_ALTA, imagenes, detallar_exito=False)
 
         # La ETIQUETA/folio es un consecutivo GLOBAL del SIPP (getEtiqueta ignora
         # empresa y tipo): devuelve el "siguiente" disponible y avanza al guardar
@@ -1296,12 +1467,15 @@ class SesionSipp:
 
     async def modificar_activo(self, etiqueta: str, serie: str, campos: list,
                                detalles: "dict | None" = None,
-                               punto_control=None, insumo_id=None) -> dict:
+                               punto_control=None, insumo_id=None,
+                               imagenes: "list | None" = None,
+                               reemplazar_fotos: bool = False) -> dict:
         """Busca un activo por ETIQUETA (o serie si no hay), abre su edición, aplica
         los campos y guarda. Devuelve:
 
             {"cambios": [(ng_model, antes, después)],
-             "no_aplicados": [(ng_model, motivo)]}
+             "no_aplicados": [(ng_model, motivo)],
+             "fotos": "texto de lo que pasó con la fotografía"}
 
         `cambios` es lo que de verdad cambió en el portal (leído del formulario
         antes y después de escribir), para que el reporte pueda mostrarlo.
@@ -1319,7 +1493,13 @@ class SesionSipp:
 
         `insumo_id`: si se pasa, cambia el INSUMO con el modal «Buscar Insumo» de
         la edición (no es un campo de texto: el portal lo bloquea y solo se elige
-        ahí). Se omite si el activo ya tiene ese insumo."""
+        ahí). Se omite si el activo ya tiene ese insumo.
+
+        `imagenes` / `reemplazar_fotos`: fotos del levantamiento que se adjuntan al
+        activo. Sin `reemplazar_fotos` solo se aprovechan los huecos libres (de 3),
+        con él se sustituyen las que el activo ya tenga en el SIPP. Lo elige el
+        usuario antes de la corrida: agregar la foto que faltaba y sustituir la que
+        hay no son la misma decisión."""
         page = self._exigir_pagina()
         filas = await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
         if filas == 0:
@@ -1367,6 +1547,15 @@ class SesionSipp:
                 "filtrosEditar.de_DescripcionActivo", detalles,
                 res.get("faltantes") or [])
 
+        # La fotografía va al final: la subida sale del navegador hacia el
+        # almacenamiento del portal y tarda, así que se hace cuando el resto del
+        # formulario ya está puesto y todavía antes de Guardar (detenerse aquí
+        # sigue dejando el activo intacto).
+        fotos = ""
+        if imagenes:
+            fotos = await self.subir_fotografias(
+                self.SEL_FOTO_EDICION, imagenes, reemplazar=reemplazar_fotos)
+
         # Última salida limpia: detenerse AQUÍ deja el activo intacto en el portal,
         # porque nada se guarda hasta pulsar Guardar. Pasado este punto el cambio ya
         # está enviado y detener solo evita seguir con el SIGUIENTE activo.
@@ -1382,7 +1571,7 @@ class SesionSipp:
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
         return {"cambios": cambios, "no_aplicados": no_aplicados,
-                "en_descripcion": en_descripcion}
+                "en_descripcion": en_descripcion, "fotos": fotos}
 
     async def _cambiar_insumo_edicion(self, insumo_id) -> "tuple | None":
         """Cambia el insumo del activo abierto en la EDICIÓN. Devuelve el
