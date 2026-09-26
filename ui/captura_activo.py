@@ -23,7 +23,7 @@ import os
 
 import flet as ft
 
-from core import archivos, db
+from core import archivos, db, imagenes_sipp
 from core.empresas import ID_POR_EMPRESA
 from core.tipos_activo import ID_POR_NOMBRE, TIPOS_ACTIVO, campos_de_tipo, nombre_tipo
 from ui.comun import GRIS, NARANJA, NOMBRES_EMPRESAS, ROJO, VERDE
@@ -340,7 +340,7 @@ class DialogoCapturaActivo:
         self._imagenes_insumo: list[str] = []
         self._area_imagenes = ft.Column(spacing=4, tight=True)
         seccion_imagenes = seccion_formulario(
-            "Imágenes del insumo (PDF, JPG o PNG · máx 3)", ft.Icons.PHOTO_LIBRARY,
+            "Imágenes del insumo (máx 3)", ft.Icons.PHOTO_LIBRARY,
             [ft.Column(
                 [ft.Row([boton_secundario("Agregar imágenes",
                                           ft.Icons.ADD_PHOTO_ALTERNATE,
@@ -741,9 +741,25 @@ class DialogoCapturaActivo:
         if len(self._imagenes_insumo) >= 3:
             self.app.avisar("Máximo 3 imágenes por activo.", NARANJA)
             return
+        # El diálogo muestra TODOS los archivos a propósito: el usuario entra a
+        # carpetas comprimidas a buscar las fotos, y ahí el filtro por tipo le
+        # esconde justo lo que va a recoger. Lo que no sirva se descarta abajo,
+        # diciéndolo, en vez de dejarlo fuera del explorador.
         archivos = await self.app.picker.pick_files(
-            dialog_title="Selecciona imágenes del insumo (PDF, JPG o PNG)",
-            allowed_extensions=["pdf", "jpg", "jpeg", "png"], allow_multiple=True)
+            dialog_title="Selecciona las imágenes del insumo", allow_multiple=True)
+        if not archivos:
+            return
+        utiles, descartados = [], []
+        for a in archivos:
+            (utiles if imagenes_sipp.es_admisible(a.path)
+             else descartados).append(a)
+        archivos = utiles
+        if descartados:
+            self.app.avisar(
+                "No se pueden usar como fotografía: "
+                + ", ".join(a.name for a in descartados)
+                + ". El SIPP admite imágenes (JPG, PNG…) y PDF.", NARANJA,
+                duracion=7000)
         if not archivos:
             return
         # Se copian a DATOS para que sigan disponibles al correr el RPA aunque el

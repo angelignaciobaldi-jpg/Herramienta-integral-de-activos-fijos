@@ -29,7 +29,8 @@ from datetime import datetime
 
 import flet as ft
 
-from core import archivos, comparacion_sipp, compras_sipp, credenciales, db, rutas
+from core import (archivos, comparacion_sipp, compras_sipp, credenciales, db,
+                  imagenes_sipp, rutas)
 from core.empresas import ID_POR_EMPRESA
 from core.rpa_sipp import (BucleRpa, ControlRpa, ErrorSipp, RpaDetenido,
                            SesionSipp, mensaje_amigable, serie_para_alta)
@@ -65,9 +66,6 @@ _SEP_FILTRO = 10          # el `spacing` de la fila
 
 # valor real. Fija el ancho mínimo de «Acciones», que debe caber las 6 posibles.
 _LADO_ACCION = 40
-
-# Extensiones de imagen aceptadas para el levantamiento (sin PDF: son fotos).
-IMG_EXT = ["png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 
 # Similitud mínima (0-1) para tratar una etiqueta como "posible coincidencia" con
 # una del SIPP (errores de dedo / un dígito faltante). Ver ProveedorSipp.
@@ -1704,9 +1702,26 @@ class SeccionRegistroActivos:
         carpetas_zip: dict = {}
         carpeta, entradas = "", []
         if origen == "archivos":
+            # Sin filtro de tipo: el explorador tiene que enseñar TODO porque el
+            # usuario entra a carpetas comprimidas a sacar las fotos, y ahí el
+            # filtro esconde lo que va a recoger. Lo que no sea imagen se aparta
+            # aquí y se dice, en vez de desaparecer del explorador.
             seleccion = await self.app.picker.pick_files(
                 dialog_title="Selecciona las imágenes de los activos",
-                allowed_extensions=IMG_EXT, allow_multiple=True)
+                allow_multiple=True)
+            if not seleccion:
+                return
+            utiles, descartados = [], []
+            for a in seleccion:
+                if imagenes_sipp.es_admisible(a.path):
+                    utiles.append(a)
+                else:
+                    descartados.append(a.name)
+            seleccion = utiles
+            if descartados:
+                self.app.avisar("No son imágenes: " + ", ".join(descartados[:5])
+                                + ("…" if len(descartados) > 5 else ""), NARANJA,
+                                duracion=7000)
             if not seleccion:
                 return
             entradas = [(a.name, a.path) for a in seleccion]

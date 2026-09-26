@@ -103,3 +103,27 @@ def preparar(rutas, maximo: int = MAXIMO) -> "tuple[list[str], list[str]]":
             avisos.append(f"«{nombre}» no se pudo convertir a un formato que el "
                           "SIPP acepte (JPG, PNG o PDF).")
     return aptas, avisos
+
+
+def es_admisible(ruta: str) -> bool:
+    """¿Este archivo sirve como fotografía del activo?
+
+    No se decide por la extensión: el selector de archivos ahora muestra TODO
+    —el usuario entra a carpetas comprimidas, donde filtrar por tipo esconde lo
+    que va a buscar—, así que hay que distinguir una imagen de un .docx que se
+    coló. Un PDF pasa por extensión (Pillow no lo abre y el SIPP sí lo admite);
+    el resto se comprueba abriéndolo: así entran WEBP, BMP o TIF, que `preparar`
+    convierte a JPEG, sin tener que listar formatos de antemano.
+    """
+    if not ruta or not os.path.exists(ruta):
+        return False
+    if os.path.splitext(ruta)[1].lower() == ".pdf":
+        return True
+    try:
+        from PIL import Image
+
+        with Image.open(ruta) as img:
+            img.verify()
+        return True
+    except Exception:  # noqa: BLE001 — no es una imagen que se pueda usar
+        return False
