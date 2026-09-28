@@ -16,6 +16,7 @@ Reglas al ampliar este módulo:
 from __future__ import annotations
 
 import asyncio
+import weakref
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Callable, Iterable
@@ -695,6 +696,26 @@ def ancho_util_modal(page) -> int:
     return max(0, round(ventana) - 2 * INSET_MODAL)
 
 
+# Modales ABIERTOS, para reencajarlos cuando cambia el tamaño de la ventana.
+# Son referencias débiles: si alguien suelta un modal sin cerrarlo, se va con el
+# recolector en vez de quedarse aquí colgado.
+_ABIERTOS: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def reajustar_modales_abiertos() -> None:
+    """Vuelve a encajar en la ventana los modales que estén a la vista.
+
+    Lo llama el shell desde su despachador de `page.on_resize`: el alto y el
+    ancho del modal son PÍXELES, así que al achicar la ventana el `AlertDialog`
+    recorta lo que sobra —y lo recortado (un botón «Guardar», por ejemplo) no se
+    alcanza con ningún scroll—."""
+    for modal in list(_ABIERTOS):
+        try:
+            modal.reajustar()
+        except Exception:  # noqa: BLE001 — un modal no debe tumbar el resize
+            pass
+
+
 class Modal:
     """Armazón de diálogo del proyecto (ver ejemplos/modal_insumos.html).
 
@@ -718,6 +739,7 @@ class Modal:
         self.page = page
         self._al_cerrar = al_cerrar
         self._alto_cuerpo = alto_cuerpo   # deseado; se recorta si no cabe
+        self._ancho_deseado = ancho       # deseado; se recorta si no cabe
 
         self._txt_titulo = ft.Text(titulo, size=24, weight=ft.FontWeight.W_600,
                                    color=ft.Colors.ON_SURFACE)
@@ -760,8 +782,13 @@ class Modal:
             padding=ft.Padding.only(left=GAP_LG, top=GAP_LG, right=GAP_SM,
                                     bottom=GAP_LG))
 
+        # `wrap`: en una ventana angosta las acciones bajan a otra línea en vez
+        # de salirse por la derecha. Un botón recortado es peor que uno más
+        # abajo: no hay scroll horizontal que lo alcance (pasaba con «Es el
+        # mismo (usar 0100150101)»).
         self._pie = ft.Container(
-            ft.Row(acciones or [], spacing=GAP_MD,
+            ft.Row(acciones or [], spacing=GAP_MD, wrap=True,
+                   run_spacing=GAP_SM,
                    alignment=ft.MainAxisAlignment.END,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=ft.Padding.symmetric(horizontal=GAP_LG, vertical=GAP_MD),
@@ -770,8 +797,12 @@ class Modal:
             visible=bool(acciones))
 
         self.tarjeta = ft.Container(
+            # STRETCH: sin esto los hijos toman su ancho natural y el pie —una
+            # fila que ENVUELVE— se encoge a lo que miden sus botones, dejando su
+            # fondo hundido a media tarjeta.
             content=ft.Column([encabezado, cuerpo_env, self._pie],
-                              spacing=0, tight=True),
+                              spacing=0, tight=True,
+                              horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             width=ancho,
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
@@ -806,6 +837,17 @@ class Modal:
         self._pie.visible = bool(acciones)
 
     # -------------------------------------------------------------- ciclo
+    def _ajustar_ancho(self) -> None:
+        """Recorta la tarjeta a lo que quepa de ancho en la ventana.
+
+        El `ancho` que pide quien crea el modal es un MÁXIMO —la medida cómoda
+        para el contenido—, no una promesa: si la ventana es más angosta, el
+        `AlertDialog` corta la tarjeta contra el borde y lo que queda fuera es
+        inalcanzable. Se recalcula al abrir y en cada redimensionado."""
+        util = ancho_util_modal(self.page)
+        self.tarjeta.width = (min(self._ancho_deseado, util) if util
+                              else self._ancho_deseado)
+
     def _ajustar_alto(self) -> None:
         """Recorta el cuerpo a lo que quepa en la ventana.
 
@@ -824,7 +866,9 @@ class Modal:
                                   min(self._alto_cuerpo, disponible))
 
     def abrir(self) -> None:
+        self._ajustar_ancho()
         self._ajustar_alto()
+        _ABIERTOS.add(self)
         # `page.on_keyboard_event` es un slot ÚNICO: se guarda el anterior y se
         # restaura al cerrar, para no dejar el teclado secuestrado.
         self._tecla_previa = getattr(self.page, "on_keyboard_event", None)
@@ -840,6 +884,7 @@ class Modal:
         # (p. ej. un DatePicker o un sub-selector que no se auto-retiró, o un
         # SnackBar). Sin esto quedaba un barrier gris pegado bloqueando la app.
         self._soltar_teclado()
+        _ABIERTOS.discard(self)
         self.tarjeta.opacity = 0
         try:
             for _ in range(10):
@@ -873,12 +918,13 @@ class Modal:
         queda más grande que su hueco y el `AlertDialog` lo recorta, dejando
         fuera contenido inalcanzable.
 
-        No se resuelve solo porque `page.on_resize` es un slot único que
-        multiplexa el shell; quien tenga un modal abierto lo llama desde su
-        `_on_resize` (ver el contrato de pantalla en CLAUDE.md).
+        El shell lo llama por su cuenta en cada redimensionado
+        (`reajustar_modales_abiertos`), así que una pantalla solo necesita
+        llamarlo si además cambia el ancho DESEADO del modal.
         """
         if ancho:
-            self.tarjeta.width = ancho
+            self._ancho_deseado = ancho
+        self._ajustar_ancho()
         self._ajustar_alto()
         self.refrescar()
 
