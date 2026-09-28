@@ -13,6 +13,9 @@ Flujo (según levantamiento de requerimientos):
      su número de serie coincide con los de algún activo cacheado.
   4) Los registros se separan en "Dados de alta" y "No dados de alta", cada uno
      consultable en su pestaña.
+  5) Botón "Traer detalles del SIPP": baja del PORTAL (no de la API, que no los
+     expone) los «Detalles Insumo» —Marca, Modelo, RAM…— de los activos dados de
+     alta, que es lo que permite compararlos en "Comparar SIPP vs Excel".
 
 Fase 2 (deshabilitado por ahora): "Iniciar registro en SIPP" (RPA de alta con
 campos por tipo de activo) y "Realizar modificación en SIPP" (RPA de edición).
@@ -333,6 +336,11 @@ class SeccionRegistroActivos:
                                tooltip="Da de alta activos desde una carpeta, un ZIP "
                                        "o un Excel"),
                 boton_secundario("Buscar en SIPP", ft.Icons.SEARCH, self._buscar),
+                boton_herramienta(
+                    "Traer detalles del SIPP", ft.Icons.FACT_CHECK,
+                    self._traer_detalles,
+                    tooltip="Marca, Modelo, RAM… de los activos dados de alta, "
+                            "para poder compararlos contra el levantamiento"),
                 self.progreso,
                 self.estado,
             ],
@@ -1215,7 +1223,7 @@ class SeccionRegistroActivos:
             celdas[d.campo.clave] = (c_sipp, c_excel)
             c_sipp.on_click = lambda _e, k=d.campo.clave: _elegir(k, "sipp")
             c_excel.on_click = lambda _e, k=d.campo.clave: _elegir(k, "excel")
-            nota = "" if d.campo.empujable else "  (solo local)"
+            nota = d.campo.nota or ("" if d.campo.empujable else "  (solo local)")
             return ft.Row([
                 ft.Text(d.campo.etiqueta + nota, size=13,
                         weight=ft.FontWeight.W_600, width=170, color=GRIS),
@@ -1244,6 +1252,17 @@ class SeccionRegistroActivos:
                     "el dato al levantamiento local; «Excel» lo marca para enviarse "
                     "al SIPP con «Realizar modificación en SIPP».",
                     size=12, color=GRIS),
+        ]
+        if not comparacion_sipp.hay_detalles_sipp(reg):
+            # Sin este aviso la comparación parecía completa cuando le faltaba
+            # justo lo que distingue un activo de otro (Marca, Modelo, RAM): el
+            # listado de la API no los trae, solo el portal.
+            cuerpo.append(ft.Text(
+                "Los «Detalles Insumo» (Marca, Modelo, RAM…) todavía no se han "
+                "consultado en el portal, así que no aparecen aquí. Tráelos con "
+                "«Traer detalles del SIPP», en la barra de arriba.",
+                size=12, color=NARANJA, no_wrap=False))
+        cuerpo += [
             ft.Row([
                 boton_herramienta("Conservar todo del SIPP",
                                   on_click=lambda _e: [eleccion.update(
@@ -1304,7 +1323,7 @@ class SeccionRegistroActivos:
                     cambios_col[c.columna] = valor
                 # ¿se enviará al SIPP? Solo lo empujable elegido como Excel.
                 if gana_excel:
-                    puede = bool(c.empujable and (c.ng_model or c.modal))
+                    puede = bool(c.empujable and (c.ng_model or c.modal or c.detalle))
                     # Insumo elegido del Excel pero sin equivalente EXACTO en el
                     # catálogo: no se empuja. Mandar el parecido cambiaría el
                     # activo por otro, que es peor que dejarlo como está.
@@ -4169,6 +4188,129 @@ class SeccionRegistroActivos:
         eleccion = await decision
         return None if eleccion == "cancelar" else eleccion
 
+    async def _traer_detalles(self, _e=None) -> None:
+        """Baja del SIPP los «Detalles Insumo» de los activos dados de alta.
+
+        Va aparte de «Buscar en SIPP» porque no comparten vía ni costo: la
+        búsqueda es API pura y tarda segundos, mientras que los detalles solo los
+        da el portal —una consulta por activo, con sesión iniciada—, así que se
+        piden cuando el usuario los necesita y no en cada búsqueda.
+
+        Sin esto, «Comparar SIPP vs Excel» no puede decir nada de Marca, Modelo o
+        RAM: el listado de la API no los trae.
+        """
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).",
+                            ROJO)
+            return
+        usuario, contrasena = creds
+
+        por_empresa: dict = {}
+        for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA):
+            etq = (r.etiqueta or "").strip()
+            idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
+            if etq and idemp is not None:
+                por_empresa.setdefault((idemp, (r.empresa or "").strip()),
+                                       set()).add(etq)
+        total = sum(len(v) for v in por_empresa.values())
+        if not total:
+            self.app.avisar("No hay activos dados de alta con etiqueta: corre "
+                            "primero «Buscar en SIPP».", NARANJA)
+            return
+
+        # El costo se dice ANTES de entrar: el catálogo de cada empresa tarda ~15 s
+        # y cada activo ~40 ms, así que en un levantamiento grande son minutos y el
+        # proceso no se puede pausar.
+        minutos = max(1, round((15 * (1 + len(por_empresa)) + total * 0.04) / 60))
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor: bool) -> None:
+            # Salida temprana OBLIGATORIA: `cerrar()` dispara `al_cerrar`, que
+            # vuelve a entrar aquí (ver `_confirmar_etiquetas_repetidas`).
+            if decision.done():
+                return
+            decision.set_result(valor)
+            confirmacion.cerrar()
+
+        confirmacion = Modal(self.page, "Traer detalles del SIPP", ancho=560,
+                             al_cerrar=lambda: responder(False))
+        confirmacion.cuerpo.controls = [
+            ft.Text(f"Se consultarán {total} activo(s) de {len(por_empresa)} "
+                    f"empresa(s) en el portal: Marca, Modelo, RAM y demás "
+                    f"«Detalles Insumo».", size=12, color=ft.Colors.ON_SURFACE,
+                    no_wrap=False),
+            ft.Text(f"Tarda alrededor de {minutos} minuto(s) y abre sesión sin "
+                    "ventana. Estos campos no vienen en el listado de la API: es "
+                    "la única forma de compararlos.", size=11, color=GRIS,
+                    no_wrap=False)]
+        confirmacion.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder(False)),
+            boton_primario("Traer detalles", ft.Icons.DOWNLOAD,
+                           lambda _e: responder(True)),
+        ])
+        confirmacion.abrir()
+        if not await decision:
+            return
+
+        ui_loop = asyncio.get_running_loop()
+        txt = ft.Text("Conectando al SIPP…", size=13)
+        barra = ft.ProgressBar()
+        modal = Modal(self.page, "Trayendo detalles del SIPP", ancho=460)
+        modal.cuerpo.controls = [txt, barra]
+        modal.abrir()
+
+        def avance(texto: str, valor=None) -> None:
+            def aplicar() -> None:
+                txt.value = texto
+                barra.value = valor
+                modal.refrescar()
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        resumen = {"activos": 0, "con_detalle": 0, "sin_activo": 0}
+        errores: list[str] = []
+
+        async def flujo() -> None:
+            from core import activos_sipp
+            async with SesionSipp(headless=True) as sipp:
+                await sipp.login(usuario, contrasena)
+                for (idemp, nombre), etiquetas in por_empresa.items():
+                    avance(f"{nombre}: leyendo el catálogo…", None)
+
+                    def progreso(hechos, total_emp, nombre=nombre):
+                        avance(f"{nombre}: {hechos}/{total_emp} activos",
+                               hechos / total_emp if total_emp else None)
+                    try:
+                        res = await activos_sipp.descargar_detalles(
+                            sipp, idemp, sorted(etiquetas), progreso=progreso)
+                    except Exception as exc:  # noqa: BLE001 — se reporta y sigue
+                        errores.append(f"{nombre}: {mensaje_amigable(exc)}")
+                        continue
+                    for k in resumen:
+                        resumen[k] += res.get(k, 0)
+
+        bucle = BucleRpa()
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            errores.append(mensaje_amigable(exc))
+        finally:
+            bucle.cerrar()
+            modal.cerrar()
+            self._refrescar()
+
+        if errores and not resumen["activos"]:
+            self.app.avisar("No se pudieron traer los detalles: "
+                            + "; ".join(errores), ROJO, duracion=9000)
+            return
+        faltan = (f" {resumen['sin_activo']} etiqueta(s) ya no están en el catálogo "
+                  f"del SIPP." if resumen["sin_activo"] else "")
+        fallo = (" " + "; ".join(errores)) if errores else ""
+        self.app.avisar(
+            f"Detalles traídos de {resumen['activos']} activo(s); "
+            f"{resumen['con_detalle']} tienen algún dato en el SIPP." + faltan + fallo,
+            VERDE if not errores else NARANJA, duracion=8000)
+
     @staticmethod
     def _pendientes_modificacion() -> list:
         """Activos dados de alta con cambios locales por enviar. Se relee de la base
@@ -4308,6 +4450,14 @@ class SeccionRegistroActivos:
                         fila["observacion"] += (
                             f" {', '.join(resultado['en_descripcion'])} en la "
                             f"Descripción (el insumo no tiene esos campos).")
+                    # Los «Detalles Insumo» no viajan como campos del formulario
+                    # (se emparejan por rótulo), así que no salen en `cambios`:
+                    # sin nombrarlos aquí, el reporte callaría que Marca o Modelo
+                    # se actualizaron.
+                    if resultado.get("detalles"):
+                        fila["observacion"] += (
+                            f" Detalles del insumo: "
+                            f"{', '.join(resultado['detalles'])}.")
                     # La foto se dice SIEMPRE que se intentó: subida, reemplazada
                     # o no admitida. Es lo que el usuario vino a verificar.
                     if resultado.get("fotos"):

@@ -22,10 +22,19 @@ resalta las diferencias y deja al usuario elegir, por campo, qué valor prevalec
   El empleado NO se empuja (`empujable=False`) y no es lo mismo: la edición del
   portal no permite cambiarlo (ver el comentario de `nb_Empleado` más abajo).
 
+Los CAMPOS DE DETALLE del insumo (Marca, Modelo, RAM… los «Detalles Insumo» del
+portal) también se comparan, pero no son fijos: cuáles existen depende del tipo de
+activo, así que salen de `core.tipos_activo` en vez de la lista de abajo. Su lado
+SIPP no viaja en el listado de la API —solo lo da el portal, activo por activo— y
+llega a la caché con «Traer detalles del SIPP»; mientras no se haya traído, esos
+campos NO se comparan (ver `hay_detalles_sipp`): darlos por vacíos marcaría como
+diferencia todo lo que el SIPP sí tiene.
+
 Sin Flet ni navegador: la comparación trabaja sobre datos ya persistidos tras
 «Buscar en SIPP». Solo el empuje Excel → SIPP usa el RPA.
 """
 
+import unicodedata
 from dataclasses import dataclass
 
 
@@ -51,6 +60,9 @@ class CampoComparable:
     ng_model: str = ""      # filtrosAgregar.* para empujar Excel→SIPP ("" = no)
     empujable: bool = True  # False: el portal no deja cambiarlo desde la edición
     modal: str = ""         # se empuja por un MODAL, no escribiendo ("insumo")
+    detalle: bool = False   # característica del insumo (camposDetalle), no un
+                            # campo fijo del formulario: se empuja por rótulo
+    nota: str = ""          # aclaración para la UI (se muestra junto al rótulo)
 
 
 # Orden = orden en que se muestran. Mantiene paridad con core/tipos_activo.
@@ -132,6 +144,64 @@ CAMPOS: list[CampoComparable] = [
 ]
 
 
+CLAVE_DETALLES = "detalles"   # dentro de info_sipp(): {rótulo -> valor}
+
+
+def _norm_rotulo(texto: str) -> str:
+    """Rótulo comparable: sin acentos, sin espacios repetidos, en minúsculas.
+
+    El portal y `core.tipos_activo` no escriben igual los rótulos («Pantalla
+    Tactil» / «Pantalla Táctil»), y el emparejamiento del RPA ya normaliza así
+    (ver `_JS_LLENAR_CAMPOS_DETALLE`): se replica para que la comparación y el
+    empuje casen los mismos campos."""
+    s = unicodedata.normalize("NFD", texto or "")
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return " ".join(s.split()).rstrip(":").strip().lower()
+
+
+def hay_detalles_sipp(registro) -> bool:
+    """¿Ya se trajeron del portal los campos de detalle de este activo?"""
+    return isinstance(registro.info_sipp().get(CLAVE_DETALLES), dict)
+
+
+def campos_detalle(registro) -> list[CampoComparable]:
+    """Los «Detalles Insumo» que pide el tipo de activo del registro, como campos
+    comparables. Son 3 o 10 según el tipo; por eso se arman aquí y no en `CAMPOS`.
+
+    Se empujan al SIPP por su RÓTULO (el RPA los llena con
+    `llenar_campos_detalle`), no por `ng_model`: en el formulario todos comparten
+    el mismo modelo (`camposDetalle[$index]`) y lo que los distingue es la
+    etiqueta de su fila. Los que el insumo del portal no tenga se avisan: el RPA
+    los deja en la Descripción, que es el único campo que existe en todos."""
+    from core.tipos_activo import campos_de_tipo
+
+    del_sipp = registro.info_sipp().get(CLAVE_DETALLES) or {}
+    presentes = {_norm_rotulo(k) for k in del_sipp}
+    campos = []
+    for c in campos_de_tipo(registro.id_tipo_activo):
+        if not c.detalle:
+            continue
+        existe = any(_norm_rotulo(c.etiqueta) in p or p in _norm_rotulo(c.etiqueta)
+                     for p in presentes)
+        campos.append(CampoComparable(
+            clave=f"detalle:{c.clave}", etiqueta=c.etiqueta,
+            clave_sipp=f"{CLAVE_DETALLES}.{c.etiqueta}", clave_datos=c.clave,
+            detalle=True,
+            nota="" if existe else "  (va a la Descripción)"))
+    return campos
+
+
+def _valor_detalle(info: dict, campo: CampoComparable):
+    """Valor que el SIPP tiene en ese detalle. Empareja por rótulo normalizado
+    porque el portal lo escribe a su manera."""
+    buscado = _norm_rotulo(campo.etiqueta)
+    for rotulo, valor in (info.get(CLAVE_DETALLES) or {}).items():
+        actual = _norm_rotulo(rotulo)
+        if actual == buscado or buscado in actual or actual in buscado:
+            return valor
+    return None
+
+
 def valor_excel(registro, campo: CampoComparable):
     """Valor del lado «Excel/levantamiento» de un campo. Prioriza la columna del
     registro (lo que muestra el listado y lee el formulario) y cae a datos_json."""
@@ -193,11 +263,17 @@ def _mostrar(valor, control: str) -> str:
 
 def comparar(registro) -> list[Diferencia]:
     """Compara TODOS los campos comparables del registro (dado de alta). Devuelve
-    una `Diferencia` por campo, marque o no diferencia."""
+    una `Diferencia` por campo, marque o no diferencia.
+
+    Incluye los «Detalles Insumo» del tipo de activo, pero solo si ya se trajeron
+    del portal: sin ese dato no hay con qué comparar."""
     info = registro.info_sipp()
+    campos = list(CAMPOS)
+    if hay_detalles_sipp(registro):
+        campos += campos_detalle(registro)
     resultado: list[Diferencia] = []
-    for c in CAMPOS:
-        v_sipp = info.get(c.clave_sipp)
+    for c in campos:
+        v_sipp = _valor_detalle(info, c) if c.detalle else info.get(c.clave_sipp)
         v_excel = valor_excel(registro, c)
         difiere = _clave_comparar(v_sipp, c.control) != _clave_comparar(v_excel, c.control)
         resultado.append(Diferencia(
@@ -229,7 +305,8 @@ def campos_manuales(registro) -> list[Diferencia]:
     portal y volver a «Buscar en SIPP», o al conservar el valor del SIPP en la
     comparación."""
     return [d for d in campos_distintos(registro)
-            if not (d.campo.empujable and (d.campo.ng_model or d.campo.modal))]
+            if not (d.campo.empujable
+                    and (d.campo.ng_model or d.campo.modal or d.campo.detalle))]
 
 
 def hay_diferencias(registro) -> bool:
