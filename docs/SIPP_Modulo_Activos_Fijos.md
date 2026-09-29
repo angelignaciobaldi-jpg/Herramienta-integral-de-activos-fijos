@@ -43,6 +43,36 @@
 > Las variantes con sufijo `_EDITAR` (`filtrosEditar.*`, `FH_*_EDITAR`) son el
 > mismo modelo para el flujo de edición.
 
+### Campos de detalle del insumo (Marca, Modelo, RAM…)
+
+Son los «Detalles Insumo» del formulario: dinámicos por insumo, no columnas del
+activo. **No salen en ningún listado**, ni en el del portal
+(`getListadoActivosFijos`) ni en el de la API (`/api/activos-fijos/listado`, que
+solo devuelve empresa, sucursal, empleado, fecha, etiqueta, serie, nombre y
+precio, e ignora cualquier parámetro para ampliarlo). Se piden **uno por activo**:
+
+```
+component:  ActivosFijosNuevo
+execMethod: obtenerCamposDetalle
+args:       {id_Empresa, id_ActivoFijo}
+->  COLUMNS: ID_EMPRESA, ID_ACTIVOFIJO, ID_CAMPODETALLE, NB_CAMPODETALLE,
+             DE_VALORCAMPODETALLE
+```
+
+Puntos medidos en vivo:
+
+- La respuesta trae el RÓTULO (`NB_CAMPODETALLE`) junto al valor, así que **no
+  hace falta** consultar aparte `ConfiguracionCamposDetalle.listar`.
+- `id_ActivoFijo` es obligatorio y numérico: pedirlo vacío para traerlos todos de
+  golpe devuelve error. El id solo viaja en el listado del PORTAL
+  (`ID_ACTIVOFIJO`), no en el de la API.
+- Coste real: ~170 ms por activo de uno en uno, ~30 ms con 8 en paralelo (~10 s
+  por 300 activos). El listado de la empresa, que hace falta para traducir
+  etiqueta → id, tarda ~15 s.
+
+Lo usa `core.activos_sipp.descargar_detalles`, que guarda el resultado en
+`extra['detalles']` de la caché y en la foto (`datos_sipp`) del levantamiento.
+
 ### Fotografía del activo (alta y edición)
 
 | Formulario | Input | `ng-change` |
