@@ -194,6 +194,10 @@ class AppActivosFijos:
         for pantalla in (self.dashboard, self.registro, self.generador_qr,
                          self.cartas, self.config):
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
+        # Los modales se miden en píxeles: si la ventana se achica con uno
+        # abierto, el diálogo lo recorta y deja sus botones fuera de alcance.
+        from ui.componentes import reajustar_modales_abiertos
+        self.registrar_on_resize(lambda _e: reajustar_modales_abiertos())
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
         # Carga inicial de CADA pantalla que lo soporte, no solo de Registro: el

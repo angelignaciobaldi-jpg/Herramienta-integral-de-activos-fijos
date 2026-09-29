@@ -1481,6 +1481,70 @@ def fijar_costos_activos_sipp(id_empresa: int, costos: dict) -> int:
     return len(cambios)
 
 
+def guardar_detalles_sipp(id_empresa: int, detalles: dict) -> int:
+    """Guarda los «Detalles Insumo» que el portal tiene de cada activo.
+
+    `detalles` es {etiqueta -> {rótulo: valor}}. Se escribe en DOS sitios, y los
+    dos hacen falta:
+
+    - En `extra['detalles']` de la caché de activos, que es la foto de la empresa.
+    - En `datos_sipp` de los registros del levantamiento con esa etiqueta, que es
+      la foto que lee la comparación. Sin esto habría que volver a correr «Buscar
+      en SIPP» para que los detalles aparecieran, y esa búsqueda va por API, que
+      no los trae.
+
+    Devuelve cuántos activos de la caché se actualizaron.
+    """
+    if not detalles:
+        return 0
+    limpio = {(e or "").strip(): v for e, v in detalles.items() if (e or "").strip()}
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT etiqueta, extra FROM activos_sipp WHERE id_empresa = ?",
+            [id_empresa]).fetchall()
+        cambios = []
+        for f in filas:
+            valores = limpio.get((f["etiqueta"] or "").strip())
+            if valores is None:
+                continue
+            try:
+                extra = json.loads(f["extra"]) if f["extra"] else {}
+            except (ValueError, TypeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            extra["detalles"] = valores
+            cambios.append((json.dumps(extra, ensure_ascii=False), id_empresa,
+                            f["etiqueta"]))
+        if cambios:
+            con.executemany(
+                "UPDATE activos_sipp SET extra = ? WHERE id_empresa = ? "
+                "AND etiqueta = ?", cambios)
+
+        # La foto del levantamiento: se fusiona, no se reemplaza, para no perder
+        # lo que «Buscar en SIPP» dejó ahí (empleado, costo, situación…).
+        regs = con.execute(
+            "SELECT id, etiqueta, datos_sipp FROM levantamiento "
+            "WHERE IFNULL(etiqueta,'') <> '' AND datos_sipp IS NOT NULL").fetchall()
+        tocados = []
+        for r in regs:
+            valores = limpio.get((r["etiqueta"] or "").strip())
+            if valores is None:
+                continue
+            try:
+                foto = json.loads(r["datos_sipp"]) if r["datos_sipp"] else {}
+            except (ValueError, TypeError):
+                foto = {}
+            if not isinstance(foto, dict):
+                foto = {}
+            foto["detalles"] = valores
+            tocados.append((json.dumps(foto, ensure_ascii=False), r["id"]))
+        if tocados:
+            con.executemany(
+                "UPDATE levantamiento SET datos_sipp = ? WHERE id = ?", tocados)
+    return len(cambios)
+
+
 def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[dict]:
     """Activos cacheados de una empresa (para generar sus QR/etiquetas y consultar
     el detalle). Si se pasa `sucursal`, filtra por ella. Los campos EXTRA (guardados

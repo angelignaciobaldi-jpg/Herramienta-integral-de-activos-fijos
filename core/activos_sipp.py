@@ -16,6 +16,7 @@ entorno de pruebas está vacío, así que no se fijan índices rígidos).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -255,20 +256,34 @@ def _elegir_columna(cols: list[str], *claves: str) -> "int | None":
     return None
 
 
+async def _proxy(sesion, componente: str, metodo: str, arg: dict) -> dict:
+    """Llama un método del backend del portal por su proxy, con la sesión abierta.
+
+    Es la vía que usa el propio SIPP desde AngularJS (`redProxy.invoke`): no hay
+    API REST para esto, así que la herramienta habla igual que el portal."""
+    try:
+        resp = await sesion.context.request.post(
+            sesion.BASE_URL + _RUTA_PROXY,
+            data=json.dumps({"component": componente, "execMethod": metodo,
+                             "argumentcollection": arg}),
+            headers={"Content-Type": "application/json"})
+        return await resp.json()
+    except Exception as exc:  # noqa: BLE001 — se reporta como ErrorActivosSipp
+        raise ErrorActivosSipp(
+            f"No se pudo consultar el SIPP ({metodo}): {exc}") from exc
+
+
+def _tabla(datos: dict) -> "tuple[list, list]":
+    """(columnas, filas) de una respuesta del proxy, que viene como QUERY."""
+    query = datos.get("QUERY", datos) or {}
+    return (query.get("COLUMNS") or []), (query.get("DATA") or [])
+
+
 async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -> dict:
     """Descarga los activos de la empresa `id_empresa` con la sesión `sesion`
     (SesionSipp logueada) y los cachea. Devuelve {guardados, total}."""
-    url = sesion.BASE_URL + _RUTA_PROXY
     arg = dict(_ARG_BASE, id_Empresa=id_empresa)
-    payload = json.dumps({"component": "ActivosFijosNuevo",
-                          "execMethod": "getListadoActivosFijos",
-                          "argumentcollection": arg})
-    try:
-        resp = await sesion.context.request.post(
-            url, data=payload, headers={"Content-Type": "application/json"})
-        datos = await resp.json()
-    except Exception as exc:  # noqa: BLE001 — se reporta como ErrorActivosSipp
-        raise ErrorActivosSipp(f"No se pudieron consultar los activos: {exc}") from exc
+    datos = await _proxy(sesion, "ActivosFijosNuevo", "getListadoActivosFijos", arg)
 
     query = datos.get("QUERY", datos)
     cols = query.get("COLUMNS") or []
@@ -299,6 +314,9 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     i_fasig = _elegir_columna(cols, "FH_ASIGNACION")
     i_idemp_res = _elegir_columna(cols, "ID_EMPLEADORESGUARDO")
     i_idins = _elegir_columna(cols, "ID_INSUMOORIGEN")
+    # Id interno del activo: es lo ÚNICO con lo que el portal entrega sus campos
+    # de detalle (obtenerCamposDetalle), y no viaja en el listado de la API.
+    i_idact = _elegir_columna(cols, "ID_ACTIVOFIJO")
 
     def val(fila, i):
         return fila[i] if i is not None and i < len(fila) else None
@@ -336,12 +354,92 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
                 "fecha_asignacion": fecha(f, i_fasig),
                 "id_empleado_resguardo": val(f, i_idemp_res),
                 "id_insumo_origen": val(f, i_idins),
+                "id_activo": val(f, i_idact),
             },
         })
     guardados = db.reemplazar_activos_sipp(
         id_empresa, nombre_final or empresa_nombre or "", registros,
         actualizado_en=datetime.now().strftime("%Y-%m-%d %H:%M"))
     return {"guardados": guardados, "total": len(filas)}
+
+
+# ------------------------------------------------ CAMPOS DE DETALLE (portal)
+# Cuántas consultas de detalle van a la vez. Cada una es una consulta corta
+# (~30 ms con 8 en paralelo, ~170 ms de una en una), así que el paralelismo es lo
+# que hace la diferencia entre 10 segundos y un minuto para un levantamiento
+# típico. Ocho es holgado sin castigar al portal.
+_HILOS_DETALLE = 8
+
+
+async def descargar_detalles(sesion, id_empresa: int, etiquetas, progreso=None) -> dict:
+    """Trae del portal los «Detalles Insumo» (Marca, Modelo, RAM…) de esos activos.
+
+    Es la única fuente: el listado de la API no los incluye y no hay ruta que los
+    dé, así que se piden como los pide el propio portal —`obtenerCamposDetalle`,
+    un activo a la vez— con la sesión ya iniciada. Como la respuesta trae el
+    RÓTULO junto al valor, no hace falta consultar aparte la configuración de
+    campos por subfamilia.
+
+    Devuelve {activos, con_detalle, sin_activo}: cuántos se consultaron, cuántos
+    traían algún dato y cuántas etiquetas no están en el listado de esa empresa
+    (dadas de baja o de otra empresa).
+    """
+    buscadas = {str(e).strip() for e in (etiquetas or []) if str(e).strip()}
+    if not buscadas:
+        return {"activos": 0, "con_detalle": 0, "sin_activo": 0}
+
+    # Una sola llamada al listado para traducir etiqueta -> id del activo. Filtrar
+    # por etiqueta sería una llamada por activo y el listado completo tarda lo
+    # mismo que una docena de ellas.
+    arg = dict(_ARG_BASE, id_Empresa=id_empresa)
+    cols, filas = _tabla(await _proxy(
+        sesion, "ActivosFijosNuevo", "getListadoActivosFijos", arg))
+    i_etq = _elegir_columna(cols, "DE_ETIQUETA")
+    i_id = _elegir_columna(cols, "ID_ACTIVOFIJO")
+    if i_etq is None or i_id is None:
+        raise ErrorActivosSipp(
+            "El listado del SIPP no trajo el id de los activos; no se pueden "
+            "consultar sus detalles.")
+    ids = {}
+    for f in filas:
+        etq = str(f[i_etq] or "").strip()
+        if etq in buscadas and etq not in ids:
+            ids[etq] = f[i_id]
+
+    hechos = 0
+    detalles: dict = {}
+    limite = asyncio.Semaphore(_HILOS_DETALLE)
+
+    async def uno(etiqueta: str, id_activo) -> None:
+        nonlocal hechos
+        async with limite:
+            try:
+                resp = await _proxy(sesion, "ActivosFijosNuevo",
+                                    "obtenerCamposDetalle",
+                                    {"id_Empresa": id_empresa,
+                                     "id_ActivoFijo": id_activo})
+            except ErrorActivosSipp:
+                return          # un activo ilegible no tumba el resto
+            c, f = _tabla(resp)
+            i_nb = _elegir_columna(c, "NB_CAMPODETALLE")
+            i_val = _elegir_columna(c, "DE_VALORCAMPODETALLE")
+            if i_nb is None or i_val is None:
+                return
+            # Se guarda SIEMPRE, aunque venga vacío: un activo sin detalles en el
+            # portal es información («el SIPP no tiene Marca»), no una consulta
+            # pendiente, y así la comparación puede proponer subir lo del Excel.
+            detalles[etiqueta] = {str(fila[i_nb] or "").strip():
+                                  str(fila[i_val] or "").strip()
+                                  for fila in f if str(fila[i_nb] or "").strip()}
+        hechos += 1
+        if callable(progreso):
+            progreso(hechos, len(ids))
+
+    await asyncio.gather(*(uno(e, i) for e, i in ids.items()))
+    db.guardar_detalles_sipp(id_empresa, detalles)
+    return {"activos": len(ids),
+            "con_detalle": sum(1 for v in detalles.values() if v),
+            "sin_activo": len(buscadas) - len(ids)}
 
 
 # ------------------------------------------- búsqueda por NÚMERO DE SERIE

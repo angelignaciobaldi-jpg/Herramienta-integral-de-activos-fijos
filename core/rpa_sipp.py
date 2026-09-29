@@ -1475,7 +1475,8 @@ class SesionSipp:
 
             {"cambios": [(ng_model, antes, después)],
              "no_aplicados": [(ng_model, motivo)],
-             "fotos": "texto de lo que pasó con la fotografía"}
+             "fotos": "texto de lo que pasó con la fotografía",
+             "detalles": [rótulos de «Detalles Insumo» que se escribieron]}
 
         `cambios` es lo que de verdad cambió en el portal (leído del formulario
         antes y después de escribir), para que el reporte pueda mostrarlo.
@@ -1540,9 +1541,10 @@ class SesionSipp:
             campos, punto_control=punto_control)
         cambios.extend(mas_cambios)
 
-        en_descripcion = []
+        en_descripcion, detalles_escritos = [], []
         if detalles:
             res = await self.llenar_campos_detalle(detalles)
+            detalles_escritos = res.get("llenados") or []
             en_descripcion = await self._detalles_a_descripcion(
                 "filtrosEditar.de_DescripcionActivo", detalles,
                 res.get("faltantes") or [])
@@ -1571,7 +1573,8 @@ class SesionSipp:
         await self._click_seguro(guardar)
         await self.confirmar_aviso_si_hay(3_000)
         return {"cambios": cambios, "no_aplicados": no_aplicados,
-                "en_descripcion": en_descripcion, "fotos": fotos}
+                "en_descripcion": en_descripcion, "fotos": fotos,
+                "detalles": detalles_escritos}
 
     async def _cambiar_insumo_edicion(self, insumo_id) -> "tuple | None":
         """Cambia el insumo del activo abierto en la EDICIÓN. Devuelve el
