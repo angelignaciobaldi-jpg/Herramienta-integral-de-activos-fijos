@@ -845,6 +845,23 @@ def _pantalla_error_arranque(page: ft.Page, exc: Exception) -> None:
     page.update()
 
 
+def _aviso_fatal(titulo: str, texto: str) -> None:
+    """Muestra un cuadro de Windows cuando la app no logra ni arrancar.
+
+    A estas alturas no hay interfaz —el fallo es ANTES de que haya ventana—, así
+    que el usuario solo vería el volcado de PyInstaller («Failed to execute
+    script 'app'»), que no le dice qué hacer. Esto es lo único que queda para
+    hablarle. Best-effort: si ni el cuadro se puede mostrar, se sigue al
+    volcado de siempre."""
+    try:
+        import ctypes
+
+        # MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST
+        ctypes.windll.user32.MessageBoxW(None, texto, titulo, 0x10 | 0x10000 | 0x40000)
+    except Exception:  # noqa: BLE001 — no hay nada mejor que hacer
+        pass
+
+
 if __name__ == "__main__":
     # Fija el CWD a la carpeta de la app para que todos los lanzadores (pin, menú
     # inicio, acceso del escritorio) se comporten igual y resuelvan bien los assets.
@@ -852,4 +869,32 @@ if __name__ == "__main__":
         os.chdir(rutas.INSTALL)
     except OSError:
         pass
-    ft.run(main, assets_dir=rutas.BUNDLE)
+    # Flet abre la ventana con un ejecutable aparte que descomprime en
+    # ~/.flet/client la primera vez. Si esa caché se quedó sin su flet.exe (un
+    # antivirus suele llevárselo), Flet la da por buena igual y la app muere con
+    # un «[WinError 2]» que no dice qué archivo falta. Se limpia antes de
+    # arrancar: Flet la rehace con el ZIP que viaja en el paquete, sin internet.
+    try:
+        from core import cliente_flet
+        cliente_flet.reparar()
+    except Exception:  # noqa: BLE001 — si la limpieza falla, se arranca igual
+        pass
+    try:
+        ft.run(main, assets_dir=rutas.BUNDLE)
+    except FileNotFoundError as exc:
+        # Sigue faltando el cliente: ni la caché ni el ZIP del paquete sirven,
+        # así que lo que queda es decirle al usuario qué pasó y cómo salir.
+        from core import cliente_flet
+        _aviso_fatal(
+            "Herramienta de Activos Fijos",
+            "No se pudo abrir la ventana de la aplicación porque falta uno de "
+            "sus componentes:\n\n"
+            f"{exc}\n\n"
+            "Casi siempre es el antivirus, que pone en cuarentena el visor de "
+            "la app (un ejecutable sin firma). Qué hacer:\n"
+            "1. Restaurar el archivo desde la cuarentena del antivirus y "
+            "excluir la carpeta de la aplicación.\n"
+            "2. Volver a instalar la herramienta.\n\n"
+            "Si sigue igual, comparte esto con sistemas:\n"
+            f"{cliente_flet.diagnostico()}")
+        raise
