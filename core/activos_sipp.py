@@ -317,6 +317,9 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     # Id interno del activo: es lo ÚNICO con lo que el portal entrega sus campos
     # de detalle (obtenerCamposDetalle), y no viaja en el listado de la API.
     i_idact = _elegir_columna(cols, "ID_ACTIVOFIJO")
+    # Activo / dado de baja. No viaja en el listado de la API, así que esta
+    # pasada por el portal es la única que lo puede poner al día.
+    i_act = _elegir_columna(cols, "SN_ACTIVO")
 
     def val(fila, i):
         return fila[i] if i is not None and i < len(fila) else None
@@ -342,6 +345,7 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
             "ubicacion": val(f, i_ubi), "empleado": val(f, i_emp),
             "sucursal": val(f, i_suc), "departamento": val(f, i_dep),
             "id_tipo": val(f, i_idtipo), "tipo": val(f, i_tipo),
+            "activo": val(f, i_act),
             # Extra (se guarda como JSON en la caché; ver core/db.reemplazar_activos_sipp).
             "extra": {
                 "descripcion": val(f, i_desc),
@@ -380,9 +384,15 @@ async def descargar_detalles(sesion, id_empresa: int, etiquetas, progreso=None) 
     RÓTULO junto al valor, no hace falta consultar aparte la configuración de
     campos por subfamilia.
 
-    Devuelve {activos, con_detalle, sin_activo}: cuántos se consultaron, cuántos
-    traían algún dato y cuántas etiquetas no están en el listado de esa empresa
-    (dadas de baja o de otra empresa).
+    De paso actualiza el ESTATUS (activo / dado de baja) de todos los activos de
+    la empresa: viene en el mismo listado que hay que pedir de todos modos para
+    traducir etiqueta -> id, y es el único sitio donde el SIPP lo dice (la API no
+    trae el campo). Sale gratis y es lo que permite que la herramienta deje en paz
+    a los dados de baja.
+
+    Devuelve {activos, con_detalle, sin_activo, inactivos}: cuántos se
+    consultaron, cuántos traían algún dato, cuántas etiquetas no están en el
+    listado de esa empresa y cuántos de los consultados están dados de baja.
     """
     buscadas = {str(e).strip() for e in (etiquetas or []) if str(e).strip()}
     if not buscadas:
@@ -400,11 +410,22 @@ async def descargar_detalles(sesion, id_empresa: int, etiquetas, progreso=None) 
         raise ErrorActivosSipp(
             "El listado del SIPP no trajo el id de los activos; no se pueden "
             "consultar sus detalles.")
-    ids = {}
+    i_act = _elegir_columna(cols, "SN_ACTIVO")
+    ids, estatus = {}, {}
     for f in filas:
         etq = str(f[i_etq] or "").strip()
+        if not etq:
+            continue
+        if i_act is not None:
+            # Con la etiqueta repetida gana el ACTIVO: es el que se puede tocar.
+            bandera = f[i_act]
+            if etq not in estatus or db._bandera(bandera) == 1:
+                estatus[etq] = bandera
         if etq in buscadas and etq not in ids:
             ids[etq] = f[i_id]
+    if estatus:
+        db.guardar_estatus_sipp(id_empresa, estatus)
+    inactivos = sum(1 for e in ids if db._bandera(estatus.get(e)) == 0)
 
     hechos = 0
     detalles: dict = {}
@@ -439,7 +460,8 @@ async def descargar_detalles(sesion, id_empresa: int, etiquetas, progreso=None) 
     db.guardar_detalles_sipp(id_empresa, detalles)
     return {"activos": len(ids),
             "con_detalle": sum(1 for v in detalles.values() if v),
-            "sin_activo": len(buscadas) - len(ids)}
+            "sin_activo": len(buscadas) - len(ids),
+            "inactivos": inactivos}
 
 
 # ------------------------------------------- búsqueda por NÚMERO DE SERIE

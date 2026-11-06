@@ -62,6 +62,7 @@ from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
 _MARCA_TODAS = "Todos"
 _MARCA_PARCIAL = "Posible coincidencia"
 _MARCA_MANUAL = "Cambios a mano en SIPP"
+_MARCA_INACTIVO = "Inactivo en SIPP"
 _ANCHO_LIMPIAR = 150      # botón «Limpiar filtros» (aproximado, para el reparto)
 _FILTRO_MIN = 130
 _FILTRO_MAX = 172
@@ -188,6 +189,8 @@ class ResultadoBusquedaSipp:
     parciales: list = field(default_factory=list)
     # [(registro, [activos])] — sin etiqueta ni serie, reconocidos por su dueño.
     por_responsable: list = field(default_factory=list)
+    # [(registro, activo del SIPP)] — existe en el SIPP pero está dado de baja.
+    inactivos: list = field(default_factory=list)
 
 
 # Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
@@ -434,7 +437,8 @@ class SeccionRegistroActivos:
         # una —primero las posibles coincidencias, luego lo que hay que hacer a
         # mano— y cada casilla nueva se comía el ancho de la fila de filtros.
         _, self._dd_marca = campo_opciones(
-            "Por revisar", [_MARCA_TODAS, _MARCA_PARCIAL, _MARCA_MANUAL],
+            "Por revisar",
+            [_MARCA_TODAS, _MARCA_PARCIAL, _MARCA_MANUAL, _MARCA_INACTIVO],
             valor=_MARCA_TODAS, width=_WF, flotante=True,
             on_change=self._cambiar_marca)
         self._campos_filtro.append(self._dd_marca)
@@ -489,10 +493,13 @@ class SeccionRegistroActivos:
             ColumnaTabla("Empresa", 10, ancho_min_px=155),
             ColumnaTabla("Sucursal", 10, ancho_min_px=155),
             ColumnaTabla("Departamento", 11, ancho_min_px=155),
-            ColumnaTabla("Nombre insumo", 14, ancho_min_px=140),
-            ColumnaTabla("Responsable", 12, ancho_min_px=150),
-            ColumnaTabla("Etiqueta", 9, ancho_min_px=100),
-            ColumnaTabla("No. de serie", 9, ancho_min_px=100),
+            # Seleccionables: son los datos que se copian a mano para pegarlos
+            # en el SIPP o en un correo. Las de empresa/sucursal/departamento no
+            # lo necesitan: son campos editables y ya se pueden copiar.
+            ColumnaTabla("Nombre insumo", 14, ancho_min_px=140, seleccionable=True),
+            ColumnaTabla("Responsable", 12, ancho_min_px=150, seleccionable=True),
+            ColumnaTabla("Etiqueta", 9, ancho_min_px=100, seleccionable=True),
+            ColumnaTabla("No. de serie", 9, ancho_min_px=100, seleccionable=True),
             ColumnaTabla("Estatus", 8, ancho_min_px=95),
             # 6 acciones x _LADO_ACCION + holgura: es el MÁXIMO que puede tener
             # una fila (dada de alta y con serie válida), no el caso promedio.
@@ -672,6 +679,11 @@ class SeccionRegistroActivos:
         if marca == _MARCA_MANUAL:
             return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
                     if comparacion_sipp.campos_manuales(r)]
+        if marca == _MARCA_INACTIVO:
+            # Dados de baja en el SIPP: la herramienta no los toca, así que la
+            # única acción posible es revisarlos en el portal.
+            return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                    if (r.info_sipp() or {}).get("inactivo")]
         return None
 
     def _limpiar_filtros_col(self, _e=None) -> None:
@@ -808,7 +820,22 @@ class SeccionRegistroActivos:
         # se distingue en ámbar y con su propia acción para resolverla.
         info = r.info_sipp() if r.estatus_registro == db.EST_DADO_ALTA else {}
         es_parcial = bool(info.get("parcial"))
-        if es_parcial:
+        inactivo = bool(info.get("inactivo"))
+        if inactivo:
+            # Existe en el SIPP pero está dado de baja: ni se da de alta (sería un
+            # duplicado) ni se modifica (el portal no lo permite). Se dice aquí
+            # para que nadie tenga que averiguar activo por activo por qué no se
+            # envió nada.
+            estatus = ft.Row(
+                [ft.Icon(ft.Icons.DO_NOT_DISTURB_ON, size=16, color=GRIS,
+                         tooltip="El SIPP lo tiene dado de baja: no se le envían "
+                                 "cambios. Si debe seguir vivo, reactívalo en el "
+                                 "portal y vuelve a buscar."),
+                 ft.Text("Inactivo en SIPP", size=12, color=GRIS,
+                         weight=ft.FontWeight.W_500)],
+                spacing=4, tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        elif es_parcial:
             estatus = ft.Text("Posible coincidencia", size=12, color=NARANJA,
                               weight=ft.FontWeight.W_500)
         else:
@@ -821,7 +848,8 @@ class SeccionRegistroActivos:
         # activo, y el detalle va en el tooltip.
         # En una POSIBLE coincidencia no se marca: el activo ni siquiera está
         # confirmado, y comparar contra un candidato sin confirmar sería ruido.
-        manuales = comparacion_sipp.campos_manuales(r) if info and not es_parcial else []
+        manuales = (comparacion_sipp.campos_manuales(r)
+                    if info and not es_parcial and not inactivo else [])
         if manuales:
             detalle = " · ".join(f"{d.campo.etiqueta}: {d.excel} (SIPP: {d.sipp})"
                                  for d in manuales)
@@ -2274,6 +2302,14 @@ class SeccionRegistroActivos:
                                 for r, etq in res.choques[:3])
             extras.append(f"{len(res.choques)} con etiqueta ya usada por otro "
                           f"registro ({detalle}); quedan pendientes")
+        if res.inactivos:
+            detalle = ", ".join(
+                f"{(r.nombre_insumo or '(sin insumo)')} → {(a.get('etiqueta') or '—')}"
+                for r, a in res.inactivos[:3])
+            extras.append(
+                f"{len(res.inactivos)} están INACTIVOS en el SIPP ({detalle}"
+                f"{'…' if len(res.inactivos) > 3 else ''}): se reconocieron para no "
+                f"duplicarlos, pero no se les enviará ningún cambio")
         if res.sin_confirmar:
             extras.append(f"{res.sin_confirmar} no aparecen en la caché local y se "
                           f"dejaron sin cambios: sin la API no se puede confirmar "
@@ -2443,6 +2479,12 @@ class SeccionRegistroActivos:
                 else:
                     res.sin_confirmar += 1
                 continue
+            # Con el mismo identificador en dos activos del portal gana el que
+            # sigue VIVO: un dado de baja no se puede modificar, así que tomarlo
+            # como el bueno condenaba la fila a un cambio que nunca se aplicaba.
+            vivos = [c for c in opciones if not c.get("inactivo")]
+            if vivos:
+                opciones = vivos
             idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
             propio = next((c for c in opciones
                            if c.get("id_empresa") == idemp), None) if idemp else None
@@ -2452,6 +2494,15 @@ class SeccionRegistroActivos:
                 res.ambiguos.append((r, opciones))
                 continue
             usadas.add((elegido.get("etiqueta") or "").strip().upper())
+            if elegido.get("inactivo"):
+                # Dado de baja: se reconoce —para que el RPA no lo dé de alta otra
+                # vez— pero no se abre ninguna decisión ni se le manda nada. El
+                # portal no deja editar un activo inactivo: el cambio viajaba y se
+                # perdía sin aviso. Solo se marca y se reporta.
+                self._aplicar_resultado_sipp(r, elegido)
+                res.inactivos.append((r, elegido))
+                res.hechos += 1
+                continue
             if hallado_por_serie:
                 self._conciliar_por_serie(r, elegido, res)
             else:
@@ -3298,7 +3349,8 @@ class SeccionRegistroActivos:
     def _modal_reporte_rpa(self, titulo: str, stats: list, filas: list,
                            errores_generales: list, sipp: "SesionSipp",
                            bucle: BucleRpa, *, detenido: bool = False,
-                           extra: list | None = None) -> Modal:
+                           extra: list | None = None,
+                           avisos: list | None = None) -> Modal:
         """Arma el reporte final de un flujo del RPA: estadísticas arriba, una
         línea por registro con su observación y, en el pie, el botón que cierra el
         navegador que quedó abierto para la revisión.
@@ -3309,6 +3361,9 @@ class SeccionRegistroActivos:
         DATO POR DATO lo que cambió en el portal (lo usan las modificaciones; el
         alta no tiene «antes» contra qué comparar).
         `extra`: acciones adicionales del pie (p. ej. exportar).
+        `avisos`: renglones de atención que NO son errores (p. ej. las fotos que
+        no cupieron). Van arriba y en ámbar: hay que hacer algo con ellos, pero
+        nada falló.
         """
         def stat(n, etiqueta, color):
             return ft.Column(
@@ -3350,6 +3405,8 @@ class SeccionRegistroActivos:
 
         vivo = self._navegador_vivo(sipp)
         cuerpo = [fila_stats, ft.Divider()]
+        for aviso in (avisos or []):
+            cuerpo.append(ft.Text(aviso, size=11, color=NARANJA, no_wrap=False))
         if errores_generales:
             cuerpo.append(ft.Text("Observaciones generales: "
                                   + "; ".join(errores_generales), size=11, color=ROJO,
@@ -4138,56 +4195,6 @@ class SeccionRegistroActivos:
             return quedan
         return pendientes
 
-    async def _preguntar_fotografias(self, pendientes: list) -> "str | None":
-        """¿Qué hacer con la fotografía de los activos que se van a modificar?
-
-        Devuelve «omitir», «faltantes» (solo donde el SIPP no tenga foto) o
-        «reemplazar», o None si el usuario cancela la corrida.
-
-        Se pregunta UNA vez por corrida y no activo por activo porque el proceso
-        corre desatendido; y se pregunta, en vez de decidirlo la herramienta, porque
-        reemplazar BORRA la fotografía que el SIPP ya tenía —que pudo subirla otra
-        persona— y agregar no toca nada. Solo aparece si hay algo que subir: sin
-        fotos en el levantamiento, no hay decisión que tomar.
-        """
-        con_foto = [r for r in pendientes if self._imagenes_para_alta(r)]
-        if not con_foto:
-            return "omitir"
-
-        decision: asyncio.Future = asyncio.get_running_loop().create_future()
-
-        def responder(valor: str) -> None:
-            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
-            # que vuelve a entrar aquí (ver `_confirmar_etiquetas_repetidas`).
-            if decision.done():
-                return
-            decision.set_result(valor)
-            modal.cerrar()
-
-        modal = Modal(self.page, "Fotografía de los activos", ancho=640,
-                      al_cerrar=lambda: responder("cancelar"))
-        modal.cuerpo.controls = [
-            ft.Text(f"{len(con_foto)} de los {len(pendientes)} activos por modificar "
-                    "tienen fotografía en la herramienta. El SIPP admite hasta 3 por "
-                    "activo.", size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
-            ft.Text("«Solo si falta» no toca las que ya estén en el SIPP: sube la "
-                    "foto únicamente a los activos sin ninguna. «Reemplazar» "
-                    "sustituye las que el activo tenga por las del levantamiento.",
-                    size=11, color=GRIS, no_wrap=False)]
-        modal.set_acciones([
-            boton_herramienta("Cancelar", on_click=lambda _e: responder("cancelar")),
-            boton_herramienta("Sin fotos",
-                              on_click=lambda _e: responder("omitir")),
-            boton_secundario("Reemplazar", ft.Icons.SWAP_HORIZ,
-                             lambda _e: responder("reemplazar")),
-            boton_primario("Solo si falta", ft.Icons.ADD_A_PHOTO,
-                           lambda _e: responder("faltantes")),
-        ])
-        modal.abrir()
-
-        eleccion = await decision
-        return None if eleccion == "cancelar" else eleccion
-
     async def _traer_detalles(self, _e=None) -> None:
         """Baja del SIPP los «Detalles Insumo» de los activos dados de alta.
 
@@ -4267,7 +4274,8 @@ class SeccionRegistroActivos:
                 modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
-        resumen = {"activos": 0, "con_detalle": 0, "sin_activo": 0}
+        resumen = {"activos": 0, "con_detalle": 0, "sin_activo": 0,
+                   "inactivos": 0}
         errores: list[str] = []
 
         async def flujo() -> None:
@@ -4305,10 +4313,16 @@ class SeccionRegistroActivos:
             return
         faltan = (f" {resumen['sin_activo']} etiqueta(s) ya no están en el catálogo "
                   f"del SIPP." if resumen["sin_activo"] else "")
+        # La misma pasada actualiza el estatus de TODA la empresa, que es lo que
+        # permite dejar en paz a los dados de baja: si hay, se dice aquí.
+        bajas = (f" {resumen['inactivos']} están dados de baja: no se les enviarán "
+                 f"cambios (filtro «Inactivo en SIPP»)."
+                 if resumen["inactivos"] else "")
         fallo = (" " + "; ".join(errores)) if errores else ""
         self.app.avisar(
             f"Detalles traídos de {resumen['activos']} activo(s); "
-            f"{resumen['con_detalle']} tienen algún dato en el SIPP." + faltan + fallo,
+            f"{resumen['con_detalle']} tienen algún dato en el SIPP." + faltan
+            + bajas + fallo,
             VERDE if not errores else NARANJA, duracion=8000)
 
     @staticmethod
@@ -4316,8 +4330,12 @@ class SeccionRegistroActivos:
         """Activos dados de alta con cambios locales por enviar. Se relee de la base
         en cada corrida: es lo que hace que «Reanudar» retome exactamente lo que
         faltó, sin llevar cuentas aparte."""
+        # Los INACTIVOS quedan fuera aunque tengan cambios: el portal no deja
+        # editar un activo dado de baja, así que mandarlos solo gasta la corrida y
+        # llena el reporte de errores que nadie puede resolver desde aquí.
         return [r for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
-                if r.modificado and r.id_tipo_activo is not None]
+                if r.modificado and r.id_tipo_activo is not None
+                and not (r.info_sipp() or {}).get("inactivo")]
 
     async def _modificar_en_sipp(self, _e=None, *, sesion=None,
                                  bucle_previo=None) -> None:
@@ -4346,12 +4364,6 @@ class SeccionRegistroActivos:
             return
         if not pendientes:
             self.app.avisar("No quedó ningún activo por enviar.", NARANJA)
-            return
-
-        # Qué hacer con las fotos. Va junto al resto de las preguntas, ANTES de
-        # abrir el navegador: a media corrida no hay quién conteste.
-        modo_fotos = await self._preguntar_fotografias(pendientes)
-        if modo_fotos is None:
             return
 
         total = len(pendientes)
@@ -4394,6 +4406,11 @@ class SeccionRegistroActivos:
         resultados: list[dict] = []      # una fila por activo (para el reporte)
         aplicados: list = []             # registros que sí se enviaron al SIPP
         errores_generales: list[str] = []
+        # Fotos que no cupieron: el SIPP admite 3 por activo y la herramienta no
+        # borra ninguna (puede haberlas subido alguien más). Se juntan para
+        # decirlo TODO JUNTO al final: quien tenga que hacer espacio en el portal
+        # necesita la lista, no un aviso perdido por fila.
+        sin_espacio: list[str] = []
 
         async def flujo() -> None:
             # Al reanudar, la sesión ya está iniciada y con empresa elegida: repetir
@@ -4421,9 +4438,7 @@ class SeccionRegistroActivos:
                     resultado = await sipp.modificar_activo(
                         r.etiqueta, r.no_serie, campos, detalles,
                         punto_control=ctrl.punto_control, insumo_id=insumo_id,
-                        imagenes=(self._imagenes_para_alta(r)
-                                  if modo_fotos != "omitir" else None),
-                        reemplazar_fotos=(modo_fotos == "reemplazar"))
+                        imagenes=self._imagenes_para_alta(r))
                     no_aplicados = resultado["no_aplicados"]
                     db.actualizar_datos_levantamiento(r.id, modificado=False)
                     fila["ok"] = True
@@ -4462,6 +4477,11 @@ class SeccionRegistroActivos:
                     # o no admitida. Es lo que el usuario vino a verificar.
                     if resultado.get("fotos"):
                         fila["observacion"] += f" {resultado['fotos']}."
+                    if resultado.get("fotos_pendientes"):
+                        sin_espacio.append(
+                            f"{r.nombre_insumo or '(sin insumo)'} "
+                            f"(etiqueta {r.etiqueta or '—'}): ya no hay espacio "
+                            f"para {', '.join(resultado['fotos_pendientes'])}")
                     aplicados.append(r)
                 # Detenido a media captura: NADA se guardó de este activo (no se
                 # llegó a Guardar), así que queda pendiente tal cual para reanudar.
@@ -4504,11 +4524,12 @@ class SeccionRegistroActivos:
 
         self._guardar_historial(db.MOV_MODIFICACION, resultados)
         self._mostrar_reporte_modificaciones(resultados, detenido, errores_generales,
-                                             sipp, bucle)
+                                             sipp, bucle, sin_espacio)
 
     def _mostrar_reporte_modificaciones(self, filas: list, detenido: bool,
                                         errores_generales: list, sipp: "SesionSipp",
-                                        bucle: BucleRpa) -> None:
+                                        bucle: BucleRpa,
+                                        sin_espacio: "list | None" = None) -> None:
         """Reporte final del envío de modificaciones al SIPP."""
         hechas = sum(1 for f in filas if f.get("ok"))
         datos = sum(len(f.get("cambios") or ()) for f in filas)
@@ -4536,6 +4557,14 @@ class SeccionRegistroActivos:
             extra.append(boton_primario(f"Reanudar proceso ({len(faltan)})",
                                         ft.Icons.PLAY_ARROW, _reanudar))
 
+        avisos = []
+        if sin_espacio:
+            avisos.append(
+                "El SIPP admite 3 fotografías por activo y estos ya las tienen, "
+                "así que estas no se subieron. Baja en el portal las que no sirvan "
+                "y vuelve a enviar la modificación:")
+            avisos.extend(f"• {s}" for s in sin_espacio)
+
         modal = self._modal_reporte_rpa(
             "Reporte de modificaciones",
             [(hechas, "Modificados", VERDE),
@@ -4543,7 +4572,7 @@ class SeccionRegistroActivos:
              (len(faltan), "Pendientes", NARANJA),
              (len(filas), "Procesados", ft.Colors.ON_SURFACE_VARIANT)],
             renglones, errores_generales, sipp, bucle, detenido=detenido,
-            extra=extra)
+            extra=extra, avisos=avisos)
         modal.abrir()
 
     # ------------------------------------ actualizar catálogo de insumos

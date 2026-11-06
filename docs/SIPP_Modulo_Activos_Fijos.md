@@ -43,6 +43,21 @@
 > Las variantes con sufijo `_EDITAR` (`filtrosEditar.*`, `FH_*_EDITAR`) son el
 > mismo modelo para el flujo de edición.
 
+### Activo o dado de baja (`SN_ACTIVO`)
+
+El listado del portal lo trae como **texto** (`'True'` / `'False'`); el de la API
+**no lo trae en absoluto**. En Aske, 864 de 2,408 activos están dados de baja
+(36%), así que no es un caso raro.
+
+Importa porque el portal **no deja editar un activo inactivo**: la herramienta lo
+mandaba al RPA y el cambio se perdía sin aviso. La herramienta lo guarda en la
+columna `activo` de la caché (NULL = no se ha consultado el portal, y se trata
+como activo), lo refresca en la pasada de «Traer detalles del SIPP» y, con la
+etiqueta repetida, se queda con el VIVO: es el único que se puede modificar.
+
+Ojo con el booleano: `bool('False')` es `True` en Python. Se normaliza en
+`core.db._bandera`.
+
 ### Campos de detalle del insumo (Marca, Modelo, RAM…)
 
 Son los «Detalles Insumo» del formulario: dinámicos por insumo, no columnas del
