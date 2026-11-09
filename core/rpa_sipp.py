@@ -344,14 +344,22 @@ class SesionSipp:
     """Maneja una sesión automatizada del SIPP: navegador, login y selección
     de empresa/sucursal. Pensada para reusarse desde distintos módulos."""
 
-    # --- URLs --- (ajusta BASE_URL al entorno que use la herramienta)
-    # PRODUCTIVO: el RPA da de alta y modifica activos REALES, y las etiquetas que
-    # consume el alta son consecutivos que no se recuperan. Al probar cambios del
-    # flujo, cámbialo a `test` y regrésalo antes de publicar.
-    BASE_URL = "https://sipp.petroil.com.mx"
-    # BASE_URL = "https://test.sipp.petroil.dev"   # pruebas
-    # BASE_URL = "https://stage.sipp.petroil.dev"  # stage
-    # BASE_URL = "https://dev.sipp.petroil.dev"    # desarrollo
+    # --- URLs ---
+    # Por defecto PRODUCTIVO: el RPA da de alta y modifica activos REALES, y
+    # las etiquetas que consume el alta son consecutivos que no se recuperan.
+    #
+    # El entorno se cambia con la variable de entorno SIPP_BASE_URL, NO
+    # editando esta línea: el tag de GitHub es la versión, así que una URL de
+    # pruebas olvidada aquí se compila y se auto-instala en todos los equipos.
+    # Entornos conocidos:
+    #   https://test.sipp.petroil.dev    (pruebas)
+    #   https://stage.sipp.petroil.dev   (stage)
+    #   https://dev.sipp.petroil.dev     (desarrollo)
+    # Se lee al importar el módulo, así que la variable tiene que estar puesta
+    # ANTES de arrancar la app; no se puede cambiar con la app abierta.
+    BASE_URL = (os.environ.get("SIPP_BASE_URL")
+                or "https://sipp.petroil.com.mx").rstrip("/")
+    ES_PRODUCTIVO = BASE_URL == "https://sipp.petroil.com.mx"
     URL_LOGIN = BASE_URL + "/login.html"
     URL_CONFIG_SESION = BASE_URL + "/index.cfm#/configuracionsession"
     # Rutas SPA del módulo de Activos Fijos (confirmadas en el DOM real).
