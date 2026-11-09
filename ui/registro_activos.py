@@ -62,6 +62,16 @@ from ui.tabla_responsiva import (IZQ, ColumnaTabla, FilaDatos,
 _MARCA_TODAS = "Todos"
 _MARCA_PARCIAL = "Posible coincidencia"
 _MARCA_MANUAL = "Cambios a mano en SIPP"
+_MARCA_INACTIVO = "Inactivo en SIPP"
+_MARCA_REPETIDO = "Repetido en SIPP"
+# Opciones del filtro «Estatus»: EXACTAMENTE lo que la columna ESTATUS de la
+# tabla puede mostrar, incluidos los dos que no son un estatus guardado sino
+# una lectura de la foto del SIPP (posible coincidencia e inactivo). Filtrar
+# por lo que se ve es lo que el usuario espera; que por dentro unos salgan de
+# una columna y otros de un JSON es problema de la herramienta.
+_EST_TODOS = "Todos"
+_EST_PARCIAL = "Posible coincidencia"
+_EST_INACTIVO = _MARCA_INACTIVO
 _ANCHO_LIMPIAR = 150      # botón «Limpiar filtros» (aproximado, para el reparto)
 _FILTRO_MIN = 130
 _FILTRO_MAX = 172
@@ -94,6 +104,14 @@ _ESTATUS_UI = {
     db.EST_DADO_ALTA: ("Dado de alta", VERDE),
     db.EST_NO_DADO_ALTA: ("No dado de alta", NARANJA),
 }
+
+# Rótulo del filtro «Estatus» -> valor guardado en `estatus_registro`. Los
+# dos derivados implican «dado de alta», así que también lo llevan: acotan
+# en SQL antes de cruzar con los ids calculados.
+_ESTATUS_GUARDADO = {etiqueta: clave for clave, (etiqueta, _c)
+                     in _ESTATUS_UI.items()}
+_ESTATUS_GUARDADO[_EST_PARCIAL] = db.EST_DADO_ALTA
+_ESTATUS_GUARDADO[_EST_INACTIVO] = db.EST_DADO_ALTA
 
 # Pestañas: clave interna -> etiqueta base.
 _TAB_TODOS = "todos"
@@ -182,12 +200,21 @@ class ResultadoBusquedaSipp:
     choques: list = field(default_factory=list)
     # [(registro, activo, "sipp"|"aparte")] — lo que el usuario decidió.
     decisiones: list = field(default_factory=list)
-    # No aparecieron, pero sin el catálogo completo eso no prueba nada.
+    # No aparecieron, y su empresa no tiene catálogo descargado: no se puede
+    # afirmar que falten en el SIPP, así que se dejan como estaban.
     sin_confirmar: int = 0
+    # No aparecieron y SÍ se pudo confirmar contra la caché de su empresa
+    # (sin API). Se separa para poder decir con qué se decidió.
+    por_cache: int = 0
     # [(registro, activo del SIPP)] — la serie se PARECE pero no es idéntica.
     parciales: list = field(default_factory=list)
     # [(registro, [activos])] — sin etiqueta ni serie, reconocidos por su dueño.
     por_responsable: list = field(default_factory=list)
+    # [(registro, activo del SIPP)] — existe en el SIPP pero está dado de baja.
+    inactivos: list = field(default_factory=list)
+    # [(registro, [candidatos], elegido)] — el SIPP tiene VARIOS activos
+    # distintos con esa etiqueta o esa serie.
+    repetidos: list = field(default_factory=list)
 
 
 # Lo que se captura donde no hay serie legible. Buscar por estos valores casaría
@@ -264,6 +291,93 @@ def _mismo_activo(r, opciones: list) -> "dict | None":
     resp = norm(r.responsable)
     return next((c for c in opciones if resp and norm(c.get("empleado")) == resp),
                 opciones[0])
+
+
+def _son_activos_distintos(candidatos: list) -> bool:
+    """¿Estos candidatos del SIPP son activos DISTINTOS, y no el mismo repetido?
+
+    Hace falta porque las dos cosas se ven igual desde la caché: un mismo activo
+    aparece dos veces cuando la API y el portal lo archivan en empresas distintas
+    (la de compra y la de resguardo), y eso es ruido, no un hallazgo. Lo que sí
+    importa es lo otro: dos activos de verdad que comparten el identificador con
+    el que se les busca —misma serie con etiquetas distintas, o misma etiqueta
+    con series distintas—, porque entonces reconocer «el» activo es elegir uno de
+    varios, y el RPA modificaría ese.
+
+    El criterio: hay dos candidatos que se CONTRADICEN en la etiqueta o en la
+    serie. Un campo vacío no contradice a nadie y se descarta antes de comparar;
+    si no, el mismo activo saldría «repetido» solo porque la API no trae serie y
+    el portal sí, que son casi mil filas del catálogo.
+    """
+    from core import activos_sipp
+
+    norm = activos_sipp._norm_texto
+
+    def se_contradicen(clave: str) -> bool:
+        valores = {norm(c.get(clave)) for c in candidatos}
+        valores.discard("")
+        return len(valores) > 1
+
+    return se_contradicen("etiqueta") or se_contradicen("serie")
+
+
+# --- Plan de «Generar centro de costo» por activo -----------------------------
+# El SIPP cruza la NATURALEZA DEL INSUMO (utilitario / equipo de transporte) con
+# el subtipo que él mismo deriva del tipo de activo. Si no concuerdan, al guardar
+# muestra una alerta y NO registra el activo. Como el alta quema la etiqueta
+# antes de guardar, enterarse ahí es caro: se clasifica ANTES de abrir el portal.
+CC_GENERA = "genera"          # concuerda: se marca la casilla
+CC_NO_APLICA = "no_aplica"    # tipo sin número económico (no se ofrece)
+CC_FALTA_DATO = "falta"       # sin grupo de centro de costo o sin económico
+CC_CHOCA = "choca"            # el insumo está marcado como lo CONTRARIO
+CC_DUDOSO = "dudoso"          # el insumo no está marcado: el SIPP lo marcaría
+
+
+def _plan_centro_costo(r: "db.Levantamiento", id_insumo: str = "") -> tuple:
+    """(estado, detalle) de la generación del centro de costo para este activo.
+
+    `id_insumo` es el insumo con el que se intentará el alta —puede venir de
+    resolverlo por nombre o de que el usuario lo eligiera a mano—; si no se
+    pasa, se usa el guardado en el registro.
+
+    `detalle` es el texto que verá el usuario, ya explicado: lo consume tanto el
+    reporte como el diálogo de los dudosos.
+    """
+    from core.tipos_activo import (SUBTIPO_TRANSPORTE, SUBTIPO_UTILITARIO,
+                                   admite_centro_costo, subtipo_de)
+
+    if not admite_centro_costo(r.id_tipo_activo):
+        return CC_NO_APLICA, ""
+    datos = r.datos() or {}
+    if not (datos.get("id_GrupoCentroCosto") or "").strip():
+        return CC_FALTA_DATO, "no tiene Grupo Centro de Costo (es la primera parte del nombre)"
+    if not (datos.get("no_economico") or "").strip():
+        return CC_FALTA_DATO, "no tiene No. Económico (es la última parte del nombre)"
+
+    subtipo = subtipo_de(r.id_tipo_activo)
+    es_transporte = subtipo == SUBTIPO_TRANSPORTE
+    insumo = None
+    id_insumo = (id_insumo or datos.get("id_InsumoOrigen") or "").strip()
+    if id_insumo.isdigit():
+        insumo = db.obtener_insumo(int(id_insumo))
+    if insumo is None:
+        # Sin el insumo en la caché no se sabe cómo está marcado, y adivinar es
+        # lo que acaba en alerta del portal con la etiqueta ya quemada.
+        return (CC_DUDOSO, "su insumo no está en el catálogo descargado, así que no "
+                           "se sabe si el SIPP lo tiene marcado como utilitario o "
+                           "de transporte")
+    marcado_transporte = bool(insumo.transporte)
+    marcado_utilitario = bool(insumo.utilitario)
+    esperado = "de transporte" if es_transporte else "utilitario"
+    if es_transporte and marcado_utilitario:
+        return CC_CHOCA, f"el insumo «{insumo.nombre}» está marcado como utilitario y el tipo es de transporte"
+    if not es_transporte and marcado_transporte:
+        return CC_CHOCA, f"el insumo «{insumo.nombre}» está marcado como de transporte y el tipo es utilitario"
+    if (es_transporte and marcado_transporte) or (
+            not es_transporte and marcado_utilitario):
+        return CC_GENERA, ""
+    return (CC_DUDOSO, f"el insumo «{insumo.nombre}» no está marcado como "
+                       f"{esperado} en el catálogo del SIPP")
 
 
 def _prefill_desde_sipp(info: dict) -> dict:
@@ -387,6 +501,10 @@ class SeccionRegistroActivos:
         # un filtro de SQL: sale de comparar el levantamiento con la foto del
         # portal, así que se calcula al activarlo y se pasa a la consulta.
         self._marca = ""                      # marca elegida en «Por revisar»
+        self._estatus_sel = _EST_TODOS        # elegido en «Estatus»
+        # Ids que acotan la consulta: la INTERSECCIÓN de los dos filtros que
+        # no se pueden expresar en SQL (marca y estatus derivado). None = sin
+        # acotar; lista vacía = ninguno cumple, que es un resultado válido.
         self._ids_marcados: "list[int] | None" = None
         # Rótulo corto para la opción "sin filtro" (así no se corta en el combo).
         self._TODOS = {"empresa": "Todas", "sucursal": "Todas",
@@ -434,10 +552,21 @@ class SeccionRegistroActivos:
         # una —primero las posibles coincidencias, luego lo que hay que hacer a
         # mano— y cada casilla nueva se comía el ancho de la fila de filtros.
         _, self._dd_marca = campo_opciones(
-            "Por revisar", [_MARCA_TODAS, _MARCA_PARCIAL, _MARCA_MANUAL],
+            "Por revisar",
+            [_MARCA_TODAS, _MARCA_PARCIAL, _MARCA_MANUAL, _MARCA_INACTIVO,
+             _MARCA_REPETIDO],
             valor=_MARCA_TODAS, width=_WF, flotante=True,
             on_change=self._cambiar_marca)
         self._campos_filtro.append(self._dd_marca)
+        _, self._dd_estatus = campo_opciones(
+            "Estatus",
+            [_EST_TODOS, _ESTATUS_UI[db.EST_PENDIENTE][0],
+             _ESTATUS_UI[db.EST_DADO_ALTA][0],
+             _ESTATUS_UI[db.EST_NO_DADO_ALTA][0],
+             _EST_PARCIAL, _EST_INACTIVO],
+            valor=_EST_TODOS, width=_WF, flotante=True,
+            on_change=self._cambiar_estatus)
+        self._campos_filtro.append(self._dd_estatus)
         self._btn_limpiar_filtros = boton_herramienta(
             "Limpiar filtros", ft.Icons.FILTER_ALT_OFF, self._limpiar_filtros_col)
         # «Limpiar filtros» va AL FINAL de la fila, después de la casilla: cuando
@@ -446,7 +575,8 @@ class SeccionRegistroActivos:
         self.barra_filtros = ft.Row(
             [self.dd_f_empresa, self.dd_f_sucursal, self.dd_f_departamento,
              self.tf_f_insumo, self.tf_f_responsable, self.tf_f_etiqueta,
-             self.tf_f_serie, self._dd_marca, self._btn_limpiar_filtros],
+             self.tf_f_serie, self._dd_estatus, self._dd_marca,
+             self._btn_limpiar_filtros],
             spacing=10, run_spacing=10, wrap=True, expand=True,
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -457,6 +587,16 @@ class SeccionRegistroActivos:
         self._caja_filtros = ft.Container(
             self.barra_filtros, expand=True,
             on_size_change=self._ajustar_ancho_filtros, size_change_interval=120)
+        # Los filtros arrancan PLEGADOS y se despliegan con su botón. Son nueve
+        # controles: desplegados ocupan dos renglones, y dos renglones fijos se
+        # comen la altura que necesita la tabla, que es lo que el usuario vino a
+        # ver. El botón lleva la cuenta de los filtros activos para que, plegados,
+        # nadie se pregunte por qué la tabla muestra menos de lo que debería.
+        self._filtros_abiertos = False
+        self._caja_filtros.visible = False
+        self._btn_filtros = boton_herramienta(
+            "Filtros", ft.Icons.EXPAND_MORE, self._alternar_filtros,
+            tooltip="Mostrar u ocultar los filtros de la tabla")
 
         # Barra contextual de RPA (según la pestaña activa).
         self._barra_rpa = ft.Container()
@@ -489,10 +629,13 @@ class SeccionRegistroActivos:
             ColumnaTabla("Empresa", 10, ancho_min_px=155),
             ColumnaTabla("Sucursal", 10, ancho_min_px=155),
             ColumnaTabla("Departamento", 11, ancho_min_px=155),
-            ColumnaTabla("Nombre insumo", 14, ancho_min_px=140),
-            ColumnaTabla("Responsable", 12, ancho_min_px=150),
-            ColumnaTabla("Etiqueta", 9, ancho_min_px=100),
-            ColumnaTabla("No. de serie", 9, ancho_min_px=100),
+            # Seleccionables: son los datos que se copian a mano para pegarlos
+            # en el SIPP o en un correo. Las de empresa/sucursal/departamento no
+            # lo necesitan: son campos editables y ya se pueden copiar.
+            ColumnaTabla("Nombre insumo", 14, ancho_min_px=140, seleccionable=True),
+            ColumnaTabla("Responsable", 12, ancho_min_px=150, seleccionable=True),
+            ColumnaTabla("Etiqueta", 9, ancho_min_px=100, seleccionable=True),
+            ColumnaTabla("No. de serie", 9, ancho_min_px=100, seleccionable=True),
             ColumnaTabla("Estatus", 8, ancho_min_px=95),
             # 6 acciones x _LADO_ACCION + holgura: es el MÁXIMO que puede tener
             # una fila (dada de alta y con serie válida), no el caso promedio.
@@ -535,11 +678,14 @@ class SeccionRegistroActivos:
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True,
                        run_spacing=8),
-                # Filtros por columna + la acción de RPA de la pestaña, en la MISMA
-                # línea: filtros a la izquierda, botón de RPA a la derecha.
-                ft.Row([self._caja_filtros, self._barra_rpa],
+                # El botón de filtros y la acción de RPA de la pestaña comparten
+                # línea; los filtros se despliegan DEBAJO, sobre el ancho
+                # completo, que es lo que les deja caber en dos renglones sin
+                # pelearse con el botón de RPA.
+                ft.Row([self._btn_filtros, self._barra_rpa],
                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                self._caja_filtros,
                 # Antes iban superpuestos en un Stack con `expand`; como se
                 # alternan por `visible`, apilarlos basta y evita la altura sin
                 # acotar que un Stack expandido metería en la columna con scroll.
@@ -657,9 +803,71 @@ class SeccionRegistroActivos:
         levantamiento contra la foto del SIPP—, así que se calculan aquí y se le
         pasan a la consulta, que sigue paginando en SQLite."""
         self._marca = (self._dd_marca.value or "").strip()
-        self._ids_marcados = self._ids_de_marca(self._marca)
+        self._recalcular_ids()
         self._pagina = 0
         self._refrescar()
+
+    def _cambiar_estatus(self, e=None) -> None:
+        """Filtra por el estatus elegido, el mismo que dice la columna.
+
+        Va en dos piezas porque los estatus no son todos iguales: tres están
+        guardados en la columna `estatus_registro` y los filtra SQLite; los
+        otros dos (posible coincidencia, inactivo) se deducen de la foto del
+        SIPP y hay que calcularlos en Python. El usuario no tiene por qué
+        notar la diferencia.
+        """
+        self._estatus_sel = (self._dd_estatus.value or _EST_TODOS).strip()
+        guardado = _ESTATUS_GUARDADO.get(self._estatus_sel, "")
+        if guardado:
+            self._filtros_col["estatus_registro"] = guardado
+        else:
+            self._filtros_col.pop("estatus_registro", None)
+        self._recalcular_ids()
+        self._pagina = 0
+        self._refrescar()
+
+    def _recalcular_ids(self) -> None:
+        """Cruza los filtros que no caben en SQL: «Por revisar» y «Estatus».
+
+        Se INTERSECAN, como cualquier par de filtros de la barra. Se recalcula
+        entero en cada cambio porque las dos listas se mueven solas (al
+        resolver una coincidencia, al reasignar en el portal, al volver a
+        buscar): guardarlas sería guardar una foto que envejece."""
+        listas = [l for l in (self._ids_de_marca(self._marca),
+                              self._ids_de_estatus(self._estatus_sel))
+                  if l is not None]
+        if not listas:
+            self._ids_marcados = None
+        elif len(listas) == 1:
+            self._ids_marcados = listas[0]
+        else:
+            self._ids_marcados = sorted(set(listas[0]) & set(listas[1]))
+
+    @staticmethod
+    def _ids_de_estatus(estatus: str) -> "list[int] | None":
+        """Ids del estatus pedido cuando NO se puede filtrar por SQL.
+
+        None = no hace falta acotar (o lo resuelve `estatus_registro`). «Dado
+        de alta» sí entra aquí aunque sea un estatus guardado: en la tabla esa
+        fila dice «Posible coincidencia» o «Inactivo en SIPP» cuando lo es, así
+        que incluirlas ahí sería filtrar por algo que la columna no dice."""
+        if estatus not in (_EST_PARCIAL, _EST_INACTIVO,
+                           _ESTATUS_UI[db.EST_DADO_ALTA][0]):
+            return None
+        ids_parcial, ids_inactivo, ids_limpios = [], [], []
+        for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA):
+            info = r.info_sipp() or {}
+            if info.get("parcial"):
+                ids_parcial.append(r.id)
+            elif info.get("inactivo"):
+                ids_inactivo.append(r.id)
+            else:
+                ids_limpios.append(r.id)
+        if estatus == _EST_PARCIAL:
+            return ids_parcial
+        if estatus == _EST_INACTIVO:
+            return ids_inactivo
+        return ids_limpios
 
     @staticmethod
     def _ids_de_marca(marca: str) -> "list[int] | None":
@@ -672,14 +880,27 @@ class SeccionRegistroActivos:
         if marca == _MARCA_MANUAL:
             return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
                     if comparacion_sipp.campos_manuales(r)]
+        if marca == _MARCA_INACTIVO:
+            # Dados de baja en el SIPP: la herramienta no los toca, así que la
+            # única acción posible es revisarlos en el portal.
+            return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                    if (r.info_sipp() or {}).get("inactivo")]
+        if marca == _MARCA_REPETIDO:
+            # El SIPP tiene más de un activo que responde a su etiqueta o
+            # a su serie: el que se ve es uno de varios, y es el que el
+            # RPA editaría.
+            return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                    if (r.info_sipp() or {}).get("repetido_con")]
         return None
 
     def _limpiar_filtros_col(self, _e=None) -> None:
         """Quita todos los filtros por columna y reinicia los controles."""
         self._filtros_col = {}
         self._marca = ""
+        self._estatus_sel = _EST_TODOS
         self._ids_marcados = None
         self._dd_marca.value = _MARCA_TODAS
+        self._dd_estatus.value = _EST_TODOS
         self.tf_f_insumo.value = self.tf_f_etiqueta.value = self.tf_f_serie.value = ""
         self.tf_f_responsable.value = ""
         self.dd_f_empresa.value = self._TODOS["empresa"]
@@ -693,6 +914,24 @@ class SeccionRegistroActivos:
         se recargan los desplegables de filtro además de repintar."""
         self._recargar_filtros()
         self._refrescar()
+
+    def _alternar_filtros(self, _e=None) -> None:
+        """Despliega o pliega la fila de filtros."""
+        self._filtros_abiertos = not self._filtros_abiertos
+        self._caja_filtros.visible = self._filtros_abiertos
+        self._btn_filtros.icon = (ft.Icons.EXPAND_LESS if self._filtros_abiertos
+                                  else ft.Icons.EXPAND_MORE)
+        self._safe_update()
+
+    def _actualizar_btn_filtros(self) -> None:
+        """Deja en el botón cuántos filtros están puestos.
+
+        Es lo único que delata un filtro activo cuando el bloque está plegado: sin
+        esta cuenta, una tabla filtrada y una tabla vacía se ven igual."""
+        activos = len(self._filtros_col)
+        if self._marca and self._marca != _MARCA_TODAS:
+            activos += 1
+        self._btn_filtros.content = f"Filtros ({activos})" if activos else "Filtros"
 
     def _recargar_filtros(self) -> None:
         """Rellena los desplegables de filtro con los valores distintos actuales
@@ -729,6 +968,7 @@ class SeccionRegistroActivos:
         self.txt_vacio.visible = total == 0
         self._area_tabla.visible = total > 0
         self._actualizar_conteos()
+        self._actualizar_btn_filtros()
         self._actualizar_paginacion(total)
         self._sincronizar_chk_general()
         self._safe_update()
@@ -808,7 +1048,22 @@ class SeccionRegistroActivos:
         # se distingue en ámbar y con su propia acción para resolverla.
         info = r.info_sipp() if r.estatus_registro == db.EST_DADO_ALTA else {}
         es_parcial = bool(info.get("parcial"))
-        if es_parcial:
+        inactivo = bool(info.get("inactivo"))
+        if inactivo:
+            # Existe en el SIPP pero está dado de baja: ni se da de alta (sería un
+            # duplicado) ni se modifica (el portal no lo permite). Se dice aquí
+            # para que nadie tenga que averiguar activo por activo por qué no se
+            # envió nada.
+            estatus = ft.Row(
+                [ft.Icon(ft.Icons.DO_NOT_DISTURB_ON, size=16, color=GRIS,
+                         tooltip="El SIPP lo tiene dado de baja: no se le envían "
+                                 "cambios. Si debe seguir vivo, reactívalo en el "
+                                 "portal y vuelve a buscar."),
+                 ft.Text("Inactivo en SIPP", size=12, color=GRIS,
+                         weight=ft.FontWeight.W_500)],
+                spacing=4, tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        elif es_parcial:
             estatus = ft.Text("Posible coincidencia", size=12, color=NARANJA,
                               weight=ft.FontWeight.W_500)
         else:
@@ -821,13 +1076,30 @@ class SeccionRegistroActivos:
         # activo, y el detalle va en el tooltip.
         # En una POSIBLE coincidencia no se marca: el activo ni siquiera está
         # confirmado, y comparar contra un candidato sin confirmar sería ruido.
-        manuales = comparacion_sipp.campos_manuales(r) if info and not es_parcial else []
+        manuales = (comparacion_sipp.campos_manuales(r)
+                    if info and not es_parcial and not inactivo else [])
         if manuales:
             detalle = " · ".join(f"{d.campo.etiqueta}: {d.excel} (SIPP: {d.sipp})"
                                  for d in manuales)
             estatus = ft.Row(
                 [ft.Icon(ft.Icons.PERSON_SEARCH, size=16, color=NARANJA,
                          tooltip=f"Hay que cambiarlo a mano en el SIPP — {detalle}"),
+                 estatus],
+                spacing=4, tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        # Varios activos del SIPP para este registro. Va en la misma celda
+        # (no en una columna nueva: el listado ya va apretado) y el detalle,
+        # en el tooltip. En una posible coincidencia no se marca, por lo
+        # mismo que arriba: el activo todavía no está confirmado.
+        repetido_con = [e for e in (info.get("repetido_con") or []) if e]
+        if repetido_con and not es_parcial:
+            estatus = ft.Row(
+                [ft.Icon(ft.Icons.CONTENT_COPY, size=16, color=NARANJA,
+                         tooltip="El SIPP tiene otro(s) activo(s) con esta "
+                                 "etiqueta o esta serie: "
+                                 + ", ".join(repetido_con)
+                                 + ". Revisa en el portal cuál es el bueno "
+                                   "antes de enviarle cambios."),
                  estatus],
                 spacing=4, tight=True,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -1532,18 +1804,23 @@ class SeccionRegistroActivos:
         def _vista_inicio() -> None:
             _pintar(
                 "", "¿Qué quieres hacer?",
-                [_opcion(ft.Icons.ADD_A_PHOTO,
-                         "Cargar imágenes y dar de alta los activos",
-                         "Crea un registro por imagen, tomando el insumo y la "
-                         "etiqueta del nombre del archivo.", lambda _e: _vista_carga()),
-                 _opcion(ft.Icons.TABLE_VIEW, "Carga masiva con Excel",
+                # El orden es el del PROCESO real: primero se sube el Excel del
+                # levantamiento, luego se le relacionan las fotos y, al final, la
+                # carga por imágenes, que es el camino de excepción (crea los
+                # registros desde cero, sin Excel).
+                [_opcion(ft.Icons.TABLE_VIEW, "Carga masiva con Excel",
                          "Plantilla de Excel con los datos del alta "
                          "(empresa/sucursal en las columnas).", _ir_excel),
                  _opcion(ft.Icons.ADD_PHOTO_ALTERNATE,
                          "Relacionar imágenes con activos",
                          "Para activos ya cargados (p. ej. por Excel): les asigna "
                          "su foto por etiqueta, serie, insumo o carpeta del "
-                         "responsable.", lambda _e: _vista_relacionar())])
+                         "responsable.", lambda _e: _vista_relacionar()),
+                 _opcion(ft.Icons.ADD_A_PHOTO,
+                         "Cargar imágenes y dar de alta los activos",
+                         "Crea un registro por imagen, tomando el insumo y la "
+                         "etiqueta del nombre del archivo.",
+                         lambda _e: _vista_carga())])
 
         def _vista_carga() -> None:
             _pintar(
@@ -2190,10 +2467,19 @@ class SeccionRegistroActivos:
                 ROJO, duracion=10000)
             return
 
+        # Empresas cuyo catálogo está descargado: ahí una ausencia SÍ prueba
+        # algo aunque la API no conteste, porque «Actualizar SIPP» baja la
+        # empresa COMPLETA del portal. Es lo que hace útil la búsqueda con la
+        # API caída, en vez de dejarlo todo pendiente.
+        estado_cache = [e for e in db.estado_activos_sipp() if e.get("n")]
+        cacheadas = {e["id_empresa"] for e in estado_cache}
+        # La fecha MÁS VIEJA de las descargas: es la que marca cuánto hay que
+        # desconfiar de una ausencia, y sin ella el aviso no se puede accionar.
+        desde = min((e.get("cuando") or "" for e in estado_cache), default="")
         self._set_cargando(True, f"Buscando {len(registros)} activo(s) en el SIPP…")
         try:
             res = await asyncio.to_thread(self._clasificar_contra_sipp, registros,
-                                          api_completa)
+                                          api_completa, cacheadas)
         except Exception as exc:  # noqa: BLE001 — se reporta al usuario
             self._set_cargando(False)
             self.app.avisar(f"No se pudo buscar en el SIPP: {exc}", ROJO)
@@ -2246,6 +2532,13 @@ class SeccionRegistroActivos:
             self._refrescar()
             await self._avisar_etiquetas_adoptadas(res.adoptadas)
 
+        # Varios activos del SIPP para un mismo registro: tampoco se
+        # pregunta (la búsqueda ya eligió uno), pero enterarse después de
+        # haberle mandado un cambio al equivocado no tiene arreglo.
+        if res.repetidos:
+            self._refrescar()
+            await self._avisar_repetidos_sipp(res.repetidos)
+
         self._refrescar()
 
         n_dado = len(db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA))
@@ -2274,10 +2567,32 @@ class SeccionRegistroActivos:
                                 for r, etq in res.choques[:3])
             extras.append(f"{len(res.choques)} con etiqueta ya usada por otro "
                           f"registro ({detalle}); quedan pendientes")
+        if res.inactivos:
+            detalle = ", ".join(
+                f"{(r.nombre_insumo or '(sin insumo)')} → {(a.get('etiqueta') or '—')}"
+                for r, a in res.inactivos[:3])
+            extras.append(
+                f"{len(res.inactivos)} están INACTIVOS en el SIPP ({detalle}"
+                f"{'…' if len(res.inactivos) > 3 else ''}): se reconocieron para no "
+                f"duplicarlos, pero no se les enviará ningún cambio")
+        if res.repetidos:
+            detalle = ", ".join(
+                f"{(r.nombre_insumo or '(sin insumo)')} ({len(cands)})"
+                for r, cands, _el in res.repetidos[:3])
+            extras.append(
+                f"{len(res.repetidos)} coinciden con VARIOS activos del SIPP "
+                f"({detalle}{'…' if len(res.repetidos) > 3 else ''}): se tomó "
+                f"uno, revísalos antes de enviarles cambios")
+        if res.por_cache:
+            extras.append(
+                f"{res.por_cache} se marcaron «no dado de alta» contra el catálogo "
+                f"descargado de su empresa"
+                + (f" (el más viejo, del {desde})" if desde else "")
+                + "; si ya tiene días, actualízalo antes de darlos de alta")
         if res.sin_confirmar:
-            extras.append(f"{res.sin_confirmar} no aparecen en la caché local y se "
-                          f"dejaron sin cambios: sin la API no se puede confirmar "
-                          f"que falten en el SIPP")
+            extras.append(f"{res.sin_confirmar} no aparecen en la caché Y su empresa "
+                          f"no tiene catálogo descargado: se dejaron sin cambios "
+                          f"(usa «Actualizar SIPP» con esa empresa)")
         if sin_resolver:
             # No quedan como «no dado de alta»: eso invitaría al RPA a duplicarlos.
             # Se quedan pendientes, que es lo que realmente son.
@@ -2359,7 +2674,8 @@ class SeccionRegistroActivos:
                 no_serie=serie_nueva, nombre_insumo=limpio)
 
     def _clasificar_contra_sipp(self, registros: list,
-                                confirmar_ausentes: bool = True) -> tuple:
+                                confirmar_ausentes: bool = True,
+                                empresas_cacheadas: "set | None" = None) -> tuple:
         """(hilo) Resuelve cada registro contra la caché del SIPP.
 
         Devuelve `(hechos, ambiguos, por_serie)`, con
@@ -2434,15 +2750,31 @@ class SeccionRegistroActivos:
                     res.hechos += 1
                     continue
             if not opciones:
-                # Solo con el catálogo COMPLETO una ausencia prueba algo. Con una
-                # caché parcial, marcarlo «no dado de alta» es invitar al RPA a
-                # duplicar un activo que sí existe: se deja como estaba.
+                # Una ausencia solo prueba algo si el catálogo con el que se
+                # compara está COMPLETO. Lo está en dos casos: la API lo trajo
+                # entero, o la empresa del registro tiene su catálogo descargado
+                # del portal («Actualizar SIPP» baja la empresa completa). Si no
+                # hay ninguno de los dos, marcarlo «no dado de alta» sería
+                # invitar al RPA a duplicar un activo que sí existe, y se deja
+                # como estaba.
                 if confirmar_ausentes:
                     self._marcar_no_dado_alta(r)
                     res.hechos += 1
+                elif ID_POR_EMPRESA.get((r.empresa or "").strip()) in (
+                        empresas_cacheadas or set()):
+                    self._marcar_no_dado_alta(r)
+                    res.hechos += 1
+                    res.por_cache += 1
                 else:
                     res.sin_confirmar += 1
                 continue
+            # Con el mismo identificador en dos activos del portal gana el que
+            # sigue VIVO: un dado de baja no se puede modificar, así que tomarlo
+            # como el bueno condenaba la fila a un cambio que nunca se aplicaba.
+            todos = opciones
+            vivos = [c for c in opciones if not c.get("inactivo")]
+            if vivos:
+                opciones = vivos
             idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
             propio = next((c for c in opciones
                            if c.get("id_empresa") == idemp), None) if idemp else None
@@ -2451,7 +2783,31 @@ class SeccionRegistroActivos:
             if elegido is None:
                 res.ambiguos.append((r, opciones))
                 continue
+            if _son_activos_distintos(todos):
+                # El SIPP tiene VARIOS activos que responden a esta
+                # etiqueta o a esta serie. Se eligió uno —arriba— para no
+                # detener la búsqueda, pero el usuario tiene que
+                # enterarse: lo que verá en la fila, y lo que el RPA
+                # modificaría después, es UNO de varios, y cuál sea
+                # depende del orden en que el portal los listó.
+                res.repetidos.append((r, todos, elegido))
+                # Queda escrito en el registro, no solo en el aviso: el
+                # modal se cierra y con él la única señal de que lo que
+                # se ve es uno de varios. Así sigue ahí mañana, con su
+                # marca en la tabla y su filtro.
+                elegido = dict(elegido, repetido_con=[
+                    (c.get("etiqueta") or "").strip() for c in todos
+                    if c is not elegido])
             usadas.add((elegido.get("etiqueta") or "").strip().upper())
+            if elegido.get("inactivo"):
+                # Dado de baja: se reconoce —para que el RPA no lo dé de alta otra
+                # vez— pero no se abre ninguna decisión ni se le manda nada. El
+                # portal no deja editar un activo inactivo: el cambio viajaba y se
+                # perdía sin aviso. Solo se marca y se reporta.
+                self._aplicar_resultado_sipp(r, elegido)
+                res.inactivos.append((r, elegido))
+                res.hechos += 1
+                continue
             if hallado_por_serie:
                 self._conciliar_por_serie(r, elegido, res)
             else:
@@ -2866,6 +3222,74 @@ class SeccionRegistroActivos:
         modal.abrir()
         await espera
 
+    async def _avisar_repetidos_sipp(self, repetidos: list) -> None:
+        """Enseña los registros que coinciden con MÁS DE UN activo del SIPP.
+
+        Informa, no pregunta: la búsqueda ya eligió un candidato para no dejar la
+        fila a medias. Pero la elección la hace el orden en que el portal listó los
+        activos, así que se muestra cuál se tomó y contra qué otros compite. Es el
+        único aviso que el usuario va a tener antes de que el RPA le mande una
+        modificación a uno de ellos.
+
+        Solo llegan aquí los candidatos que son activos DISTINTOS de verdad (ver
+        `_son_activos_distintos`): el mismo equipo archivado en dos empresas por la
+        API y el portal es ruido y se filtra antes.
+        """
+        espera: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def cerrar(_e=None) -> None:
+            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
+            # que es esta misma función (si no, recursión infinita al cerrar).
+            if espera.done():
+                return
+            espera.set_result(None)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=10, expand=True)
+        for r, candidatos, elegido in repetidos:
+            etq_elegida = (elegido.get("etiqueta") or "").strip()
+            lista.controls.append(ft.Text(
+                f"{r.nombre_insumo or '(sin insumo)'}"
+                + (f"  ·  serie {r.no_serie}" if (r.no_serie or '').strip() else "")
+                + (f"  ·  etiqueta {r.etiqueta}" if (r.etiqueta or '').strip() else ""),
+                size=13, weight=ft.FontWeight.W_600, color=ft.Colors.ON_SURFACE,
+                no_wrap=False))
+            for c in candidatos:
+                etq = (c.get("etiqueta") or "").strip()
+                tomado = etq == etq_elegida
+                señas = "  ·  ".join(p for p in (
+                    (c.get("serie") or "").strip() and f"serie {c.get('serie')}",
+                    c.get("empresa_nombre") or c.get("empresa") or "",
+                    c.get("empleado") or "",
+                    "INACTIVO en el SIPP" if c.get("inactivo") else "") if p)
+                lista.controls.append(ft.Row(
+                    [ft.Icon(ft.Icons.CHECK_CIRCLE if tomado else ft.Icons.HELP_OUTLINE,
+                             size=16, color=VERDE if tomado else NARANJA),
+                     ft.Column(
+                         [ft.Text(f"etiqueta {etq or '—'}  ·  "
+                                  f"{(c.get('insumo') or '(sin insumo)').strip()}"
+                                  + ("   ← el que se tomó" if tomado else ""),
+                                  size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+                          ft.Text(señas, size=11, color=GRIS, no_wrap=False)],
+                         spacing=0, tight=True, expand=True)],
+                    spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        modal = Modal(self.page, "Activos repetidos en el SIPP", ancho=720,
+                      subtitulo=f"{len(repetidos)} registro(s) con más de un activo "
+                                f"que les corresponde",
+                      alto_cuerpo=460, al_cerrar=cerrar)
+        modal.cuerpo.controls = [
+            ft.Text("El SIPP tiene varios activos DISTINTOS con la misma serie o la "
+                    "misma etiqueta que estos registros. La búsqueda tomó uno para "
+                    "no dejarlos a medias, pero cuál sea depende del orden en que el "
+                    "portal los listó: revisa en el portal cuál es el bueno antes de "
+                    "enviarles una modificación, porque el RPA edita el que se marca "
+                    "aquí.", size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Container(lista, height=300)]
+        modal.set_acciones([boton_primario("Entendido", ft.Icons.CHECK, cerrar)])
+        modal.abrir()
+        await espera
+
     # ------------------------------------------------ RPA: alta en el SIPP
     @staticmethod
     def _imagenes_para_alta(r: "db.Levantamiento") -> list:
@@ -2961,6 +3385,56 @@ class SeccionRegistroActivos:
         if not pendientes:
             return
 
+        # Centro de costo: solo lo admiten vehículos, embarcaciones y aeronaves
+        # (son los que tienen No. Económico, la última parte del nombre que arma
+        # el SIPP). Se clasifican ANTES de abrir el navegador y antes de
+        # preguntar: el alta quema la etiqueta antes de guardar, así que
+        # descubrir allá que el portal lo iba a rechazar sale caro, y con el plan
+        # en la mano el diálogo puede decir activo por activo qué va a pasar.
+        from core.tipos_activo import admite_centro_costo
+        elegibles_cc = [r for r in pendientes
+                        if admite_centro_costo(r.id_tipo_activo)]
+        planes: dict = {}
+        for r in elegibles_cc:
+            # El insumo que de verdad se va a usar (`_payload_alta` lo resuelve
+            # por nombre cuando el registro no trae el id).
+            id_ins = self._payload_alta(r)[3]
+            if not id_ins:
+                # Sin insumo no hay nada que planear: ese activo va al diálogo de
+                # insumos faltantes, y al volver de ahí se clasifica con el que el
+                # usuario haya elegido. Juzgarlo aquí lo apartaría por la pregunta
+                # equivocada.
+                continue
+            planes[r.id] = _plan_centro_costo(r, id_ins)
+
+        ids_con_cc: set = set()
+        if elegibles_cc:
+            respuesta = await self._preguntar_generar_centro_costo(
+                elegibles_cc, planes, len(pendientes))
+            if respuesta is None:
+                return
+            if respuesta["accion"] == "pendientes":
+                # Se quedan para otra corrida: siguen en «No dados de alta», que
+                # es donde el usuario los va a volver a encontrar.
+                fuera = {r.id for r in elegibles_cc}
+                pendientes = [r for r in pendientes if r.id not in fuera]
+                planes = {}
+                if not pendientes:
+                    self.app.avisar(
+                        f"Se dejaron pendientes los {len(fuera)} activo(s) con "
+                        f"centro de costo; no quedó nada más que registrar.",
+                        NARANJA)
+                    return
+                self.app.avisar(
+                    f"{len(fuera)} activo(s) quedaron pendientes para otra corrida.",
+                    NARANJA)
+            else:
+                ids_con_cc = respuesta["ids"]
+                # Solo se planea lo ELEGIDO: lo que el usuario dejó sin marcar se
+                # da de alta como cualquier otro activo, sin centro de costo.
+                planes = {rid: plan for rid, plan in planes.items()
+                          if rid in ids_con_cc}
+
         total = len(pendientes)
         bucle = BucleRpa()
         ctrl = ControlRpa(bucle.loop)
@@ -3015,6 +3489,11 @@ class SeccionRegistroActivos:
         from core import reporte_altas
         resultados: list[dict] = []      # una fila por activo (para el reporte)
         faltan_insumo: list = []         # (registro, fila) sin insumo claro
+        # (registro, fila, motivo) cuyo insumo NO está marcado como
+        # utilitario/transporte: generarles el centro de costo cambiaría el
+        # CATÁLOGO DE INSUMOS, así que se pregunta al final, con el resto ya
+        # dado de alta.
+        dudosos_cc: list = []
         errores_generales: list[str] = []
 
         # El navegador NO se cierra al terminar: queda abierto para que el usuario
@@ -3049,14 +3528,25 @@ class SeccionRegistroActivos:
                         "_etiqueta_previa": r.etiqueta or "",
                         "_serie_previa": r.no_serie or ""}
                 resultados.append(fila)
-                if not await dar_alta(sipp, r, fila):
+                plan, motivo = planes.get(r.id, (CC_NO_APLICA, ""))
+                if plan == CC_DUDOSO:
+                    # NO se da de alta todavía: primero el resto, y al final
+                    # se pregunta (ver `_resolver_dudosos_centro_costo`).
+                    fila["observacion"] = f"Se preguntará al terminar: {motivo}"
+                    dudosos_cc.append((r, fila, motivo))
+                    continue
+                if not await dar_alta(sipp, r, fila,
+                                      generar_cc=plan == CC_GENERA,
+                                      motivo_sin_cc=motivo):
                     # Sin insumo claro: NO se intenta. Se aparta para preguntarle
                     # al usuario al terminar el resto (ver _elegir_insumos_faltantes).
                     fila["observacion"] = ("Sin coincidencia exacta en el catálogo; "
                                            "se elegirá al terminar.")
                     faltan_insumo.append((r, fila))
 
-        async def dar_alta(sipp, r, fila, insumo_forzado: str = "") -> bool:
+        async def dar_alta(sipp, r, fila, insumo_forzado: str = "",
+                           generar_cc: bool = False,
+                           motivo_sin_cc: str = "") -> bool:
             """Da de alta UN activo y vuelca el resultado en `fila`.
 
             Devuelve False si no hay insumo con el que intentarlo (ni resuelto ni
@@ -3074,7 +3564,8 @@ class SeccionRegistroActivos:
                     empresa=r.empresa or "", sucursal=r.sucursal or "",
                     empleado_nombre=(r.datos().get("nb_Empleado")
                                      or r.responsable or ""),
-                    imagenes=self._imagenes_para_alta(r))
+                    imagenes=self._imagenes_para_alta(r),
+                    generar_centro_costo=generar_cc)
                 db.actualizar_estatus_levantamiento(
                     r.id, db.EST_DADO_ALTA, etiqueta_gen or None)
                 if etiqueta_gen:
@@ -3106,6 +3597,17 @@ class SeccionRegistroActivos:
                 # se perdía en silencio: el alta salía «correcta» sin imagen.
                 if sipp.ultimo_aviso_fotos:
                     fila["observacion"] += f" · {sipp.ultimo_aviso_fotos}"
+                # El centro de costo se pidió y el portal no lo aceptó, o no se
+                # pidió por algo que el usuario debe saber: en los dos casos el
+                # activo quedó dado de alta, pero no con lo que se esperaba.
+                if generar_cc and not sipp.ultimo_aviso_centro_costo:
+                    fila["observacion"] += " · centro de costo generado"
+                elif generar_cc:
+                    fila["observacion"] += (" · SIN centro de costo nuevo: "
+                                            + sipp.ultimo_aviso_centro_costo)
+                elif motivo_sin_cc:
+                    fila["observacion"] += (" · sin centro de costo nuevo: "
+                                            + motivo_sin_cc)
             # Un registro con error (insumo no hallado en el modal, campo, red…)
             # NO aborta el lote: se anota y se sigue con el siguiente.
             except Exception as exc:  # noqa: BLE001 — se reporta en el reporte
@@ -3117,7 +3619,29 @@ class SeccionRegistroActivos:
             for n, (r, fila, id_insumo) in enumerate(elegidos, 1):
                 await ctrl.punto_control()
                 avanzar(n, r.nombre_insumo)
-                await dar_alta(sipp, r, fila, insumo_forzado=id_insumo)
+                # El plan del centro de costo se recalcula AHORA: hasta que el
+                # usuario eligió el insumo no se sabía cómo está marcado, y es lo
+                # que decide si el portal acepta generarlo.
+                plan, motivo = (CC_NO_APLICA, "")
+                if r.id in ids_con_cc and admite_centro_costo(r.id_tipo_activo):
+                    plan, motivo = _plan_centro_costo(r, id_insumo)
+                if plan == CC_DUDOSO:
+                    fila["observacion"] = f"Se preguntará al terminar: {motivo}"
+                    dudosos_cc.append((r, fila, motivo))
+                    continue
+                await dar_alta(sipp, r, fila, insumo_forzado=id_insumo,
+                               generar_cc=plan == CC_GENERA, motivo_sin_cc=motivo)
+
+        async def flujo_dudosos(pendientes_cc: list, con_centro_costo: bool,
+                                avanzar) -> None:
+            """Tercera vuelta: los que esperaban la decisión sobre el centro de costo."""
+            for n, (r, fila) in enumerate(pendientes_cc, 1):
+                await ctrl.punto_control()
+                avanzar(n, r.nombre_insumo)
+                fila["observacion"] = ""
+                if not await dar_alta(sipp, r, fila, generar_cc=con_centro_costo):
+                    fila["observacion"] = ("Sin coincidencia exacta en el catálogo "
+                                           "de insumos; quedó pendiente.")
 
         detenido = False
         try:
@@ -3160,6 +3684,41 @@ class SeccionRegistroActivos:
                     errores_generales.append(mensaje_amigable(exc))
                 finally:
                     modal2.cerrar()
+
+        # Los dudosos del centro de costo, al FINAL y de una sola vez: generarles
+        # el centro marca su insumo como utilitario/transporte en el catálogo del
+        # SIPP, y eso afecta a TODOS los activos de ese insumo, no solo a estos.
+        if dudosos_cc and not detenido and self._navegador_vivo(sipp):
+            decision = await self._resolver_dudosos_centro_costo(dudosos_cc)
+            if decision == "omitir":
+                for _r, fila, motivo in dudosos_cc:
+                    fila["observacion"] = (
+                        f"No se dio de alta por decisión del usuario: {motivo}")
+            else:
+                lote = [(r, fila) for r, fila, _m in dudosos_cc]
+                txt3 = ft.Text(f"Dando de alta {len(lote)} activo(s)…", size=13)
+                barra3 = ft.ProgressBar(value=0)
+                modal3 = Modal(self.page, "Registrando los activos pendientes",
+                               ancho=460)
+                modal3.cuerpo.controls = [txt3, barra3]
+                modal3.abrir()
+
+                def avance3(hechos: int, nombre: str) -> None:
+                    def aplicar() -> None:
+                        txt3.value = f"({hechos}/{len(lote)}) {nombre}"
+                        barra3.value = hechos / len(lote)
+                        modal3.refrescar()
+                    ui_loop.call_soon_threadsafe(aplicar)
+
+                try:
+                    await asyncio.wrap_future(bucle.enviar(flujo_dudosos(
+                        lote, decision == "generar", avance3)))
+                except RpaDetenido:
+                    detenido = True
+                except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                    errores_generales.append(mensaje_amigable(exc))
+                finally:
+                    modal3.cerrar()
 
         # Confirmación final: por cada empresa se trae su listado del SIPP, se
         # verifica que las etiquetas generadas estén (que el alta realmente quedó)
@@ -3298,7 +3857,8 @@ class SeccionRegistroActivos:
     def _modal_reporte_rpa(self, titulo: str, stats: list, filas: list,
                            errores_generales: list, sipp: "SesionSipp",
                            bucle: BucleRpa, *, detenido: bool = False,
-                           extra: list | None = None) -> Modal:
+                           extra: list | None = None,
+                           avisos: list | None = None) -> Modal:
         """Arma el reporte final de un flujo del RPA: estadísticas arriba, una
         línea por registro con su observación y, en el pie, el botón que cierra el
         navegador que quedó abierto para la revisión.
@@ -3309,6 +3869,9 @@ class SeccionRegistroActivos:
         DATO POR DATO lo que cambió en el portal (lo usan las modificaciones; el
         alta no tiene «antes» contra qué comparar).
         `extra`: acciones adicionales del pie (p. ej. exportar).
+        `avisos`: renglones de atención que NO son errores (p. ej. las fotos que
+        no cupieron). Van arriba y en ámbar: hay que hacer algo con ellos, pero
+        nada falló.
         """
         def stat(n, etiqueta, color):
             return ft.Column(
@@ -3350,6 +3913,8 @@ class SeccionRegistroActivos:
 
         vivo = self._navegador_vivo(sipp)
         cuerpo = [fila_stats, ft.Divider()]
+        for aviso in (avisos or []):
+            cuerpo.append(ft.Text(aviso, size=11, color=NARANJA, no_wrap=False))
         if errores_generales:
             cuerpo.append(ft.Text("Observaciones generales: "
                                   + "; ".join(errores_generales), size=11, color=ROJO,
@@ -3859,6 +4424,153 @@ class SeccionRegistroActivos:
         except Exception as exc:  # noqa: BLE001 — el envío ya ocurrió
             self.app.avisar(f"No se pudo guardar el historial: {exc}", NARANJA)
 
+    async def _preguntar_generar_centro_costo(self, elegibles: list, planes: dict,
+                                              total: int) -> "dict | None":
+        """Qué hacer con los activos a los que el SIPP puede crearles centro de costo.
+
+        Devuelve None si se cancela la corrida, o
+        {"accion": "continuar", "ids": {ids a los que SÍ generárselo}} /
+        {"accion": "pendientes"} para dejarlos fuera de esta corrida y seguir con
+        el resto.
+
+        Se listan uno por uno —y no como una sola casilla para todos— porque
+        «generar» no significa lo mismo en cada activo: a unos les falta el grupo
+        o el económico, y a otros el portal los rechazaría por cómo está marcado
+        su insumo. Marcar a ciegas era pedir un centro de costo que en la mitad de
+        los casos no iba a existir, y enterarse al final.
+        """
+        from core.tipos_activo import nombre_tipo
+
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor) -> None:
+            # Salida temprana OBLIGATORIA: `cerrar()` dispara `al_cerrar`, que
+            # vuelve a entrar aquí (recursión infinita al cerrar el diálogo).
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        casillas: dict = {}          # id del registro -> ft.Checkbox
+        lista = ft.ListView(spacing=6, expand=True)
+        for r in elegibles:
+            estado, motivo = planes.get(r.id, (CC_NO_APLICA, ""))
+            datos = r.datos() or {}
+            # Lo que le puede faltar o lo que chocaría se dice AQUÍ, no al final:
+            # con la casilla deshabilitada nadie pide algo que no se va a cumplir.
+            impedido = estado in (CC_FALTA_DATO, CC_CHOCA)
+            chk = ft.Checkbox(value=not impedido, disabled=impedido)
+            casillas[r.id] = chk
+            señas = "  ·  ".join(p for p in (
+                nombre_tipo(r.id_tipo_activo),
+                (r.etiqueta or "").strip() and f"etiqueta {r.etiqueta}",
+                (r.no_serie or "").strip() and f"serie {r.no_serie}") if p)
+            if impedido:
+                detalle, color = f"No se le puede generar: {motivo}", NARANJA
+            elif estado == CC_DUDOSO:
+                detalle, color = (f"Se preguntará al terminar: {motivo}", NARANJA)
+            else:
+                detalle, color = ("Quedará como «"
+                                  + (datos.get("id_GrupoCentroCosto") or "").strip()
+                                  + " - " + (r.nombre_insumo or "").strip()
+                                  + " - " + (datos.get("no_economico") or "").strip()
+                                  + "»", GRIS)
+            lista.controls.append(ft.Row(
+                [chk,
+                 ft.Column([ft.Text(r.nombre_insumo or "(sin insumo)", size=12,
+                                    color=ft.Colors.ON_SURFACE, no_wrap=False),
+                            ft.Text(señas, size=11, color=GRIS, no_wrap=False),
+                            ft.Text(detalle, size=11, color=color, no_wrap=False)],
+                           spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        def marcar_todos(e) -> None:
+            for chk in casillas.values():
+                if not chk.disabled:
+                    chk.value = bool(e.control.value)
+            modal.refrescar()
+
+        chk_todos = ft.Checkbox(value=True, label="Marcar todos los que se pueda",
+                                on_change=marcar_todos)
+        modal = Modal(self.page, "Registrar activos en el SIPP", ancho=680,
+                      subtitulo=f"{len(elegibles)} de los {total} admiten centro de "
+                                f"costo (vehículos, embarcaciones y aeronaves)",
+                      alto_cuerpo=460, al_cerrar=lambda: responder(None))
+        modal.cuerpo.controls = [
+            ft.Text("El nombre lo arma el portal, no la herramienta: «Grupo Centro "
+                    "de Costo - Insumo - No. Económico». Marca a cuáles quieres "
+                    "generárselo; los que dejes sin marcar se dan de alta igual, "
+                    "pero sin centro de costo nuevo.", size=12,
+                    color=ft.Colors.ON_SURFACE, no_wrap=False),
+            chk_todos,
+            ft.Container(lista, height=300)]
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder(None)),
+            boton_secundario(
+                "Dejarlos pendientes y seguir", ft.Icons.SCHEDULE,
+                lambda _e: responder({"accion": "pendientes"}),
+                tooltip="No se dan de alta en esta corrida: se queda con ellos "
+                        "para después y se registran los demás"),
+            boton_primario("Continuar", ft.Icons.PLAY_ARROW,
+                           lambda _e: responder({
+                               "accion": "continuar",
+                               "ids": {rid for rid, c in casillas.items() if c.value}})),
+        ])
+        modal.abrir()
+        return await decision
+
+    async def _resolver_dudosos_centro_costo(self, dudosos: list) -> str:
+        """Qué hacer con los activos cuyo insumo no está marcado en el SIPP.
+
+        `dudosos`: [(registro, fila, motivo)]. Devuelve "generar", "sin_cc" u
+        "omitir".
+
+        Se pregunta al FINAL, con el resto ya dado de alta, porque la respuesta no
+        es solo sobre estos activos: al generar el centro de costo el portal MARCA
+        el insumo como utilitario o de transporte en el catálogo, y eso alcanza a
+        todos los activos de ese insumo, los de hoy y los de mañana.
+        """
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor: str) -> None:
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=8, expand=True)
+        for r, _fila, motivo in dudosos:
+            lista.controls.append(ft.Row(
+                [ft.Icon(ft.Icons.HELP_OUTLINE, size=16, color=NARANJA),
+                 ft.Column(
+                     [ft.Text(f"{r.nombre_insumo or '(sin insumo)'}"
+                              + (f"  ·  serie {r.no_serie}" if (r.no_serie or '').strip() else ""),
+                              size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+                      ft.Text(motivo, size=11, color=GRIS, no_wrap=False)],
+                     spacing=0, tight=True, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+
+        modal = Modal(self.page, "Centro de costo: hay que decidir", ancho=700,
+                      subtitulo=f"{len(dudosos)} activo(s) sin dar de alta todavía",
+                      alto_cuerpo=460, al_cerrar=lambda: responder("omitir"))
+        modal.cuerpo.controls = [
+            ft.Text("El resto de la corrida ya quedó registrado. Estos no se "
+                    "enviaron porque generarles el centro de costo tiene un efecto "
+                    "de más: el SIPP marcaría su insumo como utilitario o de "
+                    "transporte en el catálogo, y eso aplica a TODOS los activos de "
+                    "ese insumo, no solo a estos.", size=12,
+                    color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Container(lista, height=280)]
+        modal.set_acciones([
+            boton_herramienta("No darlos de alta", on_click=lambda _e: responder("omitir")),
+            boton_secundario("Dar de alta sin centro de costo", ft.Icons.PLAYLIST_ADD,
+                             lambda _e: responder("sin_cc")),
+            boton_primario("Generar el centro de costo", ft.Icons.CHECK,
+                           lambda _e: responder("generar")),
+        ])
+        modal.abrir()
+        return await decision
+
     async def _elegir_insumos_faltantes(self, faltantes: list) -> list:
         """Pide al usuario el insumo de los activos que el catálogo no resolvió.
 
@@ -4138,56 +4850,6 @@ class SeccionRegistroActivos:
             return quedan
         return pendientes
 
-    async def _preguntar_fotografias(self, pendientes: list) -> "str | None":
-        """¿Qué hacer con la fotografía de los activos que se van a modificar?
-
-        Devuelve «omitir», «faltantes» (solo donde el SIPP no tenga foto) o
-        «reemplazar», o None si el usuario cancela la corrida.
-
-        Se pregunta UNA vez por corrida y no activo por activo porque el proceso
-        corre desatendido; y se pregunta, en vez de decidirlo la herramienta, porque
-        reemplazar BORRA la fotografía que el SIPP ya tenía —que pudo subirla otra
-        persona— y agregar no toca nada. Solo aparece si hay algo que subir: sin
-        fotos en el levantamiento, no hay decisión que tomar.
-        """
-        con_foto = [r for r in pendientes if self._imagenes_para_alta(r)]
-        if not con_foto:
-            return "omitir"
-
-        decision: asyncio.Future = asyncio.get_running_loop().create_future()
-
-        def responder(valor: str) -> None:
-            # Salida temprana OBLIGATORIA: `modal.cerrar()` dispara `al_cerrar`,
-            # que vuelve a entrar aquí (ver `_confirmar_etiquetas_repetidas`).
-            if decision.done():
-                return
-            decision.set_result(valor)
-            modal.cerrar()
-
-        modal = Modal(self.page, "Fotografía de los activos", ancho=640,
-                      al_cerrar=lambda: responder("cancelar"))
-        modal.cuerpo.controls = [
-            ft.Text(f"{len(con_foto)} de los {len(pendientes)} activos por modificar "
-                    "tienen fotografía en la herramienta. El SIPP admite hasta 3 por "
-                    "activo.", size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
-            ft.Text("«Solo si falta» no toca las que ya estén en el SIPP: sube la "
-                    "foto únicamente a los activos sin ninguna. «Reemplazar» "
-                    "sustituye las que el activo tenga por las del levantamiento.",
-                    size=11, color=GRIS, no_wrap=False)]
-        modal.set_acciones([
-            boton_herramienta("Cancelar", on_click=lambda _e: responder("cancelar")),
-            boton_herramienta("Sin fotos",
-                              on_click=lambda _e: responder("omitir")),
-            boton_secundario("Reemplazar", ft.Icons.SWAP_HORIZ,
-                             lambda _e: responder("reemplazar")),
-            boton_primario("Solo si falta", ft.Icons.ADD_A_PHOTO,
-                           lambda _e: responder("faltantes")),
-        ])
-        modal.abrir()
-
-        eleccion = await decision
-        return None if eleccion == "cancelar" else eleccion
-
     async def _traer_detalles(self, _e=None) -> None:
         """Baja del SIPP los «Detalles Insumo» de los activos dados de alta.
 
@@ -4267,7 +4929,8 @@ class SeccionRegistroActivos:
                 modal.refrescar()
             ui_loop.call_soon_threadsafe(aplicar)
 
-        resumen = {"activos": 0, "con_detalle": 0, "sin_activo": 0}
+        resumen = {"activos": 0, "con_detalle": 0, "sin_activo": 0,
+                   "inactivos": 0}
         errores: list[str] = []
 
         async def flujo() -> None:
@@ -4305,10 +4968,16 @@ class SeccionRegistroActivos:
             return
         faltan = (f" {resumen['sin_activo']} etiqueta(s) ya no están en el catálogo "
                   f"del SIPP." if resumen["sin_activo"] else "")
+        # La misma pasada actualiza el estatus de TODA la empresa, que es lo que
+        # permite dejar en paz a los dados de baja: si hay, se dice aquí.
+        bajas = (f" {resumen['inactivos']} están dados de baja: no se les enviarán "
+                 f"cambios (filtro «Inactivo en SIPP»)."
+                 if resumen["inactivos"] else "")
         fallo = (" " + "; ".join(errores)) if errores else ""
         self.app.avisar(
             f"Detalles traídos de {resumen['activos']} activo(s); "
-            f"{resumen['con_detalle']} tienen algún dato en el SIPP." + faltan + fallo,
+            f"{resumen['con_detalle']} tienen algún dato en el SIPP." + faltan
+            + bajas + fallo,
             VERDE if not errores else NARANJA, duracion=8000)
 
     @staticmethod
@@ -4316,8 +4985,12 @@ class SeccionRegistroActivos:
         """Activos dados de alta con cambios locales por enviar. Se relee de la base
         en cada corrida: es lo que hace que «Reanudar» retome exactamente lo que
         faltó, sin llevar cuentas aparte."""
+        # Los INACTIVOS quedan fuera aunque tengan cambios: el portal no deja
+        # editar un activo dado de baja, así que mandarlos solo gasta la corrida y
+        # llena el reporte de errores que nadie puede resolver desde aquí.
         return [r for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
-                if r.modificado and r.id_tipo_activo is not None]
+                if r.modificado and r.id_tipo_activo is not None
+                and not (r.info_sipp() or {}).get("inactivo")]
 
     async def _modificar_en_sipp(self, _e=None, *, sesion=None,
                                  bucle_previo=None) -> None:
@@ -4346,12 +5019,6 @@ class SeccionRegistroActivos:
             return
         if not pendientes:
             self.app.avisar("No quedó ningún activo por enviar.", NARANJA)
-            return
-
-        # Qué hacer con las fotos. Va junto al resto de las preguntas, ANTES de
-        # abrir el navegador: a media corrida no hay quién conteste.
-        modo_fotos = await self._preguntar_fotografias(pendientes)
-        if modo_fotos is None:
             return
 
         total = len(pendientes)
@@ -4394,6 +5061,11 @@ class SeccionRegistroActivos:
         resultados: list[dict] = []      # una fila por activo (para el reporte)
         aplicados: list = []             # registros que sí se enviaron al SIPP
         errores_generales: list[str] = []
+        # Fotos que no cupieron: el SIPP admite 3 por activo y la herramienta no
+        # borra ninguna (puede haberlas subido alguien más). Se juntan para
+        # decirlo TODO JUNTO al final: quien tenga que hacer espacio en el portal
+        # necesita la lista, no un aviso perdido por fila.
+        sin_espacio: list[str] = []
 
         async def flujo() -> None:
             # Al reanudar, la sesión ya está iniciada y con empresa elegida: repetir
@@ -4421,9 +5093,7 @@ class SeccionRegistroActivos:
                     resultado = await sipp.modificar_activo(
                         r.etiqueta, r.no_serie, campos, detalles,
                         punto_control=ctrl.punto_control, insumo_id=insumo_id,
-                        imagenes=(self._imagenes_para_alta(r)
-                                  if modo_fotos != "omitir" else None),
-                        reemplazar_fotos=(modo_fotos == "reemplazar"))
+                        imagenes=self._imagenes_para_alta(r))
                     no_aplicados = resultado["no_aplicados"]
                     db.actualizar_datos_levantamiento(r.id, modificado=False)
                     fila["ok"] = True
@@ -4462,6 +5132,11 @@ class SeccionRegistroActivos:
                     # o no admitida. Es lo que el usuario vino a verificar.
                     if resultado.get("fotos"):
                         fila["observacion"] += f" {resultado['fotos']}."
+                    if resultado.get("fotos_pendientes"):
+                        sin_espacio.append(
+                            f"{r.nombre_insumo or '(sin insumo)'} "
+                            f"(etiqueta {r.etiqueta or '—'}): ya no hay espacio "
+                            f"para {', '.join(resultado['fotos_pendientes'])}")
                     aplicados.append(r)
                 # Detenido a media captura: NADA se guardó de este activo (no se
                 # llegó a Guardar), así que queda pendiente tal cual para reanudar.
@@ -4504,11 +5179,12 @@ class SeccionRegistroActivos:
 
         self._guardar_historial(db.MOV_MODIFICACION, resultados)
         self._mostrar_reporte_modificaciones(resultados, detenido, errores_generales,
-                                             sipp, bucle)
+                                             sipp, bucle, sin_espacio)
 
     def _mostrar_reporte_modificaciones(self, filas: list, detenido: bool,
                                         errores_generales: list, sipp: "SesionSipp",
-                                        bucle: BucleRpa) -> None:
+                                        bucle: BucleRpa,
+                                        sin_espacio: "list | None" = None) -> None:
         """Reporte final del envío de modificaciones al SIPP."""
         hechas = sum(1 for f in filas if f.get("ok"))
         datos = sum(len(f.get("cambios") or ()) for f in filas)
@@ -4536,6 +5212,14 @@ class SeccionRegistroActivos:
             extra.append(boton_primario(f"Reanudar proceso ({len(faltan)})",
                                         ft.Icons.PLAY_ARROW, _reanudar))
 
+        avisos = []
+        if sin_espacio:
+            avisos.append(
+                "El SIPP admite 3 fotografías por activo y estos ya las tienen, "
+                "así que estas no se subieron. Baja en el portal las que no sirvan "
+                "y vuelve a enviar la modificación:")
+            avisos.extend(f"• {s}" for s in sin_espacio)
+
         modal = self._modal_reporte_rpa(
             "Reporte de modificaciones",
             [(hechas, "Modificados", VERDE),
@@ -4543,7 +5227,7 @@ class SeccionRegistroActivos:
              (len(faltan), "Pendientes", NARANJA),
              (len(filas), "Procesados", ft.Colors.ON_SURFACE_VARIANT)],
             renglones, errores_generales, sipp, bucle, detenido=detenido,
-            extra=extra)
+            extra=extra, avisos=avisos)
         modal.abrir()
 
     # ------------------------------------ actualizar catálogo de insumos

@@ -43,6 +43,21 @@
 > Las variantes con sufijo `_EDITAR` (`filtrosEditar.*`, `FH_*_EDITAR`) son el
 > mismo modelo para el flujo de edición.
 
+### Activo o dado de baja (`SN_ACTIVO`)
+
+El listado del portal lo trae como **texto** (`'True'` / `'False'`); el de la API
+**no lo trae en absoluto**. En Aske, 864 de 2,408 activos están dados de baja
+(36%), así que no es un caso raro.
+
+Importa porque el portal **no deja editar un activo inactivo**: la herramienta lo
+mandaba al RPA y el cambio se perdía sin aviso. La herramienta lo guarda en la
+columna `activo` de la caché (NULL = no se ha consultado el portal, y se trata
+como activo), lo refresca en la pasada de «Traer detalles del SIPP» y, con la
+etiqueta repetida, se queda con el VIVO: es el único que se puede modificar.
+
+Ojo con el booleano: `bool('False')` es `True` en Python. Se normaliza en
+`core.db._bandera`.
+
 ### Campos de detalle del insumo (Marca, Modelo, RAM…)
 
 Son los «Detalles Insumo» del formulario: dinámicos por insumo, no columnas del
@@ -377,7 +392,83 @@ Automatizarlo es viable (el buscador de empleados ya lo maneja
 con efectos propios en el portal. **Decisión de agosto 2026: se documenta, no se
 implementa por ahora.**
 
+## B.3 bis Generación del CENTRO DE COSTO (`sn_GenerarCentroCosto`)
+
+Confirmado leyendo `js/controllers/ActivosFijosNuevo.js` en stage y contra datos
+reales (noviembre 2026). El portal **no** pide el nombre del centro de costo: lo
+arma el servidor con
+
+```
+<grupo de centro de costo> - <insumo> - <No. Economico>
+```
+
+Ejemplo real en stage: el TRACTOCAMION con grupo `Asamaz` y campo detalle
+`No. Economico = a3wd3` tiene el centro `Asamaz - TRACTOCAMION - a3wd3`.
+
+**De dónde sale cada parte**
+
+| parte | origen |
+|-------|--------|
+| grupo | `filtrosAgregar.id_GrupoCentroCostoResguardo` (combo del alta) |
+| insumo | `filtrosAgregar.nb_NombreInsumo` |
+| económico | **campo detalle `ID_CAMPODETALLE = 10`**, rotulado `No. Economico` (sin acento) |
+
+El económico NO es un campo del formulario: `obtenerNumeroEconomico()` lo busca
+entre los `camposDetalle` del insumo (por id 10 o por un rótulo que contenga
+«economico», ignorando acentos) y lo manda como `num_Economico`. Es decir, va por
+la misma vía que Marca/Modelo/Placa: `core/tipos_activo.py` con `detalle=True`.
+
+**La casilla**
+
+`filtrosAgregar.sn_GenerarCentroCosto` (`id="checkboxGenerar"`,
+`ng-change="habilitarComboCentroCostoResguardo()"`). Llega **deshabilitada** y no
+hace nada mientras `id_GrupoCentroCostoResguardo` esté vacío: el handler sale
+antes. Al marcarla, **vacía** `id_CentroCostoResguardo` —el centro se va a crear,
+así que no se elige uno—.
+
+**Subtipo: lo deriva el portal del tipo de activo, no lo elige nadie**
+
+```
+id_TipoActivo 4, 9, 10  -> id_SubTipoActivoFijo = 2 (Utilitario)
+id_TipoActivo 5         -> id_SubTipoActivoFijo = 3 (Transporte)
+cualquier otro          -> id_SubTipoActivoFijo = 1 (Activo Fijo)
+```
+
+**Matriz de validación al guardar** (solo si la casilla está marcada). Cruza la
+NATURALEZA DEL INSUMO —`SN_UTILITARIO` / `SN_EQUIPOTRANSPORTE`, que vienen en el
+listado de insumos— contra ese subtipo:
+
+| insumo | subtipo | resultado |
+|--------|---------|-----------|
+| transporte | 1 Activo Fijo | **alerta y NO guarda** |
+| utilitario | 1 Activo Fijo | **alerta y NO guarda** |
+| utilitario | 2 Utilitario | crea el CC con económico |
+| transporte | 3 Transporte | crea el CC con económico |
+| transporte | 2 Utilitario | **alerta y NO guarda** |
+| utilitario | 3 Transporte | **alerta y NO guarda** |
+| ninguno | 3 Transporte | crea el CC **y marca el insumo como transporte** |
+| ninguno | 2 Utilitario | crea el CC **y marca el insumo como utilitario** |
+
+Las dos últimas filas tienen efecto en el CATÁLOGO DE INSUMOS
+(`sn_ActualizarTransporte` / `sn_ActualizarUtilitario`), no solo en el activo.
+
+Con subtipo 1 la casilla no aborta nada, pero `sn_CrearCCNumEconomico` se queda
+en 0: ahí no hay número económico que concatenar.
+
+El mismo mecanismo existe en el modal de EDICIÓN
+(`editarModalFiltros.sn_GenerarCentroCostoModal`, `generarCC()`) y en el de
+REASIGNACIÓN (`reasignarModalFiltros.sn_GenerarCentroCostoModal`,
+`generarCCReasignar()`), con su propia copia de la matriz.
+
+Los campos detalle del insumo se piden con
+`ConfiguracionCamposDetalle.listar {id_subFamiliaInsumo, id_subFamiliaDinamica}`
+—ambos ids vienen en el listado de insumos—; `ActivosFijosNuevo.obtenerCamposDetalle
+{id_Empresa, id_ActivoFijo}` devuelve los VALORES ya guardados de un activo.
+
 ## B.4 Ambiente de pruebas
 
-El RPA opera contra **stage**: `https://stage.sipp.petroil.dev` (fijado en
-`core/rpa_sipp.py` `SesionSipp.BASE_URL`).
+El entorno del RPA se elige con la variable de entorno **`SIPP_BASE_URL`**; por
+defecto es **productivo** (`https://sipp.petroil.com.mx`). Para probar contra
+stage sin mezclar datos: `probar_sipp.bat stage`, que además manda base,
+preferencias y credenciales a una carpeta aparte (`ACTIVOS_FIJOS_DATOS`).
+Entornos: `test`, `stage` y `dev` bajo `*.sipp.petroil.dev` (`dev` no resuelve).

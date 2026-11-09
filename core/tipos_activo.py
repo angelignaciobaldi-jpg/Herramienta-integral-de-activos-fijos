@@ -168,16 +168,37 @@ CAMPOS_POR_TIPO: dict[int, list[CampoActivo]] = {
         CampoActivo("cliente", "", "Cliente", "text", grupo="Detalles Insumo", detalle=True),
     ],
     # Vehículos Pesados (id 5): placa, motor, modelo/año (EJEMPLO a confirmar).
+    # El «No. Económico» NO es decorativo: es el campo detalle con el que el
+    # portal arma el nombre del centro de costo que genera (ver
+    # `admite_centro_costo` y docs/SIPP_Modulo_Activos_Fijos.md, B.3 bis).
     5: [
         CampoActivo("marca", "", "Marca", "text", grupo="Detalles Insumo", detalle=True),
         CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo", detalle=True),
         CampoActivo("placa", "", "Placa", "text", grupo="Detalles Insumo", detalle=True),
+        CampoActivo("no_economico", "", "No. Económico", "text",
+                    grupo="Detalles Insumo", detalle=True),
     ],
     # Vehículos Utilitarios (id 4): idem (EJEMPLO a confirmar).
     4: [
         CampoActivo("marca", "", "Marca", "text", grupo="Detalles Insumo", detalle=True),
         CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo", detalle=True),
         CampoActivo("placa", "", "Placa", "text", grupo="Detalles Insumo", detalle=True),
+        CampoActivo("no_economico", "", "No. Económico", "text",
+                    grupo="Detalles Insumo", detalle=True),
+    ],
+    # Embarcaciones (9) y Aeronaves (10): el portal las trata como
+    # «utilitario», así que también llevan número económico.
+    9: [
+        CampoActivo("marca", "", "Marca", "text", grupo="Detalles Insumo", detalle=True),
+        CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo", detalle=True),
+        CampoActivo("no_economico", "", "No. Económico", "text",
+                    grupo="Detalles Insumo", detalle=True),
+    ],
+    10: [
+        CampoActivo("marca", "", "Marca", "text", grupo="Detalles Insumo", detalle=True),
+        CampoActivo("modelo", "", "Modelo", "text", grupo="Detalles Insumo", detalle=True),
+        CampoActivo("no_economico", "", "No. Económico", "text",
+                    grupo="Detalles Insumo", detalle=True),
     ],
     # Equipo informático (id 7): CONFIRMADO con captura real del formulario.
     # Los rótulos van TAL COMO los escribe el portal (sin acentos en «Portatil» y
@@ -207,6 +228,43 @@ CAMPOS_POR_TIPO: dict[int, list[CampoActivo]] = {
                     detalle=True),
     ],
 }
+
+
+# --- Subtipo y generación de centro de costo ----------------------------------
+# El portal DERIVA el subtipo del tipo de activo (nadie lo elige) y con él decide
+# si acepta generar el centro de costo. Copiado de `guardarActivoFijo()` en
+# js/controllers/ActivosFijosNuevo.js; ver docs/SIPP_Modulo_Activos_Fijos.md.
+SUBTIPO_ACTIVO_FIJO = 1
+SUBTIPO_UTILITARIO = 2
+SUBTIPO_TRANSPORTE = 3
+
+_SUBTIPO_POR_TIPO: dict[int, int] = {
+    4: SUBTIPO_UTILITARIO,    # Vehículos Utilitarios
+    9: SUBTIPO_UTILITARIO,    # Embarcaciones
+    10: SUBTIPO_UTILITARIO,   # Aeronaves
+    5: SUBTIPO_TRANSPORTE,    # Vehículos Pesados
+}
+
+# Rótulo del campo detalle con el número económico (ID_CAMPODETALLE = 10 en el
+# SIPP). El portal lo escribe SIN acento; el emparejado normaliza, así que aquí
+# va bien escrito.
+CLAVE_ECONOMICO = "no_economico"
+
+
+def subtipo_de(id_tipo: "int | None") -> int:
+    """Subtipo que el portal le asigna a ese tipo de activo."""
+    return _SUBTIPO_POR_TIPO.get(id_tipo, SUBTIPO_ACTIVO_FIJO)
+
+
+def admite_centro_costo(id_tipo: "int | None") -> bool:
+    """¿A este tipo se le puede pedir al SIPP que genere el centro de costo?
+
+    Solo a los que tienen número económico (vehículos, embarcaciones, aeronaves):
+    el nombre que arma el portal es «grupo - insumo - económico», y en los demás
+    tipos ese tercer trozo no existe. El portal no lo impide, pero el resultado
+    queda a merced del servidor; aquí se limita a propósito.
+    """
+    return subtipo_de(id_tipo) != SUBTIPO_ACTIVO_FIJO
 
 
 def campos_de_tipo(id_tipo: "int | None") -> list[CampoActivo]:

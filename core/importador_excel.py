@@ -30,7 +30,7 @@ from datetime import datetime as _datetime
 import openpyxl
 
 from . import db
-from .empresas import ID_POR_EMPRESA
+from .empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
 from .tipos_activo import ID_POR_NOMBRE, SITUACIONES, TIPOS_ACTIVO
 
 # Encabezados que se buscan (en MAYÚSCULAS, sin acentos) -> campo interno.
@@ -81,6 +81,10 @@ _ENCABEZADOS_ALTA = {
     "PANTALLA TACTIL": "pantalla_tactil",
     "TIPO SISTEMA": "tipo_sistema",
     "CARGADOR": "cargador",
+    # Vehículos, embarcaciones y aeronaves. Es el campo detalle con el que
+    # el SIPP arma el centro de costo que genera: «grupo - insumo -
+    # económico» (ver docs/SIPP_Modulo_Activos_Fijos.md, B.3 bis).
+    "NO ECONOMICO": "no_economico",
 }
 # Detección combinada: encabezado -> destino (campo básico O clave del alta).
 _HEADERS = {**_ENCABEZADOS, **_ENCABEZADOS_ALTA}
@@ -171,7 +175,7 @@ PLANTILLA_ENCABEZADOS = [
     "FECHA ADQUISICION", "FECHA GARANTIA", "FECHA ASIGNACION",
     "MARCA", "MODELO", "TIPO EQUIPO", "MEMORIA RAM", "PROCESADOR",
     "SISTEMA OPERATIVO", "PANTALLA TACTIL", "TIPO SISTEMA", "CLIENTE",
-    "CARGADOR", "PLACA",
+    "CARGADOR", "PLACA", "NO ECONOMICO",
 ]
 
 
@@ -536,6 +540,106 @@ def _fmt_valor(clave: str, valor) -> str:
     return str(valor).strip()
 
 
+class _Catalogos:
+    """Traduce los valores del Excel a los de NUESTROS catálogos.
+
+    Las hojas llegan en mayúsculas —así se captura en campo, y así las pegan
+    desde otros sistemas—, mientras que los catálogos guardan su propia
+    capitalización: «Aske», «Equipo informático», «Solo Resguardo». Comparando en
+    crudo, «ASKE» no es ninguna empresa conocida: el desplegable de la ficha se
+    quedaba vacío, el alta no sabía qué empresa poner y el RPA no tenía qué
+    seleccionar en el portal. El usuario veía una columna llena en su Excel y un
+    campo vacío en la herramienta, sin explicación.
+
+    Se traduce AL IMPORTAR y no al pintar la ficha porque lo que se guarda es lo
+    que después consultan la tabla, el alta, la comparación y el RPA: arreglarlo
+    en un solo sitio los deja a todos hablando el idioma del catálogo.
+
+    Lo que no está en ningún catálogo se guarda TAL CUAL: puede ser un valor
+    nuevo que el SIPP sí conoce y esta máquina todavía no ha descargado, y
+    borrarlo o cambiarlo sería peor que dejarlo como lo escribió quien levantó.
+    """
+
+    def __init__(self) -> None:
+        # {clave de catálogo: {valor normalizado: valor del catálogo}}
+        self._indices: dict = {}
+
+    def _traducir(self, clave, opciones_fn, valor: str) -> str:
+        valor = (valor or "").strip()
+        if not valor:
+            return ""
+        indice = self._indices.get(clave)
+        if indice is None:
+            # Los catálogos del SIPP salen de la base: se arman una vez por
+            # importación (una hoja trae cientos de filas de la misma empresa).
+            indice = {}
+            for opcion in opciones_fn():
+                indice.setdefault(_norm(opcion), opcion)
+            self._indices[clave] = indice
+        return indice.get(_norm(valor), valor)
+
+    def empresa(self, nombre: str) -> str:
+        return self._traducir("empresas", lambda: NOMBRES_EMPRESAS, nombre)
+
+    def tipo(self, nombre: str) -> str:
+        return self._traducir("tipos", lambda: list(TIPOS_ACTIVO.values()), nombre)
+
+    def sucursal(self, id_empresa, nombre: str) -> str:
+        if id_empresa is None:
+            return (nombre or "").strip()
+        return self._traducir(("suc", id_empresa),
+                              lambda: db.listar_sucursales_sipp(id_empresa), nombre)
+
+    def departamento(self, id_empresa, nombre: str) -> str:
+        if id_empresa is None:
+            return (nombre or "").strip()
+        return self._traducir(("dep", id_empresa),
+                              lambda: db.listar_departamentos(id_empresa), nombre)
+
+    def alta(self, datos: dict, id_empresa, sucursal: str) -> dict:
+        """Traduce los campos del alta que salen de un catálogo.
+
+        El orden importa en dos pares: la sucursal de COMPRA se busca en el
+        catálogo de la empresa de compra (que puede no ser la del resguardo), y el
+        centro de costo cuelga del grupo, así que primero hay que saber de qué
+        grupo se habla.
+        """
+        datos = dict(datos)
+        if datos.get("id_Situacion"):
+            datos["id_Situacion"] = self._traducir(
+                "situaciones", lambda: list(SITUACIONES.values()),
+                datos["id_Situacion"])
+        if datos.get("id_EmpresaAgregar"):
+            datos["id_EmpresaAgregar"] = self.empresa(datos["id_EmpresaAgregar"])
+        if datos.get("id_SucursalAgregar"):
+            id_compra = ID_POR_EMPRESA.get(datos.get("id_EmpresaAgregar") or "")
+            datos["id_SucursalAgregar"] = self.sucursal(
+                id_compra if id_compra is not None else id_empresa,
+                datos["id_SucursalAgregar"])
+        if datos.get("id_Departamento"):
+            datos["id_Departamento"] = self.departamento(
+                id_empresa, datos["id_Departamento"])
+        if id_empresa is None:
+            return datos
+        grupos = db.listar_grupos_cc(id_empresa, sucursal)
+        if datos.get("id_GrupoCentroCosto"):
+            datos["id_GrupoCentroCosto"] = self._traducir(
+                ("gcc", id_empresa, _norm(sucursal)),
+                lambda: [g["nb_grupo"] for g in grupos],
+                datos["id_GrupoCentroCosto"])
+        if datos.get("id_CentroCosto"):
+            id_grupo = next(
+                (g["id_grupo"] for g in grupos
+                 if _norm(g["nb_grupo"]) == _norm(datos.get("id_GrupoCentroCosto"))),
+                None)
+            if id_grupo is not None:
+                datos["id_CentroCosto"] = self._traducir(
+                    ("cc", id_empresa, id_grupo),
+                    lambda: db.listar_centros_cc(id_empresa, id_grupo),
+                    datos["id_CentroCosto"])
+        return datos
+
+
 def _resolver_insumo(nombre: str, id_empresa, cache: dict) -> "int | None":
     """Clave (id) del insumo en la caché del SIPP; None si no está.
 
@@ -734,6 +838,7 @@ def _registros_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: s
     registros = []
     cache_insumo: dict = {}
     cache_empleado: dict = {}
+    catalogos = _Catalogos()
     for valores in _filas_datos(ws, fila_hdr, columnas):
         res.filas_leidas += 1
         insumo = str(valores.get("insumo") or "").strip()
@@ -742,10 +847,17 @@ def _registros_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: s
         responsable = str(valores.get("responsable") or "").strip()
         # Empresa/sucursal se autollenan por fila desde sus columnas; si la hoja no
         # trae la columna (o la celda está vacía) se usa el valor de la UI.
-        emp_fila = str(valores.get("empresa") or "").strip() or empresa
+        emp_fila = catalogos.empresa(
+            str(valores.get("empresa") or "").strip() or empresa)
+        # El id se resuelve con el nombre YA traducido; es lo que abre los
+        # catálogos del SIPP de esa empresa (sucursal, departamento, centros).
+        id_empresa = ID_POR_EMPRESA.get(emp_fila)
         # DEPARTAMENTO: ahora hay columna dedicada (clave id_Departamento); si no
         # viene, respaldo al del selector de la UI.
-        dep_fila = _fmt_valor("id_Departamento", valores.get("id_Departamento")) or departamento
+        dep_fila = catalogos.departamento(
+            id_empresa,
+            _fmt_valor("id_Departamento", valores.get("id_Departamento"))
+            or departamento)
         origen = str(valores.get("origen") or "").strip()
         ubic = str(valores.get("ubicacion") or "").strip()
         suc_col = str(valores.get("sucursal") or "").strip()
@@ -758,10 +870,11 @@ def _registros_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: s
             # Formato anterior sin columna SUCURSAL: ORIGEN es la sucursal.
             suc_fila = origen or sucursal
             ubic_fila = ubic
+        suc_fila = catalogos.sucursal(id_empresa, suc_fila)
 
         # --- Campos del ALTA (plantilla completa) -> datos_json ---------------
-        id_empresa = ID_POR_EMPRESA.get(emp_fila)
-        tipo_nombre = _fmt_valor("id_TipoActivo", valores.get("id_TipoActivo"))
+        tipo_nombre = catalogos.tipo(
+            _fmt_valor("id_TipoActivo", valores.get("id_TipoActivo")))
         id_tipo = ID_POR_NOMBRE.get(tipo_nombre) if tipo_nombre else None
         datos: dict = {}
         for clave in _ENCABEZADOS_ALTA.values():
@@ -770,6 +883,7 @@ def _registros_hoja(ws, fila_hdr: int, columnas: dict, empresa: str, sucursal: s
             v = _fmt_valor(clave, valores.get(clave))
             if v:
                 datos[clave] = v
+        datos = catalogos.alta(datos, id_empresa, suc_fila)
         # Lo que el formulario también guarda en datos y aquí ya conocemos.
         if insumo:
             datos["nb_NombreInsumo"] = insumo
