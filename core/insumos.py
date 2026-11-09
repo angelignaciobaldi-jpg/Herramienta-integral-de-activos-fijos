@@ -43,6 +43,12 @@ _COLS = {
     "subfamilia": "NB_SUBFAMILIAINSUMO",
     "activo_fijo": "SN_ACTIVOFIJO",
     "seriado": "SN_INSUMOSERIADO",
+    # Naturaleza del insumo: el portal la cruza con el tipo de activo
+    # cuando se le pide generar el centro de costo, y si no concuerdan
+    # aborta el alta con una alerta. Sin tenerlas cacheadas no hay forma
+    # de avisarle al usuario ANTES de abrir el navegador.
+    "utilitario": "SN_UTILITARIO",
+    "transporte": "SN_EQUIPOTRANSPORTE",
 }
 
 

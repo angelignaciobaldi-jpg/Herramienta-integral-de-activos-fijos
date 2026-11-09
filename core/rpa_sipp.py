@@ -326,6 +326,19 @@ _JS_LLENAR_CAMPOS_DETALLE = r"""(args) => {
 # El portal guarda las fotos del activo en `ar_ArchivosFotografias` (scope del
 # controlador ActivosFijosNuevo). Un hueco con nombre/ruta en blanco es una foto
 # BORRADA que conserva su lugar; solo cuentan las que tienen ambos.
+ESTADO_GENERAR_CC_JS = """() => {
+    const el = document.querySelector(
+        "input[ng-model='filtrosAgregar.sn_GenerarCentroCosto']");
+    if (!el) return null;
+    const sc = window.angular ? angular.element(el).scope() : null;
+    const f = sc ? sc.filtrosAgregar : null;
+    return {
+        marcado: !!(f ? f.sn_GenerarCentroCosto : el.checked),
+        deshabilitada: !!el.disabled,
+        grupo: f ? String(f.id_GrupoCentroCostoResguardo || '') : '',
+    };
+}"""
+
 ESTADO_FOTOS_JS = """(sel) => {
     const el = document.querySelector(sel);
     if (!el || !window.angular) return null;
@@ -375,6 +388,13 @@ class SesionSipp:
     SEL_FOTO_EDICION = ("input[ng-change='subirFotografiaEditar(this)']"
                         ":not([disabled])")
 
+    # --- Generación del centro de costo ---
+    # El portal NO pide el nombre: lo arma el servidor como
+    # «grupo - insumo - No. Económico». La casilla llega DESHABILITADA y su
+    # manejador sale antes si no hay Grupo Centro Costo elegido, así que
+    # solo se puede marcar DESPUÉS de fijar el grupo.
+    SEL_GENERAR_CC = "input[ng-model='filtrosAgregar.sn_GenerarCentroCosto']"
+
     # --- Tiempos de espera (ms) ---
     TIMEOUT_NAV = 30_000        # navegación / carga de página
     TIMEOUT_ELEMENTO = 10_000   # aparición de un elemento
@@ -405,6 +425,9 @@ class SesionSipp:
         # Descripción (ver `_detalles_a_descripcion`), para que el reporte lo diga.
         self.ultimos_en_descripcion: list = []
         self.ultimo_aviso_fotos: str = ""
+        # Por qué NO se generó el centro de costo cuando se pidió ("" = se
+        # generó o no se pidió). Lo lee el reporte de la corrida.
+        self.ultimo_aviso_centro_costo: str = ""
 
     # ------------------------------------------------------ ciclo de vida
     async def iniciar(self) -> "SesionSipp":
@@ -1198,12 +1221,50 @@ class SesionSipp:
         partes.extend(avisos)
         return resultado("; ".join(partes), pendientes, hechas)
 
+    async def marcar_generar_centro_costo(self) -> str:
+        """Marca «Generar Centro Costo» en el formulario de alta.
+
+        Devuelve "" si quedó marcada o el MOTIVO por el que no: que no se pueda
+        no es excusa para abortar el alta —el activo se registra igual, solo que
+        sin centro de costo nuevo— pero el usuario tiene que enterarse, porque
+        creyó haberlo pedido.
+
+        Se pulsa el control de verdad en vez de tocar el scope: la casilla lleva
+        `ng-change`, y asignar la variable a mano no dispara el manejador que
+        vacía el Centro Costo elegido. Guardar con los dos puestos es justo lo que
+        el portal no espera.
+        """
+        page = self._exigir_pagina()
+        try:
+            estado = await page.evaluate(ESTADO_GENERAR_CC_JS)
+        except Exception:  # noqa: BLE001 — sin lectura no se arriesga el alta
+            return "no se pudo leer la casilla «Generar Centro Costo»"
+        if estado is None:
+            return "el formulario del portal no tiene la casilla «Generar Centro Costo»"
+        if estado["marcado"]:
+            return ""
+        if estado["deshabilitada"] or not estado["grupo"]:
+            # El manejador del portal (`habilitarComboCentroCostoResguardo`) sale
+            # antes si no hay grupo: sin él, marcarla no haría nada.
+            return ("el SIPP no habilita «Generar Centro Costo» sin un Grupo Centro "
+                    "Costo elegido")
+        try:
+            await self._click_seguro(page.locator(self.SEL_GENERAR_CC).first)
+            await page.wait_for_timeout(400)
+            estado = await page.evaluate(ESTADO_GENERAR_CC_JS)
+        except Exception as exc:  # noqa: BLE001 — se reporta y el alta sigue
+            return f"no se pudo marcar «Generar Centro Costo»: {mensaje_amigable(exc)}"
+        if not (estado and estado["marcado"]):
+            return "la casilla «Generar Centro Costo» no quedó marcada"
+        return ""
+
     async def alta_activo(self, tipo_nombre: str, campos: list,
                           detalles: "dict | None" = None,
                           insumo_id=None, empleado_id=None,
                           serie: str = "", etiqueta_actual: str = "",
                           empresa: str = "", sucursal: str = "",
-                          empleado_nombre: str = "", imagenes: "list | None" = None) -> None:
+                          empleado_nombre: str = "", imagenes: "list | None" = None,
+                          generar_centro_costo: bool = False) -> None:
         """Da de alta un activo en el SIPP.
 
         Args:
@@ -1213,6 +1274,9 @@ class SesionSipp:
             detalles: características del insumo {etiqueta -> valor} (camposDetalle).
             insumo_id: Cve Insumo del SIPP; se selecciona por el modal 'Buscar
                 Insumo' (el nombre del insumo es de solo lectura, se elige así).
+            generar_centro_costo: marca «Generar Centro Costo» para que el SIPP
+                cree uno nuevo («grupo - insumo - No. Económico») en vez de
+                elegir uno existente. Requiere Grupo Centro Costo en `campos`.
             serie/etiqueta_actual: para buscar la factura en la bandeja de compras
                 (solo si la serie es válida: existe y != etiqueta). empresa/sucursal:
                 las del activo, para los datos de compra.
@@ -1304,9 +1368,15 @@ class SesionSipp:
         # (grupo -> centro -> departamento): elegir el empleado o la empresa/sucursal
         # de resguardo puede recargarlos o limpiarlos, así que se fijan AL FINAL, en
         # orden de dependencia, para que persistan al guardar.
+        self.ultimo_aviso_centro_costo = ""
         for clave in ("filtrosAgregar.id_GrupoCentroCostoResguardo",
                       "filtrosAgregar.id_CentroCostoResguardo",
                       "filtrosAgregar.id_DepartamentoResguardo"):
+            # Si el SIPP va a CREAR el centro de costo, no se elige ninguno:
+            # al marcar la casilla el portal vacía ese combo, y volver a
+            # llenarlo deja el formulario pidiendo las dos cosas a la vez.
+            if generar_centro_costo and clave.endswith("id_CentroCostoResguardo"):
+                continue
             valor = next((v for ng, v, _c in campos if ng == clave and v), "")
             if not valor:
                 continue
@@ -1317,6 +1387,12 @@ class SesionSipp:
                     await page.wait_for_timeout(1000)  # deja cargar los centros
             except Exception:  # noqa: BLE001 — no aplica: se omite
                 pass
+
+        # La casilla va DESPUÉS de la cascada: el portal la mantiene
+        # deshabilitada mientras no haya Grupo Centro Costo elegido.
+        if generar_centro_costo:
+            self.ultimo_aviso_centro_costo = (
+                await self.marcar_generar_centro_costo())
 
         # Imágenes/soporte del insumo (Fotografía, máx 3). Best-effort: una foto
         # que no entre no debe costar el alta entera.
