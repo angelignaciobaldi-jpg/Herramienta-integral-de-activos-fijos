@@ -34,3 +34,16 @@ else:  # ejecutándose como script de Python
     BUNDLE = _PROYECTO
     INSTALL = _PROYECTO
     DATOS = _PROYECTO
+
+# Carpeta de datos alterna (ACTIVOS_FIJOS_DATOS): base, preferencias,
+# credenciales y caché aparte, sin tocar las de siempre. Es para probar
+# contra un SIPP que no es el productivo (ver SIPP_BASE_URL en
+# core/rpa_sipp.py): la caché de activos no guarda de qué entorno vino cada
+# fila, así que descargar el catálogo de pruebas sobre la carpeta normal lo
+# mezclaría con el real y la búsqueda del levantamiento dejaría de
+# significar nada. Se lee al importar el módulo, así que tiene que estar
+# puesta antes de arrancar la app.
+_datos_alternos = (os.environ.get("ACTIVOS_FIJOS_DATOS") or "").strip()
+if _datos_alternos:
+    DATOS = os.path.abspath(_datos_alternos)
+    os.makedirs(DATOS, exist_ok=True)

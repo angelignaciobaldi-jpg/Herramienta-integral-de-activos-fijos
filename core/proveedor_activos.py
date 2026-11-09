@@ -97,8 +97,13 @@ class ProveedorSipp(ProveedorActivos):
         idx: dict[str, dict] = {}
         for a in db.listar_activos_sipp(self.id_empresa):
             clave = _norm(a.get("etiqueta"))
-            if clave:
-                idx.setdefault(clave, a)
+            if not clave:
+                continue
+            # Si dos activos comparten etiqueta y uno está dado de baja, se queda
+            # el VIVO: es el único que la herramienta puede modificar después.
+            previo = idx.get(clave)
+            if previo is None or (previo.get("inactivo") and not a.get("inactivo")):
+                idx[clave] = a
         return idx
 
     def coincidencias_parciales(self, identificadores: list[str],
@@ -109,7 +114,10 @@ class ProveedorSipp(ProveedorActivos):
         incluyen parcial=True, etiqueta_sipp y similitud."""
         import difflib
 
-        idx = self._indice_etiquetas()
+        # Los dados de baja no entran en el parecido: esto no identifica, propone,
+        # y proponer un activo que ya no se puede tocar lleva a emparejar mal.
+        idx = {k: a for k, a in self._indice_etiquetas().items()
+               if not a.get("inactivo")}
         claves = list(idx.keys())
         resultado: dict[str, ResultadoBusqueda] = {}
         sm = difflib.SequenceMatcher()
@@ -149,8 +157,12 @@ class ProveedorSipp(ProveedorActivos):
         for a in db.listar_activos_sipp(self.id_empresa):
             for campo in (a.get("etiqueta"), a.get("serie")):
                 clave = _norm(campo)
-                if clave:
-                    idx.setdefault(clave, a)
+                if not clave:
+                    continue
+                previo = idx.get(clave)
+                if previo is None or (previo.get("inactivo")
+                                      and not a.get("inactivo")):
+                    idx[clave] = a
         return idx
 
     def buscar_por_etiqueta(self, etiquetas: list[str]) -> dict[str, ResultadoBusqueda]:

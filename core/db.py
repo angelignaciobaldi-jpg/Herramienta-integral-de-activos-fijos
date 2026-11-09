@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 
 from . import bitacora, rutas
@@ -111,10 +112,22 @@ def clave_levantamiento(nombre_insumo: str, etiqueta: str = "",
     serie = (no_serie or "").strip().upper()
     if serie:
         return "INS:%s|%s" % (insumo, serie)
+    # Sin acentos: estos tres campos salen de catálogos que la herramienta
+    # traduce al importar («CONTABILIDAD» -> el nombre tal cual lo escribe el
+    # SIPP), y ese nombre puede traer acentos. Si la clave distinguiera
+    # «ADMINISTRACION» de «ADMINISTRACIÓN», volver a subir el MISMO archivo daría
+    # la fila por nueva y la duplicaría.
     return "LEV:%s|%s|%s|%s|%d" % (
-        insumo, (responsable or "").strip().upper(),
-        (departamento or "").strip().upper(), (ubicacion or "").strip().upper(),
+        _sin_acentos(insumo), _sin_acentos((responsable or "").strip().upper()),
+        _sin_acentos((departamento or "").strip().upper()),
+        _sin_acentos((ubicacion or "").strip().upper()),
         max(1, ordinal))
+
+
+def _sin_acentos(texto: str) -> str:
+    """Quita las tildes dejando la letra (para comparar, nunca para mostrar)."""
+    return "".join(c for c in unicodedata.normalize("NFD", texto or "")
+                   if unicodedata.category(c) != "Mn")
 
 
 def _migrar_levantamiento_a_clave_unica(con: sqlite3.Connection,
@@ -195,6 +208,41 @@ def _migrar_claves_sin_identificador(con: sqlite3.Connection) -> int:
     return corregidas
 
 
+def _migrar_claves_lev_sin_acentos(con: sqlite3.Connection) -> int:
+    """Rehace las claves «LEV:» que se guardaron con acentos.
+
+    `clave_levantamiento` dejó de distinguirlos (ver ahí el porqué), pero las
+    filas que ya estaban guardadas conservan la clave vieja. Sin rehacerlas,
+    volver a subir el mismo inventario daría por nuevas esas filas y las
+    duplicaría, que es justo lo que la clave única existe para evitar.
+
+    Idempotente: recalcula y solo escribe cuando cambia, así que la segunda vuelta
+    no hace nada. Si la clave nueva ya es de otro registro —dos filas que solo se
+    distinguían por un acento— se deja la fila como está: perder la clave vieja
+    sería peor que conservarla."""
+    filas = con.execute(
+        "SELECT id, clave_unica, nombre_insumo, responsable, departamento, "
+        "ubicacion FROM levantamiento WHERE clave_unica LIKE 'LEV:%'").fetchall()
+    corregidas = 0
+    for f in filas:
+        try:
+            ordinal = int((f["clave_unica"] or "").rsplit("|", 1)[-1])
+        except ValueError:
+            ordinal = 1
+        clave = clave_levantamiento(
+            f["nombre_insumo"] or "", "", "", f["responsable"] or "",
+            f["departamento"] or "", f["ubicacion"] or "", ordinal)
+        if clave == f["clave_unica"]:
+            continue
+        try:
+            con.execute("UPDATE levantamiento SET clave_unica = ? WHERE id = ?",
+                        (clave, f["id"]))
+        except sqlite3.IntegrityError:
+            continue
+        corregidas += 1
+    return corregidas
+
+
 def inicializar() -> None:
     """Crea la tabla de activos si no existe y aplica migraciones incrementales."""
     with _conectar() as con:
@@ -241,6 +289,8 @@ def inicializar() -> None:
                 subfamilia     TEXT,
                 activo_fijo    INTEGER NOT NULL DEFAULT 0,
                 seriado        INTEGER NOT NULL DEFAULT 0,
+                utilitario     INTEGER NOT NULL DEFAULT 0,
+                transporte     INTEGER NOT NULL DEFAULT 0,
                 actualizado_en TEXT,
                 PRIMARY KEY (id_insumo, empresa_id)
             )
@@ -248,6 +298,14 @@ def inicializar() -> None:
         )
         con.execute("CREATE INDEX IF NOT EXISTS ix_insumos_nombre "
                     "ON insumos_sipp (nombre)")
+        # Migración: las dos banderas llegaron después. Quedan en 0 hasta
+        # la siguiente descarga del catálogo, que es lo correcto: 0 es
+        # «no marcado», el caso que la herramienta consulta al usuario.
+        cols_ins = {f["name"] for f in con.execute("PRAGMA table_info(insumos_sipp)")}
+        for col in ("utilitario", "transporte"):
+            if col not in cols_ins:
+                con.execute(f"ALTER TABLE insumos_sipp ADD COLUMN {col} "
+                            f"INTEGER NOT NULL DEFAULT 0")
 
         # HISTORIAL de lo que la herramienta envió al SIPP (altas y
         # modificaciones). Es la única memoria de esas operaciones: los reportes
@@ -349,6 +407,11 @@ def inicializar() -> None:
                 id_tipo        INTEGER,
                 tipo           TEXT,
                 extra          TEXT,
+                -- 1 activo, 0 inactivo (dado de baja en el SIPP), NULL si no se
+                -- sabe: el listado de la API no trae estatus y solo lo llena la
+                -- pasada por el portal. NULL se trata como activo, que es como
+                -- se comportaba la herramienta antes de distinguirlos.
+                activo         INTEGER,
                 actualizado_en TEXT,
                 PRIMARY KEY (id_empresa, etiqueta)
             )
@@ -359,7 +422,7 @@ def inicializar() -> None:
         cols_sipp = {fila["name"] for fila in con.execute("PRAGMA table_info(activos_sipp)")}
         for col, tipo_sql in (("sucursal", "TEXT"), ("departamento", "TEXT"),
                               ("id_tipo", "INTEGER"), ("tipo", "TEXT"),
-                              ("extra", "TEXT")):
+                              ("extra", "TEXT"), ("activo", "INTEGER")):
             if col not in cols_sipp:
                 con.execute(f"ALTER TABLE activos_sipp ADD COLUMN {col} {tipo_sql}")
 
@@ -410,6 +473,7 @@ def inicializar() -> None:
                         f"ALTER TABLE levantamiento ADD COLUMN {col} "
                         f"{tipos_lev.get(col, 'TEXT')}")
         _migrar_claves_sin_identificador(con)
+        _migrar_claves_lev_sin_acentos(con)
         # Índice por estatus: acelera el conteo por pestaña y el filtrado (la tabla
         # puede tener miles de registros y se consulta en cada cambio de pestaña).
         con.execute("CREATE INDEX IF NOT EXISTS ix_lev_estatus "
@@ -778,7 +842,11 @@ def actualizar_datos_levantamiento(id_lev: int, id_tipo_activo: int | None = Non
 # Filtros por columna (estilo Excel). Categóricos = coincidencia EXACTA (para los
 # desplegables de valores distintos); de texto = CONTIENE. Lista blanca: solo estas
 # columnas son filtrables (evita inyección al construir el SQL con el nombre).
-_FILTRO_EXACTO = ("empresa", "sucursal", "departamento")
+# `estatus_registro` va aquí además de en las pestañas: la pestaña solo
+# distingue tres grupos, y la columna ESTATUS de la tabla muestra más cosas
+# (pendiente, posible coincidencia, inactivo). El filtro de la pantalla las
+# cubre todas y se combina con la pestaña.
+_FILTRO_EXACTO = ("empresa", "sucursal", "departamento", "estatus_registro")
 _FILTRO_CONTIENE = ("nombre_insumo", "responsable", "etiqueta", "no_serie",
                     "ubicacion")
 COLUMNAS_FILTRABLES = _FILTRO_EXACTO + _FILTRO_CONTIENE
@@ -937,6 +1005,11 @@ class Insumo:
     subfamilia: str | None
     activo_fijo: int
     seriado: int
+    # Naturaleza del insumo en el SIPP. Decide si el portal acepta
+    # generarle centro de costo al activo (ver docs, B.3 bis): con el
+    # tipo de activo equivocado, el alta se aborta con una alerta.
+    utilitario: int = 0
+    transporte: int = 0
 
 
 def reemplazar_insumos(empresa_id: int, empresa_nombre: str,
@@ -944,18 +1017,20 @@ def reemplazar_insumos(empresa_id: int, empresa_nombre: str,
     """Reemplaza el catálogo de insumos cacheado de una empresa por `registros`.
 
     Cada dict: id_insumo, nombre, unidad, familia, subfamilia, activo_fijo,
-    seriado. Se hace en una transacción (borrar + insertar en lote). Devuelve
-    cuántos se guardaron."""
+    seriado, utilitario, transporte. Se hace en una transacción (borrar +
+    insertar en lote). Devuelve cuántos se guardaron."""
     with _conectar() as con:
         con.execute("DELETE FROM insumos_sipp WHERE empresa_id = ?", (empresa_id,))
         con.executemany(
             """INSERT OR REPLACE INTO insumos_sipp
                (id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia,
-                subfamilia, activo_fijo, seriado, actualizado_en)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                subfamilia, activo_fijo, seriado, utilitario, transporte,
+                actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(r["id_insumo"], empresa_id, empresa_nombre, r["nombre"], r.get("unidad"),
               r.get("familia"), r.get("subfamilia"), 1 if r.get("activo_fijo") else 0,
-              1 if r.get("seriado") else 0, actualizado_en) for r in registros])
+              1 if r.get("seriado") else 0, 1 if r.get("utilitario") else 0,
+              1 if r.get("transporte") else 0, actualizado_en) for r in registros])
     return len(registros)
 
 
@@ -981,7 +1056,8 @@ def buscar_insumos(texto: str = "", empresa_id: int | None = None,
     with _conectar() as con:
         filas = con.execute(
             f"SELECT id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia, "
-            f"subfamilia, activo_fijo, seriado FROM insumos_sipp{where} "
+            f"subfamilia, activo_fijo, seriado, utilitario, transporte "
+            f"FROM insumos_sipp{where} "
             f"GROUP BY id_insumo ORDER BY nombre LIMIT ?", [*params, limite]).fetchall()
     return [Insumo(**dict(f)) for f in filas]
 
@@ -993,7 +1069,8 @@ def obtener_insumo(id_insumo: int) -> "Insumo | None":
     with _conectar() as con:
         fila = con.execute(
             "SELECT id_insumo, empresa_id, empresa_nombre, nombre, unidad, familia, "
-            "subfamilia, activo_fijo, seriado FROM insumos_sipp "
+            "subfamilia, activo_fijo, seriado, utilitario, transporte "
+            "FROM insumos_sipp "
             "WHERE id_insumo = ? LIMIT 1", (id_insumo,)).fetchone()
     return Insumo(**dict(fila)) if fila else None
 
@@ -1385,8 +1462,9 @@ def fusionar_activos_sipp(id_empresa: int, empresa_nombre: str,
         con.executemany(
             """INSERT INTO activos_sipp
                (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
-                empleado, sucursal, departamento, id_tipo, tipo, extra, actualizado_en)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                empleado, sucursal, departamento, id_tipo, tipo, extra, activo,
+                actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id_empresa, etiqueta) DO UPDATE SET
                  empresa_nombre = COALESCE(NULLIF(excluded.empresa_nombre,''),
                                            empresa_nombre),
@@ -1399,13 +1477,16 @@ def fusionar_activos_sipp(id_empresa: int, empresa_nombre: str,
                  id_tipo      = COALESCE(excluded.id_tipo, id_tipo),
                  tipo         = COALESCE(NULLIF(excluded.tipo,''), tipo),
                  extra        = COALESCE(NULLIF(excluded.extra,''), extra),
+                 -- El estatus solo lo trae el portal: un refresco por API (que
+                 -- manda NULL) NO debe borrar lo que ya se sabía.
+                 activo       = COALESCE(excluded.activo, activo),
                  actualizado_en = excluded.actualizado_en""",
             [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
               r.get("serie"), r.get("ubicacion"), r.get("empleado"),
               r.get("sucursal"), r.get("departamento"),
               r.get("id_tipo"), r.get("tipo"),
               json.dumps(r.get("extra"), ensure_ascii=False) if r.get("extra") else None,
-              actualizado_en)
+              _bandera(r.get("activo")), actualizado_en)
              for r in filas])
         eliminados = 0
         if eliminar_ausentes and etiquetas:
@@ -1418,25 +1499,57 @@ def fusionar_activos_sipp(id_empresa: int, empresa_nombre: str,
     return {"guardados": len(filas), "nuevos": nuevos, "eliminados": eliminados}
 
 
+def _bandera(valor) -> "int | None":
+    """Normaliza el estatus del portal (True/'True'/1/'1') a 1/0, o None.
+
+    Llega de dos sitios con formatos distintos —el proxy del portal devuelve el
+    booleano como texto— y la diferencia importa: 'False' es verdadero en Python,
+    así que guardarlo tal cual marcaría como ACTIVO justo a los dados de baja."""
+    if valor is None or valor == "":
+        return None
+    if isinstance(valor, str):
+        return 1 if valor.strip().lower() in ("1", "true", "si", "sí") else 0
+    return 1 if valor else 0
+
+
+def _preferir_activos(registros: list[dict]) -> list[dict]:
+    """Deja una sola fila por etiqueta, y si se repite gana la ACTIVA.
+
+    La caché tiene clave (empresa, etiqueta), así que de dos activos del portal
+    que comparten número de inventario solo cabe uno. Cuando uno está dado de
+    baja, el que importa es el vivo: es el que la herramienta puede modificar.
+    Sin esto quedaba el último que llegara, que podía ser el inactivo."""
+    por_etiqueta: dict[str, dict] = {}
+    for r in registros:
+        etq = (r.get("etiqueta") or "").strip().upper()
+        previo = por_etiqueta.get(etq)
+        if previo is None or (_bandera(previo.get("activo")) == 0
+                              and _bandera(r.get("activo")) == 1):
+            por_etiqueta[etq] = r
+    return list(por_etiqueta.values())
+
+
 def reemplazar_activos_sipp(id_empresa: int, empresa_nombre: str,
                             registros: list[dict], actualizado_en: str) -> int:
     """Reemplaza los activos cacheados de una empresa. Cada dict: etiqueta
-    (obligatorio), insumo, serie, ubicacion, empleado. Devuelve cuántos se
+    (obligatorio), insumo, serie, ubicacion, empleado, activo. Devuelve cuántos se
     guardaron (con etiqueta no vacía)."""
-    filas = [r for r in registros if (r.get("etiqueta") or "").strip()]
+    filas = _preferir_activos(
+        [r for r in registros if (r.get("etiqueta") or "").strip()])
     with _conectar() as con:
         con.execute("DELETE FROM activos_sipp WHERE id_empresa = ?", (id_empresa,))
         con.executemany(
             """INSERT OR REPLACE INTO activos_sipp
                (id_empresa, empresa_nombre, etiqueta, insumo, serie, ubicacion,
-                empleado, sucursal, departamento, id_tipo, tipo, extra, actualizado_en)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                empleado, sucursal, departamento, id_tipo, tipo, extra, activo,
+                actualizado_en)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(id_empresa, empresa_nombre, r["etiqueta"].strip(), r.get("insumo"),
               r.get("serie"), r.get("ubicacion"), r.get("empleado"),
               r.get("sucursal"), r.get("departamento"),
               r.get("id_tipo"), r.get("tipo"),
               json.dumps(r.get("extra"), ensure_ascii=False) if r.get("extra") else None,
-              actualizado_en)
+              _bandera(r.get("activo")), actualizado_en)
              for r in filas])
     return len(filas)
 
@@ -1479,6 +1592,48 @@ def fijar_costos_activos_sipp(id_empresa: int, costos: dict) -> int:
                 "UPDATE activos_sipp SET extra = ? WHERE id_empresa = ? "
                 "AND etiqueta = ?", cambios)
     return len(cambios)
+
+
+def guardar_estatus_sipp(id_empresa: int, estatus: dict) -> int:
+    """Guarda qué activos de la empresa están ACTIVOS en el SIPP y cuáles no.
+
+    `estatus` es {etiqueta -> bool}. Viene del listado del portal, que es el
+    único que lo dice (el de la API no trae el campo), y se escribe en la caché y
+    en la foto (`datos_sipp`) de los registros del levantamiento, igual que los
+    detalles: la comparación y el listado leen de ahí.
+
+    Importa porque un activo dado de baja no se puede modificar en el portal: la
+    herramienta lo daba por bueno, lo mandaba al RPA y el cambio se perdía en
+    silencio.
+    """
+    if not estatus:
+        return 0
+    limpio = {(e or "").strip(): _bandera(v) for e, v in estatus.items()
+              if (e or "").strip()}
+    with _conectar() as con:
+        con.executemany(
+            "UPDATE activos_sipp SET activo = ? WHERE id_empresa = ? AND etiqueta = ?",
+            [(v, id_empresa, e) for e, v in limpio.items()])
+        regs = con.execute(
+            "SELECT id, etiqueta, datos_sipp FROM levantamiento "
+            "WHERE IFNULL(etiqueta,'') <> '' AND datos_sipp IS NOT NULL").fetchall()
+        tocados = []
+        for r in regs:
+            bandera = limpio.get((r["etiqueta"] or "").strip())
+            if bandera is None:
+                continue
+            try:
+                foto = json.loads(r["datos_sipp"]) if r["datos_sipp"] else {}
+            except (ValueError, TypeError):
+                foto = {}
+            if not isinstance(foto, dict):
+                foto = {}
+            foto["inactivo"] = bandera == 0
+            tocados.append((json.dumps(foto, ensure_ascii=False), r["id"]))
+        if tocados:
+            con.executemany(
+                "UPDATE levantamiento SET datos_sipp = ? WHERE id = ?", tocados)
+    return len(limpio)
 
 
 def guardar_detalles_sipp(id_empresa: int, detalles: dict) -> int:
@@ -1555,7 +1710,7 @@ def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[di
     with _conectar() as con:
         filas = con.execute(
             "SELECT empresa_nombre, etiqueta, insumo, serie, ubicacion, empleado, "
-            "sucursal, departamento, id_tipo, tipo, extra FROM activos_sipp "
+            "sucursal, departamento, id_tipo, tipo, extra, activo FROM activos_sipp "
             f"WHERE {' AND '.join(cond)} ORDER BY etiqueta", params).fetchall()
     activos = []
     for f in filas:
@@ -1563,7 +1718,8 @@ def listar_activos_sipp(id_empresa: int, sucursal: str | None = None) -> list[di
                 "insumo": f["insumo"], "serie": f["serie"],
                 "ubicacion": f["ubicacion"], "empleado": f["empleado"],
                 "sucursal": f["sucursal"], "departamento": f["departamento"],
-                "id_tipo": f["id_tipo"], "tipo": f["tipo"]}
+                "id_tipo": f["id_tipo"], "tipo": f["tipo"],
+                "inactivo": f["activo"] == 0}
         if f["extra"]:
             try:
                 extra = json.loads(f["extra"])
@@ -1653,7 +1809,8 @@ def _activos_sipp_por(campo: str, valores: list[str]) -> dict[str, list[dict]]:
             marcadores = ", ".join(["?"] * len(tanda))
             filas = con.execute(
                 f"SELECT id_empresa, empresa_nombre, etiqueta, insumo, serie, "
-                f"ubicacion, empleado, sucursal, departamento, id_tipo, tipo, extra "
+                f"ubicacion, empleado, sucursal, departamento, id_tipo, tipo, "
+                f"extra, activo "
                 f"FROM activos_sipp WHERE UPPER(TRIM(IFNULL({campo},''))) "
                 f"IN ({marcadores}) ORDER BY empresa_nombre", tanda).fetchall()
             for f in filas:
@@ -1662,7 +1819,7 @@ def _activos_sipp_por(campo: str, valores: list[str]) -> dict[str, list[dict]]:
                         "serie": f["serie"], "ubicacion": f["ubicacion"],
                         "empleado": f["empleado"], "sucursal": f["sucursal"],
                         "departamento": f["departamento"], "id_tipo": f["id_tipo"],
-                        "tipo": f["tipo"]}
+                        "tipo": f["tipo"], "inactivo": f["activo"] == 0}
                 if f["extra"]:
                     try:
                         extra = json.loads(f["extra"])
@@ -1680,11 +1837,15 @@ def series_sipp() -> list[tuple[str, int, str]]:
 
     Ligero a propósito: son ~65 mil activos y quien la usa solo necesita indexar
     las series para comparar; los datos completos se piden después, y solo de los
-    pocos que coincidan."""
+    pocos que coincidan.
+
+    Excluye los INACTIVOS: esta lista alimenta el parecido de series, que no
+    identifica, propone. Proponerle al usuario un activo dado de baja solo abre
+    la puerta a emparejar el levantamiento con algo que ya no se puede tocar."""
     with _conectar() as con:
         return [(f["serie"], f["id_empresa"], f["etiqueta"]) for f in con.execute(
             "SELECT serie, id_empresa, etiqueta FROM activos_sipp "
-            "WHERE IFNULL(serie,'') <> ''")]
+            "WHERE IFNULL(serie,'') <> '' AND IFNULL(activo, 1) <> 0")]
 
 
 def resguardos_sipp() -> list[tuple[str, str, int, str]]:
@@ -1692,12 +1853,13 @@ def resguardos_sipp() -> list[tuple[str, str, int, str]]:
 
     Es el índice para reconocer un activo del levantamiento que llega SIN etiqueta
     y SIN serie: lo único que queda para reconocerlo es de quién es y qué es.
-    Ligero como `series_sipp`: los datos completos se piden después."""
+    Ligero como `series_sipp`: los datos completos se piden después. Y como él,
+    deja fuera los INACTIVOS: es un índice de sugerencias, no de identidad."""
     with _conectar() as con:
         return [(f["empleado"], f["insumo"], f["id_empresa"], f["etiqueta"])
                 for f in con.execute(
                     "SELECT empleado, insumo, id_empresa, etiqueta FROM activos_sipp "
-                    "WHERE IFNULL(empleado,'') <> ''")]
+                    "WHERE IFNULL(empleado,'') <> '' AND IFNULL(activo, 1) <> 0")]
 
 
 def etiquetas_en_uso_levantamiento() -> set:

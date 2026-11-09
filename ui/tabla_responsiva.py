@@ -70,7 +70,11 @@ class ColumnaTabla:
     (p. ej. el check 'seleccionar todas') en vez de la etiqueta de texto.
     `ancho_min_px`: piso opcional en píxeles (para que no se encoja de más).
     `padding_der`: respiro a la derecha del contenido. Para columnas alineadas a
-    `DER`, cuyo texto acaba justo en el filo de la tabla y se lee apretado."""
+    `DER`, cuyo texto acaba justo en el filo de la tabla y se lee apretado.
+    `seleccionable`: deja marcar el texto de la celda con el ratón para copiarlo
+    (Ctrl+C). No se pone en todas: el texto seleccionable se queda con el
+    arrastre, y donde se arrastra para desplazar la tabla eso estorba más de lo
+    que ayuda. Se activa solo donde el dato se copia a mano."""
 
     etiqueta: str
     pct: float
@@ -78,6 +82,7 @@ class ColumnaTabla:
     encabezado_control: Optional[ft.Control] = None
     ancho_min_px: int = 0
     padding_der: int = 0
+    seleccionable: bool = False
 
 
 @dataclass
@@ -256,6 +261,7 @@ class TablaResponsiva:
         return ft.Border(bottom=ft.BorderSide(1, color))
 
     def _mk_celda(self, contenido, ancho: int, alineacion=CENTRO,
+                  seleccionable: bool = False,
                   bold: bool = False, siempre_tooltip: bool = False):
         """Devuelve (container, texto|None). Si `contenido` es un Control, se coloca
         tal cual (texto=None); si es texto, se recorta con '…' y lleva tooltip solo si
@@ -277,7 +283,7 @@ class TablaResponsiva:
         t = ft.Text(texto, size=12, text_align=align_txt, width=ancho,
                     weight=ft.FontWeight.BOLD if bold else None,
                     max_lines=1, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS,
-                    tooltip=tip)
+                    selectable=seleccionable, tooltip=tip)
         # El Text ya lleva ancho, alineación horizontal y tooltip; el centrado
         # vertical lo da la fila. Envolverlo en un Container solo añadiría un
         # control por celda de texto: ~100 más en una página de 25 filas, que
@@ -316,6 +322,7 @@ class TablaResponsiva:
             contenido = fila.celdas[i] if i < len(fila.celdas) else ""
             cont, t = self._mk_celda(contenido, self._ancho_celda(i),
                                      c.alineacion,
+                                     seleccionable=c.seleccionable,
                                      siempre_tooltip=self.tooltips)
             celdas.append(cont)
             refs.append((cont, t))

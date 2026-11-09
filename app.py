@@ -710,6 +710,15 @@ def _ruta_icono() -> str:
 
 async def main(page: ft.Page) -> None:
     page.title = TITULO_APP
+    # El entorno del portal, en el TÍTULO de la ventana cuando NO es el
+    # productivo. Confundirlos significa dar de alta activos reales creyendo
+    # que se está probando, y las etiquetas que consume el alta son
+    # consecutivos que no se recuperan. Se lee la variable de entorno y no
+    # `core.rpa_sipp.SesionSipp.BASE_URL` para no romper los imports perezosos
+    # del shell (ver CLAUDE.md).
+    entorno_sipp = (os.environ.get("SIPP_BASE_URL") or "").strip().rstrip("/")
+    if entorno_sipp and entorno_sipp != "https://sipp.petroil.com.mx":
+        page.title += "  ·  SIPP " + entorno_sipp.split("//")[-1]
     page.locale_configuration = ft.LocaleConfiguration(
         supported_locales=[ft.Locale("es", "MX"), ft.Locale("es", "ES"),
                            ft.Locale("en", "US")],

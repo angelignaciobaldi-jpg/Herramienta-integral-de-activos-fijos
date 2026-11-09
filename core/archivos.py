@@ -125,6 +125,12 @@ def parsear_nombre(nombre_archivo: str) -> DatosImagen:
     if corte <= 0:                      # sin separador (o al inicio): no hay sufijo
         return DatosImagen(insumo=base, base=base)
     izquierda, derecha = base[:corte].strip(), base[corte + 1:].strip()
+    # Los separadores SOBRANTES se van con el sufijo. En campo se nombra
+    # «TELEVISION - 50G2106MNH00293.jpg», con espacios a los dos lados del
+    # guion: el corte cae en el último espacio y el guion se quedaba pegado al
+    # insumo («TELEVISION -»), que así no casa con ningún insumo del catálogo
+    # del SIPP ni con el nombre del registro.
+    izquierda = izquierda.rstrip("".join(_SEPARADORES)).strip()
     if not izquierda:
         return DatosImagen(insumo=base, base=base)
     if not derecha.isdigit():
@@ -483,7 +489,21 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
     if not os.path.exists(ruta_zip):
         raise ErrorArchivo(f"No se encontró el archivo: {ruta_zip}")
     nombre = subcarpeta or os.path.splitext(os.path.basename(ruta_zip))[0]
-    destino = os.path.join(carpeta_extraccion(), _sanear(nombre))
+    # Las imágenes se miran ANTES de decidir el nombre de la carpeta: el
+    # presupuesto de 260 caracteres se reparte, y entre la carpeta y el
+    # nombre de la foto gana la foto, que es la que lleva el insumo y la
+    # etiqueta. La carpeta solo tiene que ser estable y no chocar.
+    try:
+        with zipfile.ZipFile(ruta_zip) as z:
+            nombres = [_sanear(os.path.basename(_nombre_seguro(i)))
+                       for i in z.infolist() if not i.is_dir()
+                       and es_imagen(os.path.basename(_nombre_seguro(i)))]
+    except zipfile.BadZipFile as exc:
+        raise ErrorArchivo(
+            "El archivo no es un ZIP válido o está dañado.") from exc
+    raiz = carpeta_extraccion()
+    holgura = _MAX_RUTA - len(raiz) - 2 - max([len(n) for n in nombres] or [0])
+    destino = os.path.join(raiz, _nombre_de_carpeta(nombre, holgura))
     # Extracción LIMPIA: si ya se extrajo antes este mismo ZIP, se vacía primero.
     # Si no, los archivos existentes forzarían nombres " (2)", " (3)"… y como el
     # nombre del archivo lleva la serie, cada re-subida generaría registros
@@ -492,8 +512,8 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
     # por clave (insumo+serie) funciona. Las rutas ya registradas siguen válidas
     # (se recrean con el mismo nombre).
     if os.path.isdir(destino):
-        shutil.rmtree(destino, ignore_errors=True)
-    os.makedirs(destino, exist_ok=True)
+        shutil.rmtree(_ruta_io(destino), ignore_errors=True)
+    os.makedirs(_ruta_io(destino), exist_ok=True)
 
     extraidas = 0
     carpetas: dict = {}
@@ -514,8 +534,11 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
                 # última subcarpeta se guarda aparte, en memoria.
                 partes = [x for x in interno.replace("\\", "/").split("/")
                           if x not in ("", ".", "..")]
-                final = _ruta_libre(destino, _sanear(base))
-                with z.open(info) as origen, open(final, "wb") as salida:
+                final = _ruta_libre(
+                    destino, _nombre_que_quepa(destino, _sanear(base)))
+                # Se ESCRIBE por la ruta extendida y se GUARDA la normal: la
+                # ruta corta es la que después abre el visor de la herramienta.
+                with z.open(info) as origen, open(_ruta_io(final), "wb") as salida:
                     shutil.copyfileobj(origen, salida)
                 if len(partes) > 1:
                     carpetas[final] = partes[-2]
@@ -524,6 +547,16 @@ def extraer_zip(ruta_zip: str, subcarpeta: str | None = None) -> tuple[str, int]
         raise ErrorArchivo(
             "El archivo no es un ZIP válido o está dañado.") from exc
     except OSError as exc:
+        # Windows contesta «no existe el archivo» cuando la ruta se pasa de
+        # 260 caracteres, y eso manda a buscar un archivo que sí está. Si
+        # pasa aun con los recortes, al menos se dice la causa real.
+        largo = len(str(getattr(exc, "filename", "") or ""))
+        if largo >= _MAX_RUTA:
+            raise ErrorArchivo(
+                f"No se pudo extraer el ZIP: la ruta de destino mide {largo} "
+                f"caracteres y Windows no admite más de 260. Mueve la "
+                f"herramienta a una carpeta más corta o acorta el nombre del "
+                f"ZIP.") from exc
         raise ErrorArchivo(f"No se pudo extraer el ZIP: {exc}") from exc
     return destino, extraidas, carpetas
 
@@ -540,6 +573,80 @@ def listar_imagenes(carpeta: str) -> list[tuple[str, str]]:
             if es_imagen(nombre) and not nombre.startswith("."):
                 encontradas.append((nombre, os.path.join(raiz, nombre)))
     return sorted(encontradas, key=lambda p: p[0].lower())
+
+
+# --- El límite de 260 caracteres de Windows ----------------------------------
+# Una ruta más larga que esto no se puede crear NI leer con las APIs normales, y
+# el error que da es `[Errno 2] No such file or directory`, que manda a buscar un
+# archivo que sí existe. Aquí se ataca por los dos lados: se recorta lo que la
+# herramienta controla (carpeta y nombre) para que la ruta GUARDADA quepa —las
+# fotos se vuelven a abrir después, y ahí ya nadie puede arreglarlo— y se escribe
+# con el prefijo extendido, que ignora el límite, por si aun así se pasa.
+_MAX_RUTA = 259          # 260 contando el terminador de la cadena
+_MAX_CARPETA_ZIP = 28    # tope para el nombre de la carpeta del ZIP
+_MIN_CARPETA_ZIP = 8     # piso: con menos, dos ZIP distintos chocarían
+
+
+# Prefijo de «ruta extendida» de Windows (dos barras, ?, barra). Se arma con
+# chr(92) y no como literal para que ningún escape intermedio lo deforme.
+_PREFIJO_LARGO = chr(92) * 2 + "?" + chr(92)
+
+
+def _ruta_io(ruta: str) -> str:
+    """La misma ruta, lista para abrir aunque pase de 260 caracteres.
+
+    El prefijo extendido de Windows desactiva el límite, pero exige ruta
+    ABSOLUTA y sin barras normales ni «..», así que se normaliza antes. Solo se
+    usa para leer y escribir: la que se GUARDA es la normal, que es la que
+    entienden el visor de imágenes y el explorador de Windows.
+    """
+    if os.name != "nt":
+        return ruta
+    completa = os.path.abspath(ruta)
+    if completa.startswith(chr(92) * 2):     # ya es extendida, o es de red
+        return completa
+    return _PREFIJO_LARGO + completa
+
+
+def _nombre_de_carpeta(nombre: str, limite: int = _MAX_CARPETA_ZIP) -> str:
+    """Nombre CORTO y estable para la carpeta donde se extrae un ZIP.
+
+    Los ZIP de campo llegan con nombres larguísimos —Drive exporta
+    «MARINA SANCHEZ ZATARAIN-20261109T223502Z-1-001»—, y cada carácter ahí es uno
+    que le falta al nombre de la foto, que sí es dato. Se recorta y se le pega un
+    hash del nombre completo: sigue siendo el MISMO para el mismo ZIP (la
+    extracción limpia depende de eso) y no choca con otro que empiece igual.
+    """
+    import hashlib
+
+    limpio = _sanear(nombre)
+    limite = max(_MIN_CARPETA_ZIP, min(limite, _MAX_CARPETA_ZIP))
+    if len(limpio) <= limite:
+        return limpio
+    firma = hashlib.sha1(limpio.encode("utf-8")).hexdigest()[:6]
+    if limite <= _MIN_CARPETA_ZIP:
+        return hashlib.sha1(limpio.encode("utf-8")).hexdigest()[:limite]
+    return limpio[:limite - 7].rstrip() + "-" + firma
+
+
+def _nombre_que_quepa(carpeta: str, nombre: str) -> str:
+    """Recorta el nombre de la foto, por en medio, si la ruta no cabe.
+
+    Por en medio y no por el final porque el nombre ES el dato: al principio va el
+    insumo y al final la etiqueta o la serie («TELEVISION - 50G2106MNH00293.jpg»),
+    y de ahí sale el emparejado con el activo. Cortando la cola se perdería
+    justo el identificador. Es el último recurso: antes se recorta la carpeta.
+    """
+    sobra = len(os.path.join(carpeta, nombre)) - _MAX_RUTA
+    if sobra <= 0:
+        return nombre
+    base, ext = os.path.splitext(nombre)
+    # 8 de cada lado es lo mínimo con lo que el nombre todavía dice algo.
+    cabe = max(16, len(base) - sobra - 1)
+    if cabe >= len(base):
+        return nombre
+    mitad = cabe // 2
+    return base[:mitad] + "~" + base[-(cabe - mitad):] + ext
 
 
 def _sanear(nombre: str) -> str:
