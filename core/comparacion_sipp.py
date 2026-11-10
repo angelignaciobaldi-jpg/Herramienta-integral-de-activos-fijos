@@ -63,6 +63,11 @@ class CampoComparable:
     detalle: bool = False   # característica del insumo (camposDetalle), no un
                             # campo fijo del formulario: se empuja por rótulo
     nota: str = ""          # aclaración para la UI (se muestra junto al rótulo)
+    # El portal no lo cambia desde la EDICIÓN, pero sí desde su flujo de
+    # REASIGNACIÓN, que la herramienta ya automatiza. No es lo mismo que
+    # `empujable=False` a secas: eso manda al usuario al portal, y esto lo
+    # manda al botón «Reasignar en SIPP».
+    por_reasignacion: bool = False
 
 
 # Orden = orden en que se muestran. Mantiene paridad con core/tipos_activo.
@@ -131,7 +136,8 @@ CAMPOS: list[CampoComparable] = [
     # opera ese buscador— pero es otro flujo, con sus propias consecuencias en el
     # portal (de ahí salen las cartas responsivas). Ver docs/SIPP_Modulo_Activos_Fijos.md, B.5.
     CampoComparable("nb_Empleado", "Empleado resguardo", "empleado",
-                    clave_datos="nb_Empleado", empujable=False),
+                    clave_datos="nb_Empleado", empujable=False,
+                    por_reasignacion=True),
     CampoComparable("FH_ADQUISICION", "Fecha de adquisición", "fecha_adquisicion",
                     clave_datos="FH_ADQUISICION", control="date",
                     ng_model="dt_FH_ADQUISICION"),
@@ -295,18 +301,33 @@ def campos_distintos(registro) -> list[Diferencia]:
 def campos_manuales(registro) -> list[Diferencia]:
     """Diferencias que la herramienta NO puede llevar al SIPP por su cuenta.
 
-    Hoy es el EMPLEADO de resguardo: la edición del activo no lo deja cambiar, el
-    portal lo manda a su flujo de «Reasignación». Que aparezca aquí significa que
-    el dato del levantamiento sigue sin coincidir con el del SIPP, así que alguien
-    tiene que entrar al portal a hacerlo: el listado lo marca para que no se
-    descubra activo por activo.
+    Que aparezca algo aquí significa que alguien tiene que entrar al portal: el
+    listado lo marca para que no se descubra activo por activo. El caso típico es
+    un insumo que no está en el catálogo del SIPP con ese nombre exacto.
 
-    Deja de aparecer solo cuando los dos lados coinciden: al reasignar en el
-    portal y volver a «Buscar en SIPP», o al conservar el valor del SIPP en la
-    comparación."""
+    El EMPLEADO de resguardo ya NO entra aquí: la edición del portal no lo deja
+    cambiar, pero su flujo de «Reasignación» sí, y la herramienta lo automatiza
+    (ver `campos_por_reasignacion`). Seguir llamándolo «a mano» mandaba al usuario
+    al portal a hacer algo que el botón «Reasignar en SIPP» ya hace."""
     return [d for d in campos_distintos(registro)
-            if not (d.campo.empujable
-                    and (d.campo.ng_model or d.campo.modal or d.campo.detalle))]
+            if not d.campo.por_reasignacion
+            and not (d.campo.empujable
+                     and (d.campo.ng_model or d.campo.modal or d.campo.detalle))]
+
+
+def campos_por_reasignacion(registro) -> list[Diferencia]:
+    """Diferencias que se resuelven con el flujo de REASIGNACIÓN del portal.
+
+    Hoy es el empleado de resguardo. Se separan de `campos_manuales` porque la
+    acción que piden es distinta: no «entra al portal», sino «pulsa Reasignar en
+    SIPP». Dejan de aparecer cuando los dos lados coinciden, que es lo que ocurre
+    al reasignar (la herramienta actualiza su copia del SIPP al terminar)."""
+    return [d for d in campos_distintos(registro) if d.campo.por_reasignacion]
+
+
+def hay_reasignacion_pendiente(registro) -> bool:
+    """¿A este activo le falta una reasignación para cuadrar con el Excel?"""
+    return bool(campos_por_reasignacion(registro))
 
 
 def hay_diferencias(registro) -> bool:
