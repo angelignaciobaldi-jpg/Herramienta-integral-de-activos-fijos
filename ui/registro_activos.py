@@ -64,6 +64,12 @@ _MARCA_PARCIAL = "Posible coincidencia"
 _MARCA_MANUAL = "Cambios a mano en SIPP"
 _MARCA_INACTIVO = "Inactivo en SIPP"
 _MARCA_REPETIDO = "Repetido en SIPP"
+_MARCA_REASIGNAR = "Por reasignar"
+# Reasignaciones seguidas que el PORTAL rechaza con un error suyo antes de
+# parar la corrida. Un dato malo falla en un activo; su backend caído falla
+# en todos, y seguir intentando solo gasta el tiempo del usuario y llena el
+# reporte con el mismo mensaje repetido.
+_MAX_FALLOS_PORTAL = 3
 # Opciones del filtro «Estatus»: EXACTAMENTE lo que la columna ESTATUS de la
 # tabla puede mostrar, incluidos los dos que no son un estatus guardado sino
 # una lectura de la foto del SIPP (posible coincidencia e inactivo). Filtrar
@@ -554,7 +560,7 @@ class SeccionRegistroActivos:
         _, self._dd_marca = campo_opciones(
             "Por revisar",
             [_MARCA_TODAS, _MARCA_PARCIAL, _MARCA_MANUAL, _MARCA_INACTIVO,
-             _MARCA_REPETIDO],
+             _MARCA_REPETIDO, _MARCA_REASIGNAR],
             valor=_MARCA_TODAS, width=_WF, flotante=True,
             on_change=self._cambiar_marca)
         self._campos_filtro.append(self._dd_marca)
@@ -729,10 +735,24 @@ class SeccionRegistroActivos:
                 self._iniciar_registro_sipp,
                 tooltip="Da de alta en el SIPP los activos que ya tienen datos capturados")
         elif self._tab == db.EST_DADO_ALTA:
-            self._barra_rpa.content = boton_primario(
-                "Realizar modificación en SIPP", ft.Icons.EDIT_NOTE,
-                self._modificar_en_sipp,
-                tooltip="Reenvía al SIPP los activos que editaste después de darlos de alta")
+            # Dos acciones distintas sobre los mismos activos: la modificación
+            # reenvía los campos editados, y la reasignación cambia el empleado de
+            # resguardo, que el portal NO deja tocar en la edición. Van juntas y
+            # con `wrap` porque a 960px no siempre caben en un renglón.
+            self._barra_rpa.content = ft.Row(
+                [boton_secundario(
+                    "Reasignar en SIPP", ft.Icons.SWAP_HORIZ,
+                    self._reasignar_en_sipp,
+                    tooltip="Cambia en el SIPP el empleado de resguardo de los "
+                            "activos cuyo responsable ya no coincide"),
+                 boton_primario(
+                    "Realizar modificación en SIPP", ft.Icons.EDIT_NOTE,
+                    self._modificar_en_sipp,
+                    tooltip="Reenvía al SIPP los activos que editaste después de "
+                            "darlos de alta")],
+                spacing=8, wrap=True, run_spacing=8, tight=True,
+                alignment=ft.MainAxisAlignment.END,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER)
         else:
             self._barra_rpa.content = None
 
@@ -885,6 +905,11 @@ class SeccionRegistroActivos:
             # única acción posible es revisarlos en el portal.
             return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
                     if (r.info_sipp() or {}).get("inactivo")]
+        if marca == _MARCA_REASIGNAR:
+            # Les falta el cambio de resguardante, que va por «Reasignar en SIPP».
+            return [r.id for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
+                    if not (r.info_sipp() or {}).get("inactivo")
+                    and comparacion_sipp.campos_por_reasignacion(r)]
         if marca == _MARCA_REPETIDO:
             # El SIPP tiene más de un activo que responde a su etiqueta o
             # a su serie: el que se ve es uno de varios, y es el que el
@@ -1078,6 +1103,21 @@ class SeccionRegistroActivos:
         # confirmado, y comparar contra un candidato sin confirmar sería ruido.
         manuales = (comparacion_sipp.campos_manuales(r)
                     if info and not es_parcial and not inactivo else [])
+        # El cambio de resguardante va aparte: NO es trabajo manual, es otro botón
+        # («Reasignar en SIPP»). Mezclarlo con lo manual mandaba al usuario al
+        # portal a hacer lo que la herramienta ya sabe hacer.
+        por_reasignar = (comparacion_sipp.campos_por_reasignacion(r)
+                         if info and not es_parcial and not inactivo else [])
+        if por_reasignar:
+            d = por_reasignar[0]
+            paso = f"{d.sipp or '—'} → {d.excel or '—'}"
+            estatus = ft.Row(
+                [ft.Icon(ft.Icons.SWAP_HORIZ, size=16, color=ft.Colors.PRIMARY,
+                         tooltip=f"Por reasignar en el SIPP — {paso}. Se envía con "
+                                 f"el botón «Reasignar en SIPP»."),
+                 estatus],
+                spacing=4, tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER)
         if manuales:
             detalle = " · ".join(f"{d.campo.etiqueta}: {d.excel} (SIPP: {d.sipp})"
                                  for d in manuales)
@@ -1622,25 +1662,34 @@ class SeccionRegistroActivos:
                 msg = "Levantamiento actualizado con los datos del SIPP."
             self.app.avisar(msg, VERDE, duracion=7000)
             if no_empujables:
-                # El empleado merece su propia explicación: no es que haya que
-                # elegirlo a mano en la edición, es que ahí NO se puede cambiar (el
-                # portal lo manda a su flujo de Reasignación). Decir «se elige a
-                # mano allá» mandaba al usuario a buscar un botón que no existe.
-                partes = []
+                # El empleado merece su propia explicación: no viaja con la
+                # modificación —la edición del portal no lo deja cambiar— pero sí
+                # con la REASIGNACIÓN, que la herramienta ya hace. Llamarlo «a
+                # mano» mandaba al usuario al portal a repetir un trabajo que el
+                # botón «Reasignar en SIPP» hace solo.
+                partes, reasignar = [], False
                 if any("mpleado" in c for c in no_empujables):
-                    partes.append("El empleado de resguardo se cambia con "
-                                  "«Reasignación», no en la edición del activo. "
-                                  "El activo queda marcado en el listado (casilla "
-                                  "«Cambios a mano en SIPP»).")
+                    reasignar = True
+                    partes.append("El empleado de resguardo no viaja con la "
+                                  "modificación (el portal no deja cambiarlo ahí): "
+                                  "se envía con el botón «Reasignar en SIPP», en la "
+                                  "pestaña «Dados de alta». El activo queda marcado "
+                                  "en el listado como «Por reasignar».")
                 if insumo_sin_catalogo:
                     partes.append("El insumo no está en el catálogo del SIPP con "
                                   "ese nombre exacto: elígelo en la ficha del "
                                   "activo (botón 📋) para poder enviarlo.")
                 detalle = " ".join(partes) or "Se eligen a mano en el portal."
-                self.app.avisar(
-                    f"Estos campos no se envían automáticamente al SIPP: "
-                    f"{', '.join(no_empujables)}. {detalle}", NARANJA,
-                    duracion=9000)
+                # Con el empleado SOLO, su explicación ya nombra el campo: anteponer
+                # la lista repetía «Empleado resguardo» dos veces en el mismo aviso.
+                otros = [c for c in no_empujables if "mpleado" not in c]
+                if reasignar and not otros:
+                    self.app.avisar(detalle, NARANJA, duracion=9000)
+                else:
+                    self.app.avisar(
+                        f"Estos campos no se envían con «Realizar modificación»: "
+                        f"{', '.join(no_empujables)}. {detalle}", NARANJA,
+                        duracion=9000)
 
         modal.set_acciones([
             boton_secundario("Cancelar", on_click=lambda _e: modal.cerrar()),
@@ -4212,8 +4261,9 @@ class SeccionRegistroActivos:
             if tabs.activa == "sesiones":
                 _pintar_sesiones(desde, hasta, equipo)
                 return
-            tipo = (db.MOV_ALTA if tabs.activa == "altas"
-                    else db.MOV_MODIFICACION)
+            tipo = {"altas": db.MOV_ALTA,
+                    "reasignaciones": db.MOV_REASIGNACION}.get(
+                        tabs.activa, db.MOV_MODIFICACION)
             solo = _ESTADOS.get(f_estado.value or "Todos")
             movs = db.listar_movimientos(tipo, tf.value or "", desde, hasta, solo,
                                          LIMITE, equipo)
@@ -4229,6 +4279,7 @@ class SeccionRegistroActivos:
 
             tabs.set_conteo("altas", _cuantos(db.MOV_ALTA))
             tabs.set_conteo("modificaciones", _cuantos(db.MOV_MODIFICACION))
+            tabs.set_conteo("reasignaciones", _cuantos(db.MOV_REASIGNACION))
             lista.controls = [_fila_movimiento(m) for m in movs] or [
                 ft.Container(ft.Text("Sin movimientos con ese criterio.", size=12,
                                      color=GRIS), padding=12)]
@@ -4366,6 +4417,7 @@ class SeccionRegistroActivos:
         tabs = Pestanas(
             [("altas", "Altas", ft.Icons.ADD_CIRCLE_OUTLINE),
              ("modificaciones", "Modificaciones", ft.Icons.EDIT_OUTLINED),
+             ("reasignaciones", "Reasignaciones", ft.Icons.SWAP_HORIZ),
              ("sesiones", "Sesiones de uso", ft.Icons.LAPTOP_CHROMEBOOK)],
             al_cambiar=_cambiar_pestana)
         tf.on_change = lambda _e: pintar()
@@ -4991,6 +5043,361 @@ class SeccionRegistroActivos:
         return [r for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA)
                 if r.modificado and r.id_tipo_activo is not None
                 and not (r.info_sipp() or {}).get("inactivo")]
+
+    # ------------------------------------------- RPA: reasignación en el SIPP
+    @staticmethod
+    def _pendientes_reasignacion() -> list:
+        """Activos dados de alta cuyo RESPONSABLE ya no es el del SIPP.
+
+        Son los que la comparación marca como «se cambia con Reasignación»: el
+        dato está capturado en el levantamiento y el portal sigue con el empleado
+        anterior. Los INACTIVOS quedan fuera —el SIPP ni siquiera ofrece la acción
+        en un activo dado de baja— y las POSIBLES COINCIDENCIAS también: ahí no se
+        ha confirmado que sea el mismo activo, y reasignar sería tocar el ajeno."""
+        pendientes = []
+        for r in db.listar_levantamiento_por_estatus(db.EST_DADO_ALTA):
+            info = r.info_sipp() or {}
+            if info.get("inactivo") or info.get("parcial"):
+                continue
+            if comparacion_sipp.campos_por_reasignacion(r):
+                pendientes.append(r)
+        return pendientes
+
+    @staticmethod
+    def _empleado_destino(r: "db.Levantamiento") -> tuple:
+        """(id, nombre) del empleado al que debe quedar el activo.
+
+        El id sale de la caché de empleados del SIPP; sin él, el RPA busca por
+        NOMBRE en el modal del portal, que es más frágil (homónimos, acentos) pero
+        sigue funcionando. Por eso no se exige: se avisa y se sigue."""
+        datos = r.datos() or {}
+        nombre = (datos.get("nb_Empleado") or r.responsable or "").strip()
+        if not nombre:
+            return "", ""
+        objetivo = " ".join(nombre.split()).upper()
+        for emp in db.buscar_empleados(nombre, limite=25):
+            if " ".join((emp.nombre or "").split()).upper() == objetivo:
+                return str(emp.id_empleado), emp.nombre
+        return "", nombre
+
+    def _fila_reasignacion(self, r: "db.Levantamiento") -> ft.Control:
+        """Renglón «de quién pasa a quién», que usan los dos diálogos."""
+        info = r.info_sipp() or {}
+        _id, nombre = self._empleado_destino(r)
+        etiqueta = (r.etiqueta or "").strip()
+        return ft.Row(
+            [ft.Icon(ft.Icons.SWAP_HORIZ, size=16, color=ft.Colors.PRIMARY),
+             ft.Column(
+                 [ft.Text((r.nombre_insumo or "(sin insumo)")
+                          + (f"  ·  etiqueta {etiqueta}" if etiqueta else ""),
+                          size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+                  ft.Text((info.get("empleado") or "(sin resguardante)")
+                          + "  →  " + (nombre or "(sin responsable capturado)"),
+                          size=11, color=GRIS, no_wrap=False)],
+                 spacing=0, tight=True, expand=True)],
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.START)
+
+    async def _confirmar_reasignaciones(self, pendientes: list) -> "bool | None":
+        """Enseña quién pasa a quién antes de tocar el portal.
+
+        Una reasignación es un MOVIMIENTO en el SIPP —queda en el historial del
+        activo y de ahí salen las cartas responsivas—, así que no se dispara sin
+        que alguien vea la lista. Devuelve True para seguir y None si se cancela."""
+        decision = asyncio.get_running_loop().create_future()
+
+        def responder(valor):
+            # Salida temprana OBLIGATORIA: `cerrar()` dispara `al_cerrar`, que
+            # vuelve a entrar aquí (recursión infinita al cerrar el diálogo).
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=8, expand=True)
+        sin_id = 0
+        for r in pendientes:
+            if not self._empleado_destino(r)[0]:
+                sin_id += 1
+            lista.controls.append(self._fila_reasignacion(r))
+
+        cuerpo = [
+            ft.Text("El SIPP trata el cambio de resguardante como un MOVIMIENTO, no "
+                    "como una edición: queda en el historial del activo y de ahí "
+                    "salen las cartas responsivas. Revisa la lista antes de enviar.",
+                    size=12, color=ft.Colors.ON_SURFACE, no_wrap=False)]
+        if sin_id:
+            cuerpo.append(ft.Row(
+                [ft.Icon(ft.Icons.WARNING_AMBER, size=16, color=NARANJA),
+                 ft.Text(f"{sin_id} no tienen a su empleado en el catálogo "
+                         f"descargado: se buscarán por NOMBRE en el portal, que "
+                         f"falla con homónimos. Si puedes, actualiza el catálogo "
+                         f"antes (botón «Actualizar SIPP»).",
+                         size=11, color=NARANJA, no_wrap=False, expand=True)],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.START))
+        cuerpo.append(ft.Container(lista, height=300))
+
+        modal = Modal(self.page, "Reasignar en el SIPP", ancho=680,
+                      subtitulo=f"{len(pendientes)} activo(s) cambian de resguardante",
+                      alto_cuerpo=460, al_cerrar=lambda: responder(None))
+        modal.cuerpo.controls = cuerpo
+        modal.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder(None)),
+            boton_primario("Reasignar", ft.Icons.SWAP_HORIZ,
+                           lambda _e: responder(True)),
+        ])
+        modal.abrir()
+        return await decision
+
+    async def _resolver_cartas_responsivas(self, conflictivos: list) -> str:
+        """Qué hacer con los activos que tienen CARTA RESPONSIVA vigente.
+
+        `conflictivos`: [(registro, fila)]. Devuelve "cancelar" u "omitir".
+
+        Se pregunta al FINAL, con el resto ya reasignado, porque la respuesta
+        destruye algo: para reasignar, el SIPP CANCELA la carta vigente del
+        activo. Eso lo decide una persona, no el RPA."""
+        decision = asyncio.get_running_loop().create_future()
+
+        def responder(valor):
+            if decision.done():
+                return
+            decision.set_result(valor)
+            modal.cerrar()
+
+        lista = ft.ListView(spacing=8, expand=True)
+        for r, _fila in conflictivos:
+            lista.controls.append(self._fila_reasignacion(r))
+
+        modal = Modal(self.page, "Cartas responsivas: hay que decidir", ancho=700,
+                      subtitulo=f"{len(conflictivos)} activo(s) sin reasignar todavía",
+                      alto_cuerpo=460, al_cerrar=lambda: responder("omitir"))
+        modal.cuerpo.controls = [
+            ft.Text("El resto ya se reasignó. Estos no se tocaron porque tienen una "
+                    "carta responsiva vigente y el SIPP exige CANCELARLA para poder "
+                    "reasignar: la cancela con el comentario «cancelada por "
+                    "reasignación del activo fijo». Es lo mismo que haría una "
+                    "persona desde el portal, pero no se hace sin que alguien lo "
+                    "pida.", size=12, color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Container(lista, height=280)]
+        modal.set_acciones([
+            boton_herramienta("Dejarlos como están",
+                              on_click=lambda _e: responder("omitir")),
+            boton_primario("Cancelar las cartas y reasignar", ft.Icons.CHECK,
+                           lambda _e: responder("cancelar")),
+        ])
+        modal.abrir()
+        return await decision
+
+    async def _reasignar_en_sipp(self, _e=None) -> None:
+        """Cambia en el SIPP el empleado de resguardo de los activos que lo tienen
+        desfasado respecto al levantamiento.
+
+        Va por el flujo de REASIGNACIÓN del portal (acción por fila del listado),
+        que es el único que cambia al resguardante: la edición del activo no lo
+        permite. Cada reasignación es un movimiento en el SIPP, así que se
+        confirma antes, se reporta activo por activo y las cartas responsivas se
+        preguntan aparte, al final."""
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP (botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+        pendientes = self._pendientes_reasignacion()
+        if not pendientes:
+            self.app.avisar(
+                "No hay reasignaciones pendientes: el responsable del levantamiento "
+                "coincide con el resguardante del SIPP en todos los activos.", VERDE)
+            return
+        if await self._confirmar_reasignaciones(pendientes) is None:
+            return
+
+        total = len(pendientes)
+        bucle = BucleRpa()
+        ctrl = ControlRpa(bucle.loop)
+        ui_loop = asyncio.get_running_loop()
+        txt = ft.Text(f"Preparando… (0/{total})", size=13)
+        barra = ft.ProgressBar(value=0)
+        modal = Modal(self.page, "Reasignando en el SIPP", ancho=460,
+                      acciones=[boton_herramienta(
+                          "Detener", on_click=lambda _e2: ctrl.detener(),
+                          destructivo=True)])
+        modal.cuerpo.controls = [
+            txt, barra,
+            ft.Text("Se abrirá un navegador; no lo cierres. Al terminar se queda "
+                    "abierto para que revises los movimientos. «Detener» corta "
+                    "antes del siguiente activo: el que esté en curso se termina.",
+                    size=11, color=GRIS, no_wrap=False)]
+        modal.abrir()
+
+        def avance(i: int, nombre: str) -> None:
+            def aplicar() -> None:
+                txt.value = f"({i}/{total}) {nombre}"
+                barra.value = i / total
+                modal.refrescar()
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        resultados: list = []       # una fila por activo (para el reporte)
+        con_carta: list = []        # (registro, fila) que esperan decisión
+        errores_generales: list = []
+        sipp = SesionSipp(headless=False)
+
+        async def reasignar(r, fila, cancelar_carta: bool = False) -> bool:
+            """Reasigna UN activo y vuelca el resultado en `fila`.
+
+            Devuelve True si quien falló fue el PORTAL (error suyo al guardar), que
+            es lo que decide si tiene sentido seguir con el resto."""
+            id_emp, nombre_emp = self._empleado_destino(r)
+            if not id_emp and not nombre_emp:
+                fila["observacion"] = ("El registro no tiene responsable capturado: "
+                                       "no hay a quién reasignarlo.")
+                return False
+            res = await sipp.reasignar_activo(
+                r.etiqueta or "", r.no_serie or "", id_emp, nombre_emp,
+                cancelar_carta=cancelar_carta)
+            if res.get("hecho"):
+                self._aplicar_reasignacion_local(r, res.get("empleado_nuevo")
+                                                 or nombre_emp)
+                fila["ok"] = True
+                anterior = res.get("empleado_anterior") or "(sin resguardante)"
+                nuevo = res.get("empleado_nuevo") or nombre_emp
+                fila["observacion"] = f"Reasignado: {anterior} → {nuevo}"
+                if cancelar_carta and res.get("carta"):
+                    fila["observacion"] += " (se canceló su carta responsiva)"
+                if not id_emp:
+                    fila["observacion"] += " · se buscó por nombre (no estaba en el catálogo)"
+            elif res.get("carta") and not cancelar_carta:
+                # No se tocó NADA: se decide al final, con el resto ya hecho.
+                fila["observacion"] = res.get("motivo", "")
+                con_carta.append((r, fila))
+            else:
+                fila["observacion"] = res.get("motivo", "No se pudo reasignar.")
+            return bool(res.get("error_portal"))
+
+        seguidos = {"portal": 0}
+
+        async def flujo(lote: list, avanzar, cancelar_carta: bool = False) -> None:
+            for i, (r, fila) in enumerate(lote, 1):
+                await ctrl.punto_control()
+                avanzar(i, r.nombre_insumo)
+                try:
+                    if await reasignar(r, fila, cancelar_carta=cancelar_carta):
+                        seguidos["portal"] += 1
+                    else:
+                        seguidos["portal"] = 0
+                    if seguidos["portal"] >= _MAX_FALLOS_PORTAL:
+                        errores_generales.append(
+                            f"Se detuvo la corrida: el SIPP rechazó las últimas "
+                            f"{_MAX_FALLOS_PORTAL} reasignaciones con un error de su "
+                            f"propio servidor, no de los datos. El detalle está en "
+                            f"cada renglón; repórtalo a quien mantiene el portal.")
+                        return
+                # Detenido: lo ya reasignado quedó en el portal (cada activo se
+                # guarda solo); lo que falta se vuelve a listar en la próxima
+                # corrida, así que no hay nada a medias. Va ANTES del except
+                # genérico: RpaDetenido también es Exception.
+                except RpaDetenido:
+                    fila["observacion"] = "Detenido antes de reasignar este activo."
+                    raise
+                except Exception as exc:  # noqa: BLE001 — se reporta y se sigue
+                    fila["observacion"] = mensaje_amigable(exc)
+
+        async def primera_vuelta() -> None:
+            await sipp.iniciar()
+            await sipp.login(usuario, contrasena)
+            primero = pendientes[0]
+            if primero.empresa and primero.sucursal:
+                try:
+                    await sipp.seleccionar_empresa_sucursal(
+                        primero.empresa, primero.sucursal)
+                except ErrorSipp as exc:
+                    errores_generales.append(
+                        f"Selección de empresa/sucursal: {exc}")
+            lote = []
+            for r in pendientes:
+                fila = {"insumo": r.nombre_insumo, "etiqueta": r.etiqueta or "",
+                        "serie": r.no_serie or "", "ok": False, "observacion": "",
+                        "_empresa": r.empresa or "", "_sucursal": r.sucursal or "",
+                        "_id": r.id}
+                resultados.append(fila)
+                lote.append((r, fila))
+            await flujo(lote, avance)
+
+        detenido = False
+        try:
+            await asyncio.wrap_future(bucle.enviar(primera_vuelta()))
+        except RpaDetenido:
+            detenido = True
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            errores_generales.append(mensaje_amigable(exc))
+
+        # Las cartas responsivas, al FINAL y de una sola vez: cancelarlas es
+        # destruir un documento vigente del activo.
+        if con_carta and not detenido and self._navegador_vivo(sipp):
+            modal.cerrar()
+            if await self._resolver_cartas_responsivas(con_carta) == "cancelar":
+                txt2 = ft.Text(f"Reasignando {len(con_carta)} activo(s)…", size=13)
+                barra2 = ft.ProgressBar(value=0)
+                modal2 = Modal(self.page, "Cancelando cartas y reasignando",
+                               ancho=460)
+                modal2.cuerpo.controls = [txt2, barra2]
+                modal2.abrir()
+
+                def avance2(hechos: int, nombre: str) -> None:
+                    def aplicar() -> None:
+                        txt2.value = f"({hechos}/{len(con_carta)}) {nombre}"
+                        barra2.value = hechos / len(con_carta)
+                        modal2.refrescar()
+                    ui_loop.call_soon_threadsafe(aplicar)
+
+                try:
+                    await asyncio.wrap_future(bucle.enviar(
+                        flujo(list(con_carta), avance2, cancelar_carta=True)))
+                except RpaDetenido:
+                    detenido = True
+                except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+                    errores_generales.append(mensaje_amigable(exc))
+                finally:
+                    modal2.cerrar()
+        else:
+            modal.cerrar()
+
+        self._refrescar()
+        self._guardar_historial(db.MOV_REASIGNACION, resultados)
+        self._mostrar_reporte_reasignacion(resultados, detenido, errores_generales,
+                                           sipp, bucle)
+
+    def _aplicar_reasignacion_local(self, r: "db.Levantamiento", nombre: str) -> None:
+        """Deja la copia local del SIPP con el resguardante NUEVO.
+
+        Sin esto el activo seguiría marcado como «por reasignar» hasta la próxima
+        búsqueda: la comparación mira `datos_sipp`, no el portal. Se escribe solo
+        el empleado —lo único que cambió— para no pisar el resto de la foto."""
+        info = dict(r.info_sipp() or {})
+        if not info:
+            return
+        info["empleado"] = nombre
+        db.actualizar_estatus_levantamiento(
+            r.id, db.EST_DADO_ALTA, r.id_activo_sipp or None, info)
+
+    def _mostrar_reporte_reasignacion(self, filas: list, detenido: bool,
+                                      errores_generales: list, sipp: "SesionSipp",
+                                      bucle: BucleRpa) -> None:
+        """Reporte final de la corrida de reasignación."""
+        hechas = sum(1 for f in filas if f.get("ok"))
+        fallidas = len(filas) - hechas
+        renglones = []
+        for f in sorted(filas, key=lambda x: bool(x.get("ok"))):
+            titulo = f.get("insumo", "")
+            if f.get("etiqueta"):
+                titulo += f"  ·  {f['etiqueta']}"
+            renglones.append((bool(f.get("ok")), titulo, f.get("observacion", "")))
+        stats = [(hechas, "Reasignados", VERDE)]
+        if fallidas:
+            stats.append((fallidas, "Sin reasignar", NARANJA))
+        modal = self._modal_reporte_rpa(
+            "Reasignación en el SIPP", stats, renglones, errores_generales,
+            sipp, bucle, detenido=detenido)
+        modal.abrir()
 
     async def _modificar_en_sipp(self, _e=None, *, sesion=None,
                                  bucle_previo=None) -> None:
