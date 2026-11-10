@@ -82,7 +82,6 @@ ejemplos/
 # Se regeneran solos; en desarrollo caen en la raíz porque DATOS es el repo.
 certificados_windows.pem
 
-# Datos de las pruebas contra un SIPP que no es el productivo (probar_sipp.bat).
-datos_stage/
-datos_test/
-datos_dev/
+# Datos de las pruebas: los entornos de probar_sipp.bat (datos_stage, datos_test,
+# datos_dev) y cualquier carpeta de sandbox que se arme para verificar la app.
+datos_*/

@@ -326,6 +326,67 @@ _JS_LLENAR_CAMPOS_DETALLE = r"""(args) => {
 # El portal guarda las fotos del activo en `ar_ArchivosFotografias` (scope del
 # controlador ActivosFijosNuevo). Un hueco con nombre/ruta en blanco es una foto
 # BORRADA que conserva su lugar; solo cuentan las que tienen ambos.
+# Texto del diálogo de error del portal («Error del Sistema» de
+# `fnc_showErrorDetail`). Se lee con `textContent` y no con `innerText` a
+# propósito: el detalle útil —el SQL y la columna que falló— vive dentro de un
+# «Ver detalle» colapsado, y `innerText` se salta lo que no está visible.
+ERROR_PORTAL_JS = r"""() => {
+    const cajas = document.querySelectorAll(
+        '.modal, .ui-dialog, [role=dialog], .sweet-alert, .alert, .panel-danger');
+    for (const n of cajas) {
+        if (!n.offsetParent) continue;                 // no está a la vista
+        const visible = (n.innerText || '');
+        if (!/error/i.test(visible)) continue;
+        const todo = (n.textContent || '').replace(/[\s\u00a0]+/g, ' ').trim();
+        if (todo) return todo.slice(0, 400);
+    }
+    return '';
+}"""
+
+ESTADO_FILA_LISTADO_JS = """(etiqueta) => {
+    const el = document.querySelector("[ng-model='js_filtroListado.de_Etiqueta']");
+    const sc = el && window.angular ? angular.element(el).scope() : null;
+    const filas = sc && Array.isArray(sc.arr_gridActivosFijos)
+        ? sc.arr_gridActivosFijos : [];
+    const norm = (t) => String(t === null || t === undefined ? '' : t)
+        .trim().toUpperCase();
+    const fila = (etiqueta
+        ? filas.find((f) => norm(f.DE_ETIQUETA) === norm(etiqueta)) : null) || filas[0];
+    if (!fila) return null;
+    return {
+        etiqueta: String(fila.DE_ETIQUETA || ''),
+        insumo: String(fila.NB_ACTIVOFIJO || ''),
+        empleado: String(fila.NB_EMPLEADORESGUARDO || ''),
+        id_empleado: String(fila.ID_EMPLEADORESGUARDO || ''),
+        carta: !!fila.AR_CARTARESPONSIVA,
+        inactivo: norm(fila.SN_ACTIVO) === 'FALSE',
+    };
+}"""
+
+# El modal de reasignación vive en su propio scope (`scopeModal.content`), así que
+# el `reasignarModalFiltros` bueno no está en el scope del botón sino más arriba:
+# se sube por la cadena hasta encontrarlo. Leerlo del scope del controlador daba
+# el objeto equivocado —el de la plantilla, sin el empleado recién elegido—.
+EMPLEADO_REASIGNADO_JS = """() => {
+    if (!window.angular) return null;
+    const botones = document.querySelectorAll('[ng-click]');
+    for (const el of botones) {
+        const clic = el.getAttribute('ng-click') || '';
+        if (clic.indexOf('empleados') === -1 || clic.indexOf('8') === -1) continue;
+        let sc = angular.element(el).scope();
+        while (sc) {
+            const f = sc.reasignarModalFiltros
+                || (sc.content && sc.content.reasignarModalFiltros);
+            if (f) {
+                return {id: String(f.id_EmpleadoNuevo || ''),
+                        nombre: String(f.nb_EmpleadoNuevo || '')};
+            }
+            sc = sc.$parent;
+        }
+    }
+    return null;
+}"""
+
 ESTADO_GENERAR_CC_JS = """() => {
     const el = document.querySelector(
         "input[ng-model='filtrosAgregar.sn_GenerarCentroCosto']");
@@ -394,6 +455,17 @@ class SesionSipp:
     # manejador sale antes si no hay Grupo Centro Costo elegido, así que
     # solo se puede marcar DESPUÉS de fijar el grupo.
     SEL_GENERAR_CC = "input[ng-model='filtrosAgregar.sn_GenerarCentroCosto']"
+
+    # --- Reasignación (cambio del empleado de resguardo) ---
+    # El SIPP la trata como un MOVIMIENTO, no como una edición: el formulario de
+    # modificación ni siquiera deja tocar el empleado. Se hace desde la acción
+    # «Reasignar Activo Fijo» de la fila, que el portal solo muestra en los
+    # activos ACTIVOS. El modal pide EMPLEADO y ya: empresa, sucursal,
+    # departamento y ubicación los rellena el portal con los del empleado elegido
+    # (`cargarEmpresaSucursalEmpleado`), y por eso llegan deshabilitados.
+    SEL_ACCION_REASIGNAR = "[ng-click*=reasignacion]"
+    SEL_GUARDAR_REASIGNAR = "[ng-click*=guardarReasignacion]"
+    SEL_EMPLEADO_REASIGNAR = "[ng-click*=\"abrirModal('empleados', 8\"]"
 
     # --- Tiempos de espera (ms) ---
     TIMEOUT_NAV = 30_000        # navegación / carga de página
@@ -1057,18 +1129,30 @@ class SesionSipp:
         await self._click_seguro(boton)
         await page.wait_for_timeout(800)
 
-    async def seleccionar_empleado(self, id_empleado, nombre: str = "") -> None:
-        """Elige el empleado de resguardo en el modal 'Buscar Empleado' (Asignación
-        del Activo): abre el modal y busca por ID si se tiene (exacto) o, si no, por
-        NOMBRE; luego pulsa el botón de la fila. Así el modal se abre y busca al
-        empleado aunque no se haya resuelto su id."""
+    # A qué formulario entrega el modal «Buscar Empleado». El portal no tiene uno
+    # por pantalla: tiene UNO solo y reparte el elegido con un número de opción
+    # (`agregarEmpleado` hace un switch sobre `opcionEmpleado`). Elegir el botón
+    # equivocado deja al empleado en otro formulario y el que se ve sigue vacío.
+    OPCION_EMPLEADO_ALTA = 2
+    OPCION_EMPLEADO_REASIGNAR = 8
+
+    async def seleccionar_empleado(self, id_empleado, nombre: str = "",
+                                   opcion: int = OPCION_EMPLEADO_ALTA) -> None:
+        """Elige un empleado en el modal 'Buscar Empleado': abre el modal y busca
+        por ID si se tiene (exacto) o, si no, por NOMBRE; luego pulsa el botón de
+        la fila. Así el modal se abre y busca al empleado aunque no se haya
+        resuelto su id.
+
+        `opcion` dice a QUÉ formulario va el empleado elegido (ver las constantes
+        de arriba): 2 es la asignación del alta y 8 el modal de reasignación.
+        """
         id_empleado = str(id_empleado or "").strip()
         nombre = (nombre or "").strip()
         if not id_empleado and not nombre:
             return  # nada que buscar
         page = self._exigir_pagina()
         abrir = await self._primer_visible(
-            [page.locator("[ng-click*=\"abrirModal('empleados', 2\"]"),
+            [page.locator(f"[ng-click*=\"abrirModal('empleados', {opcion}\"]"),
              page.locator("[ng-click*=\"abrirModal('empleados'\"]")],
             "botón para abrir el buscador de empleados")
         await self._click_seguro(abrir)
@@ -1747,6 +1831,129 @@ class SesionSipp:
             await locator.click(timeout=self.TIMEOUT_ELEMENTO)
         except Exception:  # noqa: BLE001 — respaldo por JS
             await locator.evaluate("el => el.click()")
+
+    @staticmethod
+    def _mismo_nombre(a: str, b: str) -> bool:
+        """¿Dos nombres de empleado son el mismo? (espacios y mayúsculas aparte)."""
+        return " ".join(str(a or "").split()).upper() ==                " ".join(str(b or "").split()).upper()
+
+    async def reasignar_activo(self, etiqueta: str, serie: str, id_empleado,
+                               nombre_empleado: str = "",
+                               cancelar_carta: bool = False) -> dict:
+        """Cambia el EMPLEADO DE RESGUARDO de un activo, por la vía que el portal
+        ofrece para eso: la acción «Reasignar Activo Fijo» de su fila.
+
+        Devuelve {"hecho", "motivo", "carta", "empleado_anterior",
+        "empleado_nuevo"}. `hecho=False` NO es un error: son los casos en que el
+        portal no permite la reasignación y hay que reportarlos, no reventar el
+        lote.
+
+        Si el activo tiene CARTA RESPONSIVA y `cancelar_carta` es False, no se
+        toca nada: el SIPP exige cancelar la carta para reasignar, y eso lo decide
+        el usuario. Con True se acepta esa cancelación, que es lo que haría una
+        persona a mano.
+
+        La fecha de asignación se deja como la propone el portal (hoy): es la
+        fecha del movimiento, no la del levantamiento.
+        """
+        page = self._exigir_pagina()
+        filas = await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
+        if filas == 0:
+            ident = (etiqueta or "").strip() or (serie or "").strip()
+            raise ErrorSipp(
+                f"No se encontró en el listado un activo con etiqueta/serie '{ident}'.")
+
+        # Lo que el portal sabe de la fila ANTES de tocar nada: de ahí salen la
+        # carta responsiva y el estatus, que deciden si siquiera se intenta.
+        try:
+            fila = await page.evaluate(ESTADO_FILA_LISTADO_JS, (etiqueta or "").strip())
+        except Exception:  # noqa: BLE001 — sin lectura se sigue a ciegas
+            fila = None
+        anterior = (fila or {}).get("empleado", "")
+        base = {"hecho": False, "carta": bool((fila or {}).get("carta")),
+                "empleado_anterior": anterior, "empleado_nuevo": "", "motivo": ""}
+        if fila and fila.get("inactivo"):
+            return {**base, "motivo": ("el activo está INACTIVO en el SIPP y el "
+                                       "portal no ofrece reasignarlo")}
+        if fila and fila.get("carta") and not cancelar_carta:
+            return {**base, "motivo": ("tiene carta responsiva: el SIPP exige "
+                                       "cancelarla para poder reasignar")}
+
+        abrir = await self._primer_visible(
+            [page.locator(self.SEL_ACCION_REASIGNAR)],
+            "acción «Reasignar Activo Fijo» del listado")
+        await self._click_seguro(abrir)
+        if fila and fila.get("carta"):
+            # El portal pregunta antes de cancelar la carta y luego avisa que la
+            # canceló; aquí ya se decidió, así que se aceptan los dos.
+            await self.confirmar_aviso_si_hay(5_000)
+            await page.wait_for_timeout(1_500)
+            await self.confirmar_aviso_si_hay(3_000)
+        try:
+            await page.locator(self.SEL_EMPLEADO_REASIGNAR).first.wait_for(
+                state="visible", timeout=self.TIMEOUT_ELEMENTO)
+        except PlaywrightTimeoutError as exc:
+            await self._capturar_diagnostico("modal_reasignacion")
+            raise ErrorSipp("No se abrió el modal «Reasignar Activo Fijo».") from exc
+
+        await self.seleccionar_empleado(id_empleado, nombre_empleado,
+                                        opcion=self.OPCION_EMPLEADO_REASIGNAR)
+        # Elegir al empleado dispara la carga por AJAX de su empresa, sucursal y
+        # centros de costo: guardar antes de que llegue deja el modal a medias.
+        await page.wait_for_timeout(2_500)
+        elegido = await page.evaluate(EMPLEADO_REASIGNADO_JS)
+        if not (elegido and elegido.get("id")):
+            await self._capturar_diagnostico("reasignacion_sin_empleado")
+            raise ErrorSipp(
+                "El modal de reasignación se quedó sin empleado nuevo; no se guardó.")
+        nuevo = elegido.get("nombre") or nombre_empleado
+
+        guardar = await self._primer_visible(
+            [page.locator(self.SEL_GUARDAR_REASIGNAR)],
+            "botón Guardar de la reasignación")
+        await self._click_seguro(guardar)
+        await self.confirmar_aviso_si_hay(5_000)      # «¿Estás seguro…?»
+        await page.wait_for_timeout(2_500)
+        # Lo que el portal conteste se lee ANTES de cerrarlo: si su backend falló,
+        # ese diálogo es la única explicación que va a existir.
+        fallo = await self.error_visible_del_portal()
+        await self.confirmar_aviso_si_hay(3_000)      # cierra el aviso (bueno o malo)
+        await page.wait_for_timeout(1_500)
+        if fallo:
+            return {**base, "empleado_nuevo": nuevo,
+                    "error_portal": True,
+                    "motivo": f"el SIPP rechazó la reasignación — {fallo}"}
+
+        # Se CONFIRMA contra el listado y no por el aviso del portal: el aviso se
+        # va solo a los pocos segundos y un fallo del servidor saldría por otro
+        # camino. Si el listado sigue mostrando al anterior, no se reasignó.
+        confirmado = ""
+        try:
+            await self.buscar_en_listado(etiqueta=etiqueta, serie=serie)
+            fila2 = await page.evaluate(ESTADO_FILA_LISTADO_JS, (etiqueta or "").strip())
+            confirmado = (fila2 or {}).get("empleado", "")
+        except Exception:  # noqa: BLE001 — sin confirmación se reporta como duda
+            confirmado = ""
+        if confirmado and not self._mismo_nombre(confirmado, nuevo):
+            return {**base, "empleado_nuevo": nuevo,
+                    "motivo": (f"el portal sigue mostrando a «{confirmado}» como "
+                               f"resguardante")}
+        return {**base, "hecho": True, "empleado_nuevo": nuevo}
+
+    async def error_visible_del_portal(self) -> str:
+        """Texto del error que el SIPP esté mostrando, o "" si no hay ninguno.
+
+        El portal no devuelve códigos: cuando su backend falla, pinta un diálogo
+        «Error del Sistema» con el detalle (archivo, línea y SQL). Leerlo es la
+        diferencia entre reportar «no se guardó» y reportar POR QUÉ, que es lo
+        único con lo que alguien puede ir a pedir que lo arreglen.
+
+        Best-effort: si no se puede leer, se devuelve "" y el flujo sigue con su
+        propia verificación."""
+        try:
+            return await self._exigir_pagina().evaluate(ERROR_PORTAL_JS) or ""
+        except Exception:  # noqa: BLE001 — sin lectura se sigue sin el detalle
+            return ""
 
     async def confirmar_aviso_si_hay(self, timeout: int = 2_000) -> bool:
         """Si aparece un aviso con botón 'Aceptar', lo pulsa. Best-effort."""

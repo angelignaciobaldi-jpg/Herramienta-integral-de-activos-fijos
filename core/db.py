@@ -1195,6 +1195,10 @@ def estado_catalogo_empleados() -> dict:
 # ------------------------------------------------ historial de movimientos
 MOV_ALTA = "alta"
 MOV_MODIFICACION = "modificacion"
+# Cambio de resguardante. Es un movimiento APARTE y no una modificacion
+# porque en el SIPP tambien lo es: va por otro flujo, queda en el historial
+# del activo y puede cancelar su carta responsiva.
+MOV_REASIGNACION = "reasignacion"
 
 # Columnas de ATRIBUCIÓN del movimiento (de dónde salió). Fuente única para el
 # INSERT y para la migración de arriba: agregar un dato de origen es agregarlo

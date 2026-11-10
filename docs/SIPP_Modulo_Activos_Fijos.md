@@ -387,10 +387,29 @@ Campos del modal (`reasignarModalFiltros.*`); solo el empleado es obligatorio:
 | `id_DepartamentoNuevo`, `de_UbicacionNuevo` | |
 | `sn_GenerarCentroCostoModal`, `sn_habilitarCamposReasignacion` | banderas del propio modal |
 
-Automatizarlo es viable (el buscador de empleados ya lo maneja
-`SesionSipp.seleccionar_empleado`), pero es un flujo distinto al de modificación y
-con efectos propios en el portal. **Decisión de agosto 2026: se documenta, no se
-implementa por ahora.**
+**Implementado** (noviembre 2026): `SesionSipp.reasignar_activo` y el botón
+«Reasignar en SIPP» de la pestaña «Dados de alta». Cuatro cosas que hay que
+saber antes de tocarlo:
+
+1. **El empleado se elige con el modal compartido, pero con la OPCIÓN 8.** El
+   portal tiene un solo «Buscar Empleado» y reparte el elegido con un switch
+   sobre `opcionEmpleado` (`agregarEmpleado`): 2 es la asignación del alta y 8
+   el modal de reasignación. Con el botón equivocado el empleado aterriza en
+   otro formulario y el que se ve se queda vacío.
+2. **Empresa, sucursal, departamento y ubicación no se llenan**: el portal los
+   rellena con los del empleado elegido (`cargarEmpresaSucursalEmpleado`), y por
+   eso llegan deshabilitados. Elegir empleado y esperar su AJAX es todo.
+3. **La carta responsiva bloquea la reasignación.** Si el activo tiene una
+   vigente (`AR_CARTARESPONSIVA`), el portal exige cancelarla antes
+   (`eliminarCartaResponsiva`, con un comentario automático). La herramienta NO
+   la cancela por su cuenta: aparta esos activos y los pregunta al final.
+4. **El resultado se verifica contra el listado**, no por el aviso del portal:
+   el aviso se va solo a los pocos segundos.
+
+Queda FUERA por ahora la reasignación **masiva** (pestaña propia del portal,
+`listadoReasignacion` + `arrayDeActivosFijos`, que reasigna varios activos al
+mismo empleado en una sola operación) y la casilla «Generar Centro Costo» del
+modal, que repite la matriz de B.3 bis.
 
 ## B.3 bis Generación del CENTRO DE COSTO (`sn_GenerarCentroCosto`)
 
