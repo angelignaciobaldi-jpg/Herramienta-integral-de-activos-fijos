@@ -87,6 +87,67 @@ def parsear_sucursales(respuesta: dict) -> list[Sucursal]:
     return sorted(sucursales, key=lambda s: s.nombre.lower())
 
 
+# --- Catálogo de empresas para los combos de la app --------------------------
+# Lo consultan tres pantallas (tablero, plantilla de carga masiva y «Actualizar
+# SIPP») y tienen que ofrecer LA MISMA lista: una empresa que el tablero muestra
+# y la plantilla no es una empresa que el usuario no puede trabajar, sin
+# explicación posible. Antes el tablero iba en vivo contra la API y las otras dos
+# se quedaban con la réplica versionada de `core/empresas.py`.
+#
+# La caché es de proceso (no se persiste): la llena la primera consulta —el
+# arranque del tablero, normalmente— y de ahí la reusan las demás sin volver a la
+# red. Con la app abierta todo el día, el catálogo no cambia tantas veces como
+# para pagar una consulta por cada combo.
+_CACHE_EMPRESAS: dict = {"nombres": [], "ids": {}, "en_vivo": False}
+
+
+def _nombre_limpio(nombre) -> str:
+    """Nombre sin espacios de más.
+
+    La API devuelve «SERVICIOS  EDUCATIVOS IMAA» con doble espacio y el SIPP la
+    escribe con uno. El nombre no es decorativo: con él se elige la empresa en el
+    combo del portal y se empareja lo que viene del Excel, así que un espacio de
+    sobra basta para que no case."""
+    return " ".join(str(nombre or "").split())
+
+
+def catalogo_empresas(refrescar: bool = True) -> tuple[list[str], dict, bool]:
+    """(nombres, {nombre: id}, en_vivo) de las empresas que ofrecen los combos.
+
+    `refrescar=False` devuelve lo último conocido SIN tocar la red: es lo que usa
+    un diálogo que tiene que pintarse ya.
+
+    Si la API no contesta se cae al catálogo ESTÁTICO de `core/empresas.py`: una
+    réplica versionada y algo vieja, pero que deja la app usable sin red, que es
+    mejor que un combo vacío. `en_vivo` dice cuál de los dos se devolvió, para
+    que la pantalla pueda decirlo si importa."""
+    from .empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
+
+    if refrescar:
+        try:
+            lista = empresas()
+        except Exception:  # noqa: BLE001 — hay plan B; no se reporta
+            lista = []
+        if lista:
+            nombres, ids = [], {}
+            for e in lista:
+                limpio = _nombre_limpio(e.nombre)
+                if limpio and limpio not in ids:
+                    ids[limpio] = e.id
+                    nombres.append(limpio)
+            _CACHE_EMPRESAS.update(nombres=nombres, ids=ids, en_vivo=True)
+    if _CACHE_EMPRESAS["nombres"]:
+        return (list(_CACHE_EMPRESAS["nombres"]), dict(_CACHE_EMPRESAS["ids"]),
+                _CACHE_EMPRESAS["en_vivo"])
+    return list(NOMBRES_EMPRESAS), dict(ID_POR_EMPRESA), False
+
+
+def empresas_conocidas() -> tuple[list[str], dict, bool]:
+    """Lo último que se sabe del catálogo, sin consultar. Para pintar de
+    inmediato y, si hace falta, refrescar después en segundo plano."""
+    return catalogo_empresas(refrescar=False)
+
+
 def empresas(empresa: int | None = None) -> list[Empresa]:
     """Catálogo de empresas. Sin `empresa` devuelve el listado completo.
 

@@ -13,7 +13,7 @@ import asyncio
 import flet as ft
 
 from core import credenciales, preferencias
-from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
+from core.catalogos import empresas_conocidas
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
 from ui.componentes import Modal, boton_herramienta, boton_primario, campo_opciones
 
@@ -44,7 +44,7 @@ class DialogoActualizarSipp:
         # falta. Ancho holgado para que quepan las 3 acciones de la vista confirmar.
         self._modal = Modal(self.page, "Actualizar información del SIPP", ancho=560)
         ultima = preferencias.cargar_valor(_CLAVE_EMPRESA)
-        if ultima and ultima in ID_POR_EMPRESA:
+        if ultima and ultima in empresas_conocidas()[1]:
             self._vista_confirmar(ultima)
         else:
             self._vista_seleccionar()
@@ -68,7 +68,8 @@ class DialogoActualizarSipp:
 
     def _vista_seleccionar(self, sugerida: str | None = None) -> None:
         _, self._dd = campo_opciones(
-            "Empresa", list(NOMBRES_EMPRESAS), valor=sugerida or None, flotante=True)
+            "Empresa", empresas_conocidas()[0], valor=sugerida or None,
+            flotante=True)
         self._modal.cuerpo.controls = [
             self._dd,
             ft.Text("Se descargarán sus insumos y activos, más el catálogo de "
@@ -87,14 +88,15 @@ class DialogoActualizarSipp:
         await self._correr(self._dd.value if self._dd else None)
 
     async def _correr(self, empresa: str | None) -> None:
-        if not empresa or empresa not in ID_POR_EMPRESA:
+        ids = empresas_conocidas()[1]
+        if not empresa or empresa not in ids:
             self.app.avisar("Elige una empresa.", NARANJA)
             return
         self._modal.cerrar()  # cierra el modal de selección/confirmación
         preferencias.guardar_valor(_CLAVE_EMPRESA, empresa)
         if callable(self.set_empresa):
             self.set_empresa(empresa)
-        await actualizar_info_sipp(self.app, ID_POR_EMPRESA.get(empresa), empresa,
+        await actualizar_info_sipp(self.app, ids.get(empresa), empresa,
                                    al_terminar=self.al_terminar)
 
 
