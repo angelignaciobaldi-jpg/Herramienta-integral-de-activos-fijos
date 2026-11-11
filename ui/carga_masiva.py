@@ -18,7 +18,7 @@ import asyncio
 import flet as ft
 
 from core import db, importador_excel
-from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
+from core.catalogos import empresas_conocidas
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, error_al_guardar
 from ui.componentes import (boton_herramienta, boton_primario, boton_secundario,
                             campo_opciones)
@@ -82,7 +82,7 @@ class DialogoCargaMasiva:
 
     def _tiene_catalogo(self, empresa: str) -> bool:
         """Si los catálogos contables de esa empresa ya están en la caché local."""
-        id_empresa = ID_POR_EMPRESA.get(empresa or "")
+        id_empresa = empresas_conocidas()[1].get(empresa or "")
         return id_empresa is not None and id_empresa in db.empresas_con_catalogo()
 
     def _panel_inicio(self) -> ft.Control:
@@ -93,9 +93,10 @@ class DialogoCargaMasiva:
         # empresas que sí se pueden trabajar.
         actual = (self.contexto() or ("", "", ""))[0]
         self._aviso_empresa = ft.Text("", size=11, no_wrap=False)
+        nombres, ids_empresa, _vivo = empresas_conocidas()
         _blq_empresa, self._dd_empresa = campo_opciones(
-            "Empresa de la plantilla", list(NOMBRES_EMPRESAS),
-            valor=actual if actual in ID_POR_EMPRESA else None, flotante=True,
+            "Empresa de la plantilla", nombres,
+            valor=actual if actual in ids_empresa else None, flotante=True,
             on_change=lambda _e: self._actualizar_aviso_empresa())
         self._actualizar_aviso_empresa()
         return ft.Container(
@@ -184,7 +185,7 @@ class DialogoCargaMasiva:
         sucursal, grupo y centro de costo se hornean dentro del archivo, así que
         una plantilla ya generada no se puede reapuntar a otra empresa."""
         empresa = (self._dd_empresa.value or "").strip() if self._dd_empresa else ""
-        if not empresa or empresa not in ID_POR_EMPRESA:
+        if not empresa or empresa not in empresas_conocidas()[1]:
             self.app.avisar("Elige la empresa de la plantilla.", NARANJA)
             return
         destino = await self.app.picker.save_file(
@@ -205,7 +206,7 @@ class DialogoCargaMasiva:
             # diálogo que además tapa.
             self.page.pop_dialog()
             if not await descargar_catalogos_empresa(
-                    self.app, ID_POR_EMPRESA[empresa], empresa):
+                    self.app, empresas_conocidas()[1][empresa], empresa):
                 return          # el fallo ya se reportó
             if not self._tiene_catalogo(empresa):
                 # Descarga correcta pero sin nada que guardar: la empresa no tiene
