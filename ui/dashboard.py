@@ -24,7 +24,7 @@ from core import dashboard as datos_api
 from core import inversion as inversion_api
 from core import listado as listado_api
 from core import paginado as paginado_api
-from core.empresas import ID_POR_EMPRESA, NOMBRES_EMPRESAS
+from core.catalogos import empresas_conocidas
 from core.tipos_activo import TIPOS_ACTIVO
 from ui.componentes import (GAP_LG, GAP_MD, GAP_SM, GUTTER_SCROLL, RADIO, Modal,
                             SelectCompacto, ancho_util_modal, boton_herramienta,
@@ -927,14 +927,16 @@ class SeccionDashboard:
         # No hay forma de bajarlo —`ft.Dropdown` ignora `dense`, `height` y
         # `content_padding`—, así que se usa el select de caja propia (35px), que
         # además trae buscador: con 58 empresas, una lista sin filtrar no sirve.
-        # Nace con el catálogo estático; `_cargar_empresas` lo sustituye por el
-        # de la API en cuanto arranca la pantalla. Así el combo nunca está vacío,
-        # ni siquiera durante esa primera consulta.
+        # Nace con lo ÚLTIMO QUE SE SEPA del catálogo (la caché compartida, o
+        # el estático si aún no hay nada) y `_cargar_empresas` lo refresca al
+        # arrancar la pantalla. Así el combo nunca está vacío, ni siquiera
+        # durante esa primera consulta.
+        _nombres, _ids, _vivo = empresas_conocidas()
         self.fil_empresa = SelectCompacto(
-            self.page, [_TODAS_EMPRESAS, *NOMBRES_EMPRESAS],
+            self.page, [_TODAS_EMPRESAS, *_nombres],
             valor=_TODAS_EMPRESAS, ancho=_ANCHO_FILTRO, titulo="Empresa",
             on_change=self._cambio_empresa)
-        self._ids_empresa = dict(ID_POR_EMPRESA)
+        self._ids_empresa = _ids
         # La sucursal cuelga de la empresa: el endpoint la exige, así que hasta
         # que no haya una elegida no hay nada que ofrecer.
         self.fil_sucursal = SelectCompacto(
@@ -1005,13 +1007,11 @@ class SeccionDashboard:
         versionada y algo desactualizada, pero deja la pantalla usable sin red,
         que es mejor que un combo vacío.
         """
-        try:
-            lista = await asyncio.to_thread(catalogos.empresas)
-            self._ids_empresa = {e.nombre: e.id for e in lista}
-            nombres = [e.nombre for e in lista]
-        except Exception:  # noqa: BLE001 — hay plan B, no se reporta
-            self._ids_empresa = dict(ID_POR_EMPRESA)
-            nombres = list(NOMBRES_EMPRESAS)
+        # `catalogo_empresas` consulta, normaliza y CACHEA: lo que se traiga aquí
+        # es lo que después ofrecen la plantilla y «Actualizar SIPP», sin volver a
+        # la red. Si la API no contesta, devuelve el catálogo estático.
+        nombres, self._ids_empresa, _vivo = await asyncio.to_thread(
+            catalogos.catalogo_empresas)
         self.fil_empresa.set_opciones([_TODAS_EMPRESAS, *nombres],
                                       valor=_TODAS_EMPRESAS)
         self._set_sucursales([])
