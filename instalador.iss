@@ -30,11 +30,30 @@ ChangesAssociations=yes
 [Files]
 ; Carpeta de salida de flet pack/PyInstaller (onedir). El nombre 'ActivosFijos'
 ; debe coincidir con el -n del build (ver README).
-Source: ".\dist\ActivosFijos\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Excludes: NO se instalan scripts de shell. Los unicos .ps1/.sh del paquete son
+; los 17 de playwright\driver\package\bin, y la app NO ejecuta ninguno: solo
+; llama a `install chromium --no-shell`, mientras que esos sirven para WebKit
+; dentro de WSL, el media pack de Windows y reinstalar Chrome/Edge de marca.
+; Se excluyen porque un antivirus puede poner en cuarentena un .ps1 suelto
+; dentro de la carpeta del programa; el archivo queda en estado "borrado
+; pendiente" y cualquier intento de reemplazarlo devuelve acceso denegado, con
+; lo que la instalacion se traba (MoveFile failed; code 5 sobre
+; install_webkit_wsl.ps1, reportado en un equipo con la 1.4.1). Codigo que no se
+; envia no se puede bloquear.
+Source: ".\dist\ActivosFijos\*"; DestDir: "{app}"; Excludes: "*.ps1,*.sh"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Icono para los accesos directos, copiado a la RAIZ de {app}. Se toma del codigo
 ; fuente (no del build): PyInstaller (onedir) mete 'Imagenes' dentro de
 ; {app}\_internal, asi que un IconFilename a {app}\Imagenes\icon.ico no existiria.
 Source: ".\Imagenes\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; Las versiones hasta la 1.4.1 SI instalaron esos scripts, asi que en los equipos
+; ya instalados la copia vieja sigue en disco (y es justo la que se traba). Se
+; intenta borrarla al actualizar. Si alguna esta bloqueada por el antivirus, Inno
+; lo anota en el log y CONTINUA: borrarlas es limpieza, no requisito, y con
+; [Files] ya no se intenta sobrescribirlas.
+Type: files; Name: "{app}\_internal\playwright\driver\package\bin\*.ps1"
+Type: files; Name: "{app}\_internal\playwright\driver\package\bin\*.sh"
 
 [Icons]
 ; IconFilename apunta a {app}\icon.ico (copiado a la raiz en [Files]).
