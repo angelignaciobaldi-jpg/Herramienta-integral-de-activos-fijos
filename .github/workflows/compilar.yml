@@ -65,8 +65,17 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install flet pyinstaller
+          # flet NO se instala aquí. Se hacía (`pip install flet pyinstaller`) y
+          # eso traía la ÚLTIMA versión publicada el día de la compilación, por
+          # encima del pin de requirements.txt: el visor de escritorio que se
+          # distribuye cambiaba solo, release tras release. Ver el porqué largo
+          # en requirements.txt. pyinstaller sí va aquí: `flet pack` lo necesita
+          # y no está en requirements.txt por ser solo de empaquetado.
+          pip install pyinstaller
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          # Deja en el log QUÉ versión quedó: es el dato que explica, meses
+          # después, por qué un equipo tiene el visor que tiene.
+          pip show flet flet-desktop | Select-String '^(Name|Version):'
 
       # Smoke test de imports: importa app + todos los modulos de core/ y ui/ para
       # detectar imports rotos o modulos faltantes ANTES de compilar y publicar.

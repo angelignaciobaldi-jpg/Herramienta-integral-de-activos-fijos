@@ -1,6 +1,20 @@
 # Herramienta Integral de Activos Fijos — dependencias
 # (sqlite3 viene incluido con Python; no se lista)
-flet>=0.85           # interfaz de escritorio (Material)
+# Flet va FIJO, no con >=. El paquete trae el VISOR de la app (flet.exe, un
+# binario de Flutter SIN FIRMAR) que Flet descomprime en ~\.flet\client la
+# primera vez que arranca. Con un rango, cada compilación tomaba la última
+# versión publicada ese día: los instalables 1.4.1 salieron con Flet 1.1.2
+# mientras aquí se desarrolla con 0.86.5. Dos consecuencias, las dos malas:
+#   1) cada actualización dejaba en el equipo del usuario un visor NUEVO, o sea
+#      un ejecutable sin firma y sin reputación que el antivirus vuelve a juzgar
+#      desde cero —y a veces pone en cuarentena, dejando la app sin ventana (ver
+#      core/cliente_flet.py)—. Un equipo llegó a acumular siete visores.
+#   2) se publicaba sobre una versión de Flet que nadie probó aquí.
+# flet-desktop es quien trae el visor y se fija aparte porque `flet` no lo
+# declara como dependencia: lo instala la CLI al empaquetar, y sin pin tomaría
+# el más nuevo. Al subir de versión, mover las DOS a la vez.
+flet==0.86.5         # interfaz de escritorio (Material)
+flet-desktop==0.86.5 # visor de escritorio (flet.exe) que empaqueta `flet pack`
 openpyxl>=3.1        # lectura de los Excel de inventario (carga masiva)
 playwright>=1.60     # automatización del navegador (RPA del SIPP + PDF de etiquetas)
 segno>=1.6           # generación de códigos QR

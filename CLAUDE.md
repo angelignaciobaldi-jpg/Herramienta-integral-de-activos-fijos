@@ -227,10 +227,15 @@ de captura arma el formulario leyendo de ahí y el RPA usa el `ng_model` de cada
 campo como localizador. **Para agregar o cambiar campos, edita ese archivo — no
 la UI.** El DOM de referencia está en [docs/SIPP_Modulo_Activos_Fijos.md](docs/SIPP_Modulo_Activos_Fijos.md).
 
-## API de Flet: usa la de 0.85, no la de los tutoriales
+## API de Flet: usa la de 0.86, no la de los tutoriales
 
-El proyecto corre **Flet 0.85** (`flet>=0.85`), cuya API rompe con casi todo el
-material antiguo. En este repo se usa:
+El proyecto corre **Flet 0.86.5**, cuya API rompe con casi todo el material
+antiguo. La versión va **fija** (`flet==0.86.5` + `flet-desktop==0.86.5`), no en
+un rango: el paquete trae el visor `flet.exe` que se distribuye al usuario y que
+los antivirus juzgan por reputación, así que no puede cambiar solo en cada
+compilación. El porqué completo está en `requirements.txt`; si subes de versión,
+mueve las dos a la vez y revisa que el CI no vuelva a instalar `flet` por su
+cuenta. En este repo se usa:
 
 `ft.run(main)` · `ft.Colors` / `ft.Icons` (capitalizados) · `page.show_dialog()` y
 `page.pop_dialog()` · `page.services.append(picker)` · `ft.Padding.symmetric(...)` ·
