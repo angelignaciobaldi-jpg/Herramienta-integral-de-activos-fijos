@@ -64,6 +64,14 @@ _ENCABEZADOS_ALTA = {
     "GRUPO CENTRO DE COSTO": "id_GrupoCentroCosto",
     "CENTRO DE COSTO": "id_CentroCosto",
     "DEPARTAMENTO": "id_Departamento",
+    # Ubicación de CATÁLOGO (módulo nuevo del SIPP): el portal pide
+    # «Ubicación principal» y «Sub ubicación» de dos desplegables
+    # encadenados, y dejó el texto libre de siempre como «Detallado de
+    # ubicación», que es la columna UBICACION del levantamiento. Como el
+    # resto de los `id_*` de aquí, se guarda el NOMBRE: el RPA elige por
+    # rótulo en el portal, no por clave.
+    "UBICACION PRINCIPAL": "id_Ubicacion",
+    "SUB UBICACION": "id_SubUbicacion",
     "FECHA ADQUISICION": "FH_ADQUISICION",
     "FECHA GARANTIA": "FH_GARANTIA",
     "FECHA ASIGNACION": "FH_ASIGNACION",
@@ -86,8 +94,18 @@ _ENCABEZADOS_ALTA = {
     # económico» (ver docs/SIPP_Modulo_Activos_Fijos.md, B.3 bis).
     "NO ECONOMICO": "no_economico",
 }
+# Formas alternativas de escribir un encabezado. Van aparte para no ensuciar
+# el mapa canónico (del que sale la plantilla y `columnas_obligatorias`).
+# «SUBUBICACION» y «SUB-UBICACION» hacen falta porque CONTIENEN «UBICACION»:
+# sin declararlas, el match más largo las daría por el texto libre y la
+# sub-ubicación se importaría como detalle de ubicación.
+_ALIAS_ENCABEZADOS = {
+    "SUBUBICACION": "id_SubUbicacion",
+    "SUB-UBICACION": "id_SubUbicacion",
+}
+
 # Detección combinada: encabezado -> destino (campo básico O clave del alta).
-_HEADERS = {**_ENCABEZADOS, **_ENCABEZADOS_ALTA}
+_HEADERS = {**_ENCABEZADOS, **_ENCABEZADOS_ALTA, **_ALIAS_ENCABEZADOS}
 
 # Cuántos encabezados deben coincidir para dar una fila por "fila de encabezados".
 _MIN_COINCIDENCIAS = 3
@@ -169,7 +187,8 @@ class ResultadoImportacion:
 # Excel sea la base del registro; lo no llenado se completa después en la herramienta.
 PLANTILLA_ENCABEZADOS = [
     "INSUMO", "CANTIDAD", "ETIQUETA", "SERIE", "RESPONSABLE",
-    "EMPRESA", "SUCURSAL", "UBICACION", "TIPO DE ACTIVO", "DESCRIPCION",
+    "EMPRESA", "SUCURSAL", "UBICACION PRINCIPAL", "SUB UBICACION", "UBICACION",
+    "TIPO DE ACTIVO", "DESCRIPCION",
     "SITUACION", "COSTO", "FACTURA", "PROVEEDOR", "EMPRESA COMPRA",
     "SUCURSAL COMPRA", "GRUPO CENTRO DE COSTO", "CENTRO DE COSTO", "DEPARTAMENTO",
     "FECHA ADQUISICION", "FECHA GARANTIA", "FECHA ASIGNACION",
@@ -279,6 +298,23 @@ def _hoja_listas(wb, empresa: str):
             for j, grupo in enumerate(suc["grupos"], 1):
                 _volcar(f"CC {suc['sucursal']} / {grupo['nb_grupo']}",
                         grupo["centros"], f"CC_{i}_{j}")
+        # Ubicaciones del catálogo nuevo, indexadas por la MISMA posición de
+        # sucursal que los grupos: así una sola fórmula —MATCH contra el rango
+        # SUCURSALES— sirve para las dos cadenas. Se recorre `arbol` y no el
+        # árbol de ubicaciones porque es `arbol` el que define el orden de ese
+        # rango; una sucursal sin ubicaciones se salta para no gastar una
+        # columna por cada una (hoy el catálogo está vacío en productivo).
+        por_sucursal = {_norm(s["sucursal"]): s["ubicaciones"]
+                        for s in db.catalogo_ubicaciones_empresa(id_empresa)}
+        for i, suc in enumerate(arbol, 1):
+            ubicaciones = por_sucursal.get(_norm(suc["sucursal"]), [])
+            if not ubicaciones:
+                continue
+            _volcar(f"UBICACIONES {suc['sucursal']}",
+                    [u["nb_ubicacion"] for u in ubicaciones], f"UB_{i}")
+            for j, ubic in enumerate(ubicaciones, 1):
+                _volcar(f"SUB {suc['sucursal']} / {ubic['nb_ubicacion']}",
+                        ubic["sububicaciones"], f"SUB_{i}_{j}")
     if id_empresa is not None:
         _volcar("DEPARTAMENTOS", db.listar_departamentos(id_empresa), "DEPARTAMENTOS")
     return nombres, arbol
@@ -389,6 +425,18 @@ def generar_plantilla(ruta: str, empresa: str = "") -> str:
                  bloquear=False)
         _validar("CENTRO DE COSTO",
                  f'=INDIRECT("CC_"&{idx_suc}&"_"&{idx_grupo})', bloquear=False)
+        # Ubicación principal y sub ubicación: misma mecánica encadenada, pero
+        # NUNCA bloquean, ni siquiera la principal (que sí tiene de qué colgar).
+        # El catálogo del SIPP está recién estrenado y HOY ESTÁ VACÍO: con lista
+        # cerrada la columna sería imposible de llenar. Lo que se capture y no
+        # exista se da de alta en el portal antes de registrar los activos, así
+        # que un nombre fuera de la lista es el caso NORMAL, no un error.
+        col_ubic = _letra("UBICACION PRINCIPAL")
+        idx_ubic = f'MATCH(${col_ubic}2,INDIRECT("UB_"&{idx_suc}),0)'
+        _validar("UBICACION PRINCIPAL", f'=INDIRECT("UB_"&{idx_suc})',
+                 bloquear=False)
+        _validar("SUB UBICACION",
+                 f'=INDIRECT("SUB_"&{idx_suc}&"_"&{idx_ubic})', bloquear=False)
         # La empresa del archivo es UNA: el desplegable de un solo valor lo deja
         # explícito y evita que se capture otra por costumbre.
         for encabezado in ("EMPRESA", "EMPRESA COMPRA"):
@@ -418,6 +466,10 @@ def generar_plantilla(ruta: str, empresa: str = "") -> str:
         "elige primero la sucursal y el desplegable de grupo se limita a los de "
         "esa sucursal; al elegir el grupo, el de centro de costo se limita a los "
         "suyos. Si capturas el grupo antes que la sucursal, la lista sale vacía.",
+        "• UBICACION PRINCIPAL y SUB UBICACION están ENCADENADAS igual: la "
+        "ubicación se limita a las de la SUCURSAL capturada y la sub a las de "
+        "esa ubicación. Si la que necesitas NO está en la lista, escríbela: la "
+        "herramienta la da de alta en el SIPP antes de registrar los activos.",
         "• TIPO DE ACTIVO, SITUACION y DEPARTAMENTO también traen lista.",
         "",
         "Captura un activo por fila en la hoja «Activos». El Excel es la base del "
@@ -445,7 +497,10 @@ def generar_plantilla(ruta: str, empresa: str = "") -> str:
         "• RESPONSABLE: empleado resguardante (se resuelve a su id para el RPA).",
         "• EMPRESA y SUCURSAL: la empresa/sucursal del activo. Si las dejas vacías, se "
         "usan las del selector de la pantalla al importar.",
-        "• UBICACION: ubicación física.",
+        "• UBICACION PRINCIPAL y SUB UBICACION: ubicación del CATÁLOGO del SIPP "
+        "(en el portal, «Ubicación principal» y «Sub ubicación»).",
+        "• UBICACION: detalle libre del lugar; es el «Detallado de ubicación» "
+        "del portal, no el catálogo.",
         "",
         "CARACTERÍSTICAS DEL INSUMO (solo las que el SIPP pide para ese tipo; el "
         "resto se ignora al dar de alta):",
@@ -563,6 +618,10 @@ class _Catalogos:
     def __init__(self) -> None:
         # {clave de catálogo: {valor normalizado: valor del catálogo}}
         self._indices: dict = {}
+        # Árbol de ubicaciones por empresa. Se cachea porque `alta()` corre UNA
+        # VEZ POR FILA y el árbol sale de la base: sin esto, mil renglones son
+        # mil consultas.
+        self._arboles_ubic: dict = {}
 
     def _traducir(self, clave, opciones_fn, valor: str) -> str:
         valor = (valor or "").strip()
@@ -596,6 +655,17 @@ class _Catalogos:
         return self._traducir(("dep", id_empresa),
                               lambda: db.listar_departamentos(id_empresa), nombre)
 
+    def ubicaciones(self, id_empresa, sucursal: str) -> dict:
+        """{nombre de ubicación: [sub-ubicaciones]} de esa sucursal."""
+        arbol = self._arboles_ubic.get(id_empresa)
+        if arbol is None:
+            arbol = {_norm(s["sucursal"]):
+                     {u["nb_ubicacion"]: u["sububicaciones"]
+                      for u in s["ubicaciones"]}
+                     for s in db.catalogo_ubicaciones_empresa(id_empresa)}
+            self._arboles_ubic[id_empresa] = arbol
+        return arbol.get(_norm(sucursal), {})
+
     def alta(self, datos: dict, id_empresa, sucursal: str) -> dict:
         """Traduce los campos del alta que salen de un catálogo.
 
@@ -621,6 +691,22 @@ class _Catalogos:
                 id_empresa, datos["id_Departamento"])
         if id_empresa is None:
             return datos
+        # Ubicación de catálogo: solo se corrige la CAPITALIZACIÓN contra lo que
+        # ya existe en el SIPP. Un nombre que no está se deja TAL CUAL —es el
+        # camino normal mientras el catálogo se llena— y el alta de ubicaciones
+        # lo crea después; no se intenta emparejarlo con nada parecido.
+        if datos.get("id_Ubicacion") or datos.get("id_SubUbicacion"):
+            ubicaciones = self.ubicaciones(id_empresa, sucursal)
+            if datos.get("id_Ubicacion"):
+                datos["id_Ubicacion"] = self._traducir(
+                    ("ubic", id_empresa, _norm(sucursal)),
+                    lambda: list(ubicaciones), datos["id_Ubicacion"])
+            if datos.get("id_SubUbicacion"):
+                nb_ubic = datos.get("id_Ubicacion") or ""
+                datos["id_SubUbicacion"] = self._traducir(
+                    ("sububic", id_empresa, _norm(sucursal), _norm(nb_ubic)),
+                    lambda: ubicaciones.get(nb_ubic, []),
+                    datos["id_SubUbicacion"])
         grupos = db.listar_grupos_cc(id_empresa, sucursal)
         if datos.get("id_GrupoCentroCosto"):
             datos["id_GrupoCentroCosto"] = self._traducir(
