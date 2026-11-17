@@ -41,7 +41,20 @@ async def _query(sesion, component: str, metodo: str, args: dict):
         datos = await resp.json()
     except Exception as exc:  # noqa: BLE001 — se reporta como ErrorCatalogos
         raise ErrorCatalogos(f"No se pudo consultar {component}.{metodo}: {exc}") from exc
-    query = datos.get("QUERY", {}) or {}
+    # El cfproxy contesta HTTP 200 aunque falle: el error viene en el CUERPO
+    # (`ISOK` en false y un `MSG` del tipo «La función X no existe en Y») y SIN
+    # la llave QUERY, mientras que un catálogo legítimamente vacío sí la trae, con
+    # 0 filas (comprobado contra el portal). Distinguirlos importa: si el portal
+    # renombrara un método, antes se devolvían cero filas sin error, la caché
+    # quedaba vacía en silencio y el síntoma aparecía mucho después, como un
+    # desplegable vacío en la plantilla.
+    if not isinstance(datos, dict) or "QUERY" not in datos:
+        msg = datos.get("MSG") if isinstance(datos, dict) else None
+        detalle = str(msg or "").strip()
+        raise ErrorCatalogos(
+            f"El SIPP rechazó la consulta {component}.{metodo}"
+            + (f": {detalle}" if detalle else " (respuesta sin datos)."))
+    query = datos.get("QUERY") or {}
     cols = query.get("COLUMNS") or []
     filas = query.get("DATA") or []
     return {c: i for i, c in enumerate(cols)}, filas
