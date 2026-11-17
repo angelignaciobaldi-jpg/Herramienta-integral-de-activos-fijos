@@ -104,6 +104,17 @@ def faltantes(id_empresa: int, filas) -> Pendientes:
     """
     ids_suc = db.ids_sucursales_sipp(id_empresa)
     res = Pendientes()
+    if not ids_suc:
+        # Sin sucursales en la caché no se puede decidir nada: la ubicación
+        # cuelga de una sucursal y hace falta su id para crearla. Se dice UNA
+        # vez y con la acción a tomar, en vez de repetir «esa sucursal no
+        # existe» por cada ubicación capturada, que suena a error de captura
+        # cuando en realidad falta descargar el catálogo.
+        if any(True for _f in filas):
+            res.problemas.append(
+                "esta empresa no tiene sucursales descargadas del SIPP: "
+                "corre primero «Actualizar información del SIPP».")
+        return res
     # Clave normalizada -> pendiente, para agrupar las mil filas de la plantilla
     # en una sola alta por ubicación.
     indice: dict = {}
@@ -177,6 +188,23 @@ def faltantes(id_empresa: int, filas) -> Pendientes:
     return res
 
 
+async def refrescar_cache(sesion, id_empresa: int) -> list[dict]:
+    """Relee del portal el catálogo de ubicaciones de una empresa y lo cachea.
+
+    Devuelve las ubicaciones leídas (con sus ids), que es lo que hace falta
+    para colgarles sub-ubicaciones. Se usa antes de crear —para no intentar
+    dar de alta algo que otra persona ya registró en el portal, que el SIPP
+    rechazaría por duplicado— y después, para que el alta de activos
+    encuentre en la caché lo que acaba de crearse.
+    """
+    ubicaciones = await _listar_ubicaciones(sesion, id_empresa)
+    db.reemplazar_ubicaciones(id_empresa, ubicaciones)
+    ids = {u["id_ubicacion"] for u in ubicaciones}
+    db.reemplazar_sububicaciones(
+        id_empresa, await _listar_sububicaciones(sesion, id_empresa, ids))
+    return ubicaciones
+
+
 async def _guardar(sesion, metodo: str, payload: dict) -> dict:
     """POST al cfproxy de un método que ESCRIBE. Devuelve la respuesta cruda.
 
@@ -245,8 +273,7 @@ async def crear(sesion, id_empresa: int, pendientes: list[UbicacionPendiente],
     # --- 2) Refrescar para conocer los ids reales ---------------------------
     # El guardado no devuelve el id, así que se vuelve a leer el catálogo (igual
     # que hace la pantalla del portal). Sin esto no hay de dónde colgar las subs.
-    ubicaciones = await _listar_ubicaciones(sesion, id_empresa)
-    db.reemplazar_ubicaciones(id_empresa, ubicaciones)
+    await refrescar_cache(sesion, id_empresa)
     creadas = sum(1 for u in pendientes if u.crear_ubicacion
                   and db.ubicacion_por_nombre(id_empresa, u.id_sucursal, u.nombre))
 
@@ -284,8 +311,6 @@ async def crear(sesion, id_empresa: int, pendientes: list[UbicacionPendiente],
             await paso()
 
     # --- 4) Caché al día -----------------------------------------------------
-    ids = {u["id_ubicacion"] for u in ubicaciones}
-    db.reemplazar_sububicaciones(
-        id_empresa, await _listar_sububicaciones(sesion, id_empresa, ids))
+    await refrescar_cache(sesion, id_empresa)
     return {"ubicaciones": creadas, "sububicaciones": creadas_sub,
             "errores": errores}
