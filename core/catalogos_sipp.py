@@ -7,6 +7,10 @@ Por empresa descarga, vía el mismo endpoint cfproxy que el resto del módulo:
   - CENTROS de costo (por GRUPO)           -> CentrosCostos.
         listarComboCentroCostosActivosFijos {id_Empresa, id_Sucursal,
         id_grupoCentroCosto}
+  - UBICACIONES de resguardo (por empresa) -> ActivosFijosNuevo.
+        listarUbicacionesAF {id_Empresa}
+  - SUB-UBICACIONES (por empresa)          -> ActivosFijosNuevo.
+        listarSububicacionesAF {id_Empresa}
 
 Grupo y centro dependen de la sucursal; se recorren las sucursales de la empresa
 por argumento (sin cambiar la sesión). El grupo guarda su sucursal (nombre) para
@@ -98,5 +102,68 @@ async def descargar_catalogos(sesion, id_empresa: int, progreso=None,
 
     db.reemplazar_grupos_cc(id_empresa, grupos)
     db.reemplazar_centros_cc(id_empresa, centros)
+
+    # Ubicaciones de resguardo: la empresa entera en DOS llamadas, sin recorrer
+    # sucursales. El portal las pide con {id_Empresa, id_Sucursal} desde el alta
+    # y SIN argumentos desde su módulo de catálogo (donde devuelve todas), así
+    # que el filtro es opcional. Se manda el de empresa Y además se filtra aquí
+    # por ID_EMPRESA: si el servicio ignorara el argumento, guardaríamos las
+    # ubicaciones de TODAS las empresas bajo esta, y el desplegable de la
+    # plantilla ofrecería ubicaciones de otra razón social.
+    if mensaje:
+        mensaje("Descargando ubicaciones…")
+    ubicaciones = await _listar_ubicaciones(sesion, id_empresa)
+    db.reemplazar_ubicaciones(id_empresa, ubicaciones)
+    ids_ubicacion = {u["id_ubicacion"] for u in ubicaciones}
+    sububicaciones = await _listar_sububicaciones(sesion, id_empresa, ids_ubicacion)
+    db.reemplazar_sububicaciones(id_empresa, sububicaciones)
+
     return {"departamentos": len(deptos), "sucursales": len(sucursales),
-            "grupos": len(grupos), "centros": len(centros)}
+            "grupos": len(grupos), "centros": len(centros),
+            "ubicaciones": len(ubicaciones),
+            "sububicaciones": len(sububicaciones)}
+
+
+def _activo(valor) -> bool:
+    """Lee la bandera SN_ACTIVO como la lee el portal (`esActivo`): el servicio
+    la devuelve indistintamente como booleano, 1 o '1'."""
+    return valor in (True, 1, "1", "true", "True")
+
+
+async def _listar_ubicaciones(sesion, id_empresa: int) -> list[dict]:
+    """Ubicaciones de resguardo de una empresa (activas e inactivas)."""
+    idx, filas = await _query(sesion, "ActivosFijosNuevo", "listarUbicacionesAF",
+                              {"id_Empresa": id_empresa})
+    salida = []
+    for f in filas:
+        if _val(f, idx, "ID_EMPRESA") not in (id_empresa, str(id_empresa)):
+            continue
+        id_ubic = _val(f, idx, "ID_UBICACIONACTIVOFIJO")
+        if id_ubic is None:
+            continue
+        salida.append({"id_ubicacion": id_ubic,
+                       "id_sucursal": _val(f, idx, "ID_SUCURSAL"),
+                       "nb_ubicacion": _val(f, idx, "NB_UBICACION"),
+                       "activo": _activo(_val(f, idx, "SN_ACTIVO"))})
+    return salida
+
+
+async def _listar_sububicaciones(sesion, id_empresa: int,
+                                 ids_ubicacion: set) -> list[dict]:
+    """Sub-ubicaciones de una empresa, acotadas a las ubicaciones ya guardadas.
+
+    Se filtra por `ids_ubicacion` además de por empresa porque una sub-ubicación
+    huérfana —de una ubicación que no quedó en el catálogo— no se podría ofrecer
+    en ningún desplegable y solo ensuciaría la caché."""
+    idx, filas = await _query(sesion, "ActivosFijosNuevo", "listarSububicacionesAF",
+                              {"id_Empresa": id_empresa})
+    salida = []
+    for f in filas:
+        id_ubic = _val(f, idx, "ID_UBICACIONACTIVOFIJO")
+        id_sub = _val(f, idx, "ID_SUBUBICACIONACTIVOFIJO")
+        if id_ubic not in ids_ubicacion or id_sub is None:
+            continue
+        salida.append({"id_ubicacion": id_ubic, "id_sububicacion": id_sub,
+                       "nb_sububicacion": _val(f, idx, "NB_SUBUBICACION"),
+                       "activo": _activo(_val(f, idx, "SN_ACTIVO"))})
+    return salida

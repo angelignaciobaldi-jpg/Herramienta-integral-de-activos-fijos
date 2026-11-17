@@ -69,8 +69,9 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
     except Exception as exc:  # noqa: BLE001 — no crítico: se reporta y sigue
         costos_error = str(exc)
 
-    # Catálogos del alta: departamentos (empresa) + grupos/centros de costo (por
-    # sucursal). Usan el id de empresa como argumento, no la sesión.
+    # Catálogos del alta: departamentos (empresa), grupos/centros de costo (por
+    # sucursal) y ubicaciones/sub-ubicaciones de resguardo. Usan el id de empresa
+    # como argumento, no la sesión.
     cat = await catalogos_sipp.descargar_catalogos(
         sesion, id_empresa, progreso=progreso, mensaje=mensaje)
 
@@ -84,5 +85,7 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
             "departamentos": cat.get("departamentos", 0),
             "grupos": cat.get("grupos", 0),
             "centros": cat.get("centros", 0),
+            "ubicaciones": cat.get("ubicaciones", 0),
+            "sububicaciones": cat.get("sububicaciones", 0),
             "empleados": emp.get("guardados", 0),
             "costos": costos, "costos_error": costos_error}

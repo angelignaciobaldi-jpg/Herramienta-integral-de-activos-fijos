@@ -457,6 +457,31 @@ def inicializar() -> None:
                 id_sucursal   INTEGER NOT NULL,
                 nb_sucursal   TEXT,
                 PRIMARY KEY (id_empresa, id_sucursal))""")
+        # Catálogo de UBICACIONES de resguardo (módulo «Ubicaciones» del SIPP,
+        # noviembre 2026). La ubicación cuelga de empresa+SUCURSAL —el portal no
+        # ofrece ninguna hasta tener las dos— y la sub-ubicación cuelga de la
+        # ubicación. `nombre_norm` guarda el nombre como el portal lo compara
+        # (sin acentos, sin dobles espacios): es lo que permite decidir si una
+        # ubicación del Excel ya existe SIN que el SIPP conteste «ya existe una
+        # con este nombre» a mitad del alta.
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS ubicaciones_sipp (
+                id_empresa    INTEGER NOT NULL,
+                id_ubicacion  INTEGER NOT NULL,
+                id_sucursal   INTEGER,
+                nb_ubicacion  TEXT,
+                nombre_norm   TEXT,
+                activo        INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (id_empresa, id_ubicacion))""")
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS sububicaciones_sipp (
+                id_empresa      INTEGER NOT NULL,
+                id_ubicacion    INTEGER NOT NULL,
+                id_sububicacion INTEGER NOT NULL,
+                nb_sububicacion TEXT,
+                nombre_norm     TEXT,
+                activo          INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (id_empresa, id_ubicacion, id_sububicacion))""")
 
         existentes_lev = {fila["name"] for fila in con.execute("PRAGMA table_info(levantamiento)")}
         if existentes_lev and "clave_unica" not in existentes_lev:
@@ -2089,6 +2114,132 @@ def catalogo_cc_empresa(id_empresa: int) -> list[dict]:
             {"nb_grupo": g["nb_grupo"], "centros": por_grupo.get(g["id_grupo"], [])})
     return [{"sucursal": nb, "grupos": por_sucursal.get(_norm_suc(nb), [])}
             for nb in sucursales]
+
+
+def _norm_nombre(texto) -> str:
+    """Normaliza un nombre de ubicación COMO LO COMPARA EL PORTAL.
+
+    El SIPP decide que un nombre está repetido quitándole los acentos (NFD sin
+    marcas), pasándolo a minúsculas y colapsando los espacios
+    (`normalizar` en su `ActivosFijosUbicaciones.js`). Aquí se hace lo mismo
+    —en mayúsculas, que es como compara el resto de este módulo— para que «ya
+    existe» signifique lo mismo de los dos lados: si nuestra comparación fuera
+    más estricta que la suya, intentaríamos crear ubicaciones que el portal
+    rechaza por duplicadas, y el fallo aparecería a mitad de una corrida.
+
+    No se reusa `_norm_suc` a propósito: ese ya está escrito en las filas
+    cacheadas (`sucursal_norm`) y cambiarlo dejaría de casar con lo guardado
+    hasta la siguiente descarga de catálogos.
+    """
+    return " ".join(_sin_acentos(str(texto or "")).upper().split())
+
+
+def reemplazar_ubicaciones(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza las ubicaciones cacheadas de una empresa. Cada dict:
+    id_ubicacion, nb_ubicacion, id_sucursal, activo (bool)."""
+    with _conectar() as con:
+        con.execute("DELETE FROM ubicaciones_sipp WHERE id_empresa = ?", (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO ubicaciones_sipp "
+            "(id_empresa, id_ubicacion, id_sucursal, nb_ubicacion, nombre_norm, "
+            "activo) VALUES (?, ?, ?, ?, ?, ?)",
+            [(id_empresa, r["id_ubicacion"], r.get("id_sucursal"),
+              r.get("nb_ubicacion"), _norm_nombre(r.get("nb_ubicacion")),
+              1 if r.get("activo", True) else 0)
+             for r in registros if r.get("id_ubicacion") is not None])
+    return len(registros)
+
+
+def reemplazar_sububicaciones(id_empresa: int, registros: list[dict]) -> int:
+    """Reemplaza las sub-ubicaciones cacheadas de una empresa. Cada dict:
+    id_ubicacion, id_sububicacion, nb_sububicacion, activo (bool)."""
+    with _conectar() as con:
+        con.execute("DELETE FROM sububicaciones_sipp WHERE id_empresa = ?",
+                    (id_empresa,))
+        con.executemany(
+            "INSERT OR REPLACE INTO sububicaciones_sipp "
+            "(id_empresa, id_ubicacion, id_sububicacion, nb_sububicacion, "
+            "nombre_norm, activo) VALUES (?, ?, ?, ?, ?, ?)",
+            [(id_empresa, r["id_ubicacion"], r["id_sububicacion"],
+              r.get("nb_sububicacion"), _norm_nombre(r.get("nb_sububicacion")),
+              1 if r.get("activo", True) else 0)
+             for r in registros
+             if r.get("id_ubicacion") is not None
+             and r.get("id_sububicacion") is not None])
+    return len(registros)
+
+
+def catalogo_ubicaciones_empresa(id_empresa: int) -> list[dict]:
+    """Árbol sucursal -> ubicaciones -> sub-ubicaciones de una empresa.
+
+    [{"sucursal": nb, "ubicaciones": [{"nb_ubicacion": nb,
+                                       "sububicaciones": [nb, ...]}, ...]}, ...]
+
+    Para la plantilla de carga masiva, igual que `catalogo_cc_empresa`: un árbol
+    completo en tres consultas en vez de una por fila.
+
+    Solo salen las ACTIVAS, que son las únicas que el portal ofrece en el alta
+    (`esActivoResguardo`). Las inactivas se quedan en la tabla a propósito: hacen
+    falta para saber que un nombre YA está tomado, porque el SIPP cuenta las
+    inactivas al rechazar duplicados.
+    """
+    with _conectar() as con:
+        sucursales = con.execute(
+            "SELECT id_sucursal, nb_sucursal FROM sucursales_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_sucursal,'') <> '' "
+            "ORDER BY nb_sucursal", (id_empresa,)).fetchall()
+        ubicaciones = con.execute(
+            "SELECT id_ubicacion, id_sucursal, nb_ubicacion FROM ubicaciones_sipp "
+            "WHERE id_empresa = ? AND activo = 1 AND IFNULL(nb_ubicacion,'') <> '' "
+            "ORDER BY nb_ubicacion", (id_empresa,)).fetchall()
+        subs = con.execute(
+            "SELECT id_ubicacion, nb_sububicacion FROM sububicaciones_sipp "
+            "WHERE id_empresa = ? AND activo = 1 "
+            "AND IFNULL(nb_sububicacion,'') <> '' "
+            "ORDER BY nb_sububicacion", (id_empresa,)).fetchall()
+
+    por_ubicacion: dict = {}
+    for s in subs:
+        por_ubicacion.setdefault(s["id_ubicacion"], []).append(s["nb_sububicacion"])
+    por_sucursal: dict = {}
+    for u in ubicaciones:
+        por_sucursal.setdefault(u["id_sucursal"], []).append(
+            {"nb_ubicacion": u["nb_ubicacion"],
+             "sububicaciones": por_ubicacion.get(u["id_ubicacion"], [])})
+    return [{"sucursal": f["nb_sucursal"],
+             "ubicaciones": por_sucursal.get(f["id_sucursal"], [])}
+            for f in sucursales]
+
+
+def ubicacion_por_nombre(id_empresa: int, id_sucursal, nombre: str) -> dict | None:
+    """Busca una ubicación por nombre dentro de empresa+sucursal, comparando como
+    el portal. Devuelve {id_ubicacion, nb_ubicacion, activo} o None.
+
+    Devuelve también las INACTIVAS, con su bandera: no es lo mismo «no existe»
+    (hay que crearla) que «existe pero está apagada» (crearla fallaría por
+    duplicada y lo que toca es reactivarla o avisar)."""
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT id_ubicacion, nb_ubicacion, activo FROM ubicaciones_sipp "
+            "WHERE id_empresa = ? AND id_sucursal = ? AND nombre_norm = ?",
+            (id_empresa, id_sucursal, _norm_nombre(nombre))).fetchone()
+    return ({"id_ubicacion": fila["id_ubicacion"],
+             "nb_ubicacion": fila["nb_ubicacion"],
+             "activo": bool(fila["activo"])} if fila else None)
+
+
+def sububicacion_por_nombre(id_empresa: int, id_ubicacion,
+                            nombre: str) -> dict | None:
+    """Igual que `ubicacion_por_nombre`, para una sub-ubicación dentro de su
+    ubicación."""
+    with _conectar() as con:
+        fila = con.execute(
+            "SELECT id_sububicacion, nb_sububicacion, activo FROM sububicaciones_sipp "
+            "WHERE id_empresa = ? AND id_ubicacion = ? AND nombre_norm = ?",
+            (id_empresa, id_ubicacion, _norm_nombre(nombre))).fetchone()
+    return ({"id_sububicacion": fila["id_sububicacion"],
+             "nb_sububicacion": fila["nb_sububicacion"],
+             "activo": bool(fila["activo"])} if fila else None)
 
 
 def empresas_con_catalogo() -> list[int]:
