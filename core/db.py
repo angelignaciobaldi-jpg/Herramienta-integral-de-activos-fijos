@@ -1974,6 +1974,21 @@ def listar_sucursales_sipp(id_empresa: int) -> list[str]:
     return [f["nb_sucursal"] for f in filas]
 
 
+def ids_sucursales_sipp(id_empresa: int) -> dict:
+    """{nombre normalizado de sucursal: id_sucursal} de una empresa.
+
+    El alta de ubicaciones necesita el ID de la sucursal y el levantamiento
+    solo guarda su NOMBRE. Se normaliza igual que las ubicaciones para que
+    «C. PLANTA 1» case con «C. Planta 1».
+    """
+    with _conectar() as con:
+        filas = con.execute(
+            "SELECT id_sucursal, nb_sucursal FROM sucursales_sipp "
+            "WHERE id_empresa = ? AND IFNULL(nb_sucursal,'') <> ''",
+            (id_empresa,)).fetchall()
+    return {_norm_nombre(f["nb_sucursal"]): f["id_sucursal"] for f in filas}
+
+
 def reemplazar_departamentos(id_empresa: int, registros: list[dict]) -> int:
     """Reemplaza los departamentos cacheados de una empresa. Cada dict:
     id_departamento, nb_departamento."""
