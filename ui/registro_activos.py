@@ -3658,6 +3658,18 @@ class SeccionRegistroActivos:
                     fila["observacion"] += (
                         f" · {', '.join(sipp.ultimos_en_descripcion)} en la "
                         f"Descripción (el insumo no tiene esos campos)")
+                # Un combo que el portal dejó vacío: el dato estaba en el
+                # levantamiento y NO quedó en el SIPP. Se nombra por su rótulo,
+                # no por su ng-model, que al usuario no le dice nada.
+                if sipp.ultimos_sin_aplicar:
+                    rotulos = {c.ng_model: c.etiqueta
+                               for c in campos_de_tipo(r.id_tipo_activo)
+                               if c.ng_model}
+                    sueltos = ", ".join(
+                        f"{rotulos.get(ng, ng)} («{val}»)"
+                        for ng, val in sipp.ultimos_sin_aplicar)
+                    fila["observacion"] += (
+                        f" · sin aplicar en el SIPP: {sueltos}")
                 # Una foto que el portal no admitió (pesa de más, formato raro)
                 # se perdía en silencio: el alta salía «correcta» sin imagen.
                 if sipp.ultimo_aviso_fotos:
