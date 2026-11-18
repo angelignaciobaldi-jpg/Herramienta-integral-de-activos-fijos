@@ -42,6 +42,17 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
     ins = await insumos.descargar_catalogo(
         sesion, progreso=progreso, solo_activo_fijo=False)
 
+    # Catálogos del alta: departamentos (empresa), grupos/centros de costo (por
+    # sucursal) y ubicaciones/sub-ubicaciones de resguardo. Usan el id de empresa
+    # como argumento, no la sesión.
+    #
+    # Van ANTES que los activos: el listado de activos trae la ubicación de
+    # catálogo como ID y su nombre se resuelve contra esta caché. Al revés, la
+    # primera descarga de una empresa guardaría los activos sin nombre de
+    # ubicación y la comparación los marcaría como diferencia.
+    cat = await catalogos_sipp.descargar_catalogos(
+        sesion, id_empresa, progreso=progreso, mensaje=mensaje)
+
     # Activos de la empresa (para QR y para la búsqueda del levantamiento).
     if mensaje:
         mensaje("Descargando activos…")
@@ -68,12 +79,6 @@ async def actualizar_sipp(sesion, id_empresa: int, empresa_nombre: str,
             costos_error = "la API no está configurada"
     except Exception as exc:  # noqa: BLE001 — no crítico: se reporta y sigue
         costos_error = str(exc)
-
-    # Catálogos del alta: departamentos (empresa), grupos/centros de costo (por
-    # sucursal) y ubicaciones/sub-ubicaciones de resguardo. Usan el id de empresa
-    # como argumento, no la sesión.
-    cat = await catalogos_sipp.descargar_catalogos(
-        sesion, id_empresa, progreso=progreso, mensaje=mensaje)
 
     # Empleados: catálogo global (una sola descarga).
     if mensaje:

@@ -2257,6 +2257,29 @@ def sububicacion_por_nombre(id_empresa: int, id_ubicacion,
              "activo": bool(fila["activo"])} if fila else None)
 
 
+def mapa_ubicaciones(id_empresa: int) -> tuple[dict, dict]:
+    """({id_ubicacion: nombre}, {(id_ubicacion, id_sububicacion): nombre}).
+
+    El listado de activos del portal trae ID_UBICACION e ID_SUBUBICACION y NO
+    sus nombres, así que hay que resolverlos contra el catálogo cacheado. Se
+    devuelve el mapa COMPLETO de la empresa, no un dato suelto: el listado
+    tiene decenas de miles de filas y una consulta por activo no es viable.
+
+    Incluye las INACTIVAS: un activo puede seguir apuntando a una ubicación
+    que se apagó, y mostrar su nombre es más útil que un hueco.
+    """
+    with _conectar() as con:
+        ubicaciones = {f["id_ubicacion"]: f["nb_ubicacion"] for f in con.execute(
+            "SELECT id_ubicacion, nb_ubicacion FROM ubicaciones_sipp "
+            "WHERE id_empresa = ?", (id_empresa,))}
+        subs = {(f["id_ubicacion"], f["id_sububicacion"]): f["nb_sububicacion"]
+                for f in con.execute(
+                    "SELECT id_ubicacion, id_sububicacion, nb_sububicacion "
+                    "FROM sububicaciones_sipp WHERE id_empresa = ?",
+                    (id_empresa,))}
+    return ubicaciones, subs
+
+
 def empresas_con_catalogo() -> list[int]:
     """Ids de empresa que ya tienen catálogo de centros de costo descargado.
 
