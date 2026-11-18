@@ -496,6 +496,10 @@ class SesionSipp:
         # Características del último alta que el insumo no tenía y quedaron en la
         # Descripción (ver `_detalles_a_descripcion`), para que el reporte lo diga.
         self.ultimos_en_descripcion: list = []
+        # Combos que el alta pidió y el portal dejó vacíos. Se expone igual que
+        # `ultimos_en_descripcion` porque `alta_activo` no devuelve detalle y,
+        # sin esto, un campo que no entró no deja rastro en ninguna parte.
+        self.ultimos_sin_aplicar: list = []
         self.ultimo_aviso_fotos: str = ""
         # Por qué NO se generó el centro de costo cuando se pidió ("" = se
         # generó o no se pidió). Lo lee el reporte de la corrida.
@@ -1393,6 +1397,7 @@ class SesionSipp:
             await self.seleccionar_empleado(empleado_id, empleado_nombre)
             await page.wait_for_timeout(500)
 
+        self.ultimos_sin_aplicar = []
         for ng_model, valor, control in campos:
             if not valor or not ng_model:
                 continue
@@ -1415,18 +1420,36 @@ class SesionSipp:
                     # quedaba vacío y el campo se perdía en silencio. El departamento
                     # NO cuelga de nadie (no tiene ng-disabled), así que no se espera:
                     # ahí un valor inexistente costaría el timeout completo por activo.
+                    # Las dos de UBICACIÓN cuelgan igual que esa cadena: la
+                    # principal no se puebla hasta tener sucursal de resguardo y
+                    # la sub se filtra por la principal. Sin esperarlas, el combo
+                    # todavía no tenía su opción y el activo se daba de alta sin
+                    # sub-ubicación pese a traerla el levantamiento.
                     dependiente = ("Sucursal" in ng_model
-                                   or "CentroCosto" in ng_model)
+                                   or "CentroCosto" in ng_model
+                                   or "Ubicacion" in ng_model)
                     try:
                         await self.set_combo(ng_model, valor, esperar=dependiente)
                     except ErrorSipp:
                         # Algunos "select" del portal son en realidad campos de texto
                         # con búsqueda; se intenta escribirlos.
                         await self.set_input(ng_model, valor)
-                    if "GrupoCentroCosto" in ng_model or "Empresa" in ng_model:
+                    if ("GrupoCentroCosto" in ng_model or "Empresa" in ng_model
+                            or ng_model.endswith("id_Ubicacion")):
                         # Deja que la cascada traiga las opciones dependientes
-                        # (centros del grupo / sucursales de la empresa).
+                        # (centros del grupo / sucursales de la empresa). Tras la
+                        # ubicación principal hace falta por otro motivo: el
+                        # portal LIMPIA la sub al cambiarla
+                        # (ng-change="limpiarSubUbicacionResguardo"), así que
+                        # escribir la sub antes de que eso corra la borraría.
                         await page.wait_for_timeout(1200)
+                    # Un combo que se quedó en su placeholder NO recibió lo que
+                    # se le pidió. Hay que mirarlo: el respaldo `set_input` no
+                    # hace nada sobre un <select> pero tampoco falla, así que el
+                    # campo se perdía sin que nadie se enterara.
+                    if (await self._valor_actual(ng_model, control)).strip() in (
+                            "", "Seleccionar"):
+                        self.ultimos_sin_aplicar.append((ng_model, valor))
                 elif control == "date":
                     await self.set_fecha(ng_model, valor)
                 else:
@@ -1796,15 +1819,26 @@ class SesionSipp:
             antes = await self._valor_actual(ng_model, control)
             try:
                 if control == "select":
-                    # Cascada AJAX: el grupo cuelga de la sucursal y el centro del
-                    # grupo, así que en ambos hay que esperar a que sus opciones
-                    # carguen; si no, el combo queda vacío y el cambio se pierde.
-                    cascada = "Sucursal" in ng_model or "CentroCosto" in ng_model
+                    # Cascada: el combo cuelga de otro de arriba y sus opciones no
+                    # existen hasta que aquel está puesto, así que hay que esperar
+                    # a que carguen; si no, el combo queda vacío y el cambio se
+                    # pierde. El grupo cuelga de la sucursal y el centro del grupo
+                    # (AJAX), y las dos de UBICACIÓN cuelgan igual: la principal no
+                    # se puebla hasta tener sucursal de resguardo y la sub se filtra
+                    # por la principal (filtro de Angular, no viaje al servidor,
+                    # pero igual de asíncrono).
+                    cascada = ("Sucursal" in ng_model or "CentroCosto" in ng_model
+                               or "Ubicacion" in ng_model)
                     try:
                         await self.set_combo(ng_model, valor, esperar=cascada)
                     except ErrorSipp:
                         await self.set_input(ng_model, valor)
-                    if "GrupoCentroCosto" in ng_model:
+                    if ("GrupoCentroCosto" in ng_model
+                            or ng_model.endswith("id_Ubicacion")):
+                        # Tras elegir la ubicación principal el portal LIMPIA la
+                        # sub (ng-change="limpiarSubUbicacionResguardo"). Si se
+                        # escribiera la sub antes de que eso corra, se borraría
+                        # sola y el activo quedaría sin sub-ubicación.
                         await page.wait_for_timeout(1200)
                 elif control == "date":
                     await self.set_fecha(ng_model, valor)
@@ -1822,6 +1856,15 @@ class SesionSipp:
             despues = await self._valor_actual(ng_model, control)
             if despues.strip() != antes.strip():
                 cambios.append((ng_model, antes.strip(), despues.strip()))
+            elif control == "select" and despues.strip() in ("", "Seleccionar"):
+                # El combo se quedó en su placeholder: lo pedido NO entró. Sin
+                # esto el fallo era MUDO —`set_combo` falla, el respaldo
+                # `set_input` no hace nada sobre un <select> y nadie se entera—,
+                # y así se dio de alta un activo sin su sub-ubicación pese a
+                # traerla el levantamiento.
+                no_aplicados.append(
+                    (ng_model, f"El combo se quedó vacío: no se encontró la "
+                               f"opción «{valor}»."))
         return cambios, no_aplicados
 
     # --------------------------------------------------------- utilidades

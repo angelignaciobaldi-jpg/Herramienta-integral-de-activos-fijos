@@ -251,5 +251,10 @@ async def actualizar_info_sipp(app, id_empresa, empresa: str, al_terminar=None) 
             f"SIPP actualizado para «{empresa}»: {resultado.get('insumos', 0)} insumo(s), "
             f"{resultado.get('activos', 0)} activo(s), "
             f"{resultado.get('centros', 0)} centro(s) de costo, "
+            # Se dice el número de ubicaciones aunque sea 0: es la única señal de
+            # que el catálogo nuevo llegó. Si el servicio del portal cambiara de
+            # nombre, devolvería vacío sin error y la plantilla saldría sin
+            # desplegable, que es un fallo mucho más difícil de atribuir.
+            f"{resultado.get('ubicaciones', 0)} ubicación(es), "
             f"{resultado.get('empleados', 0)} empleado(s), "
             f"{resultado.get('costos', 0)} costo(s)." + fallo, VERDE, duracion=8000)

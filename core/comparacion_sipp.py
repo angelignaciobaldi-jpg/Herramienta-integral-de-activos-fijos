@@ -58,6 +58,7 @@ class CampoComparable:
     columna: str = ""       # atributo del registro ("" si no aplica)
     control: str = "text"   # text | number | date | select (normalización)
     ng_model: str = ""      # filtrosAgregar.* para empujar Excel→SIPP ("" = no)
+    sin_acentos: bool = False   # comparar ignorando acentos (ver más abajo)
     empujable: bool = True  # False: el portal no deja cambiarlo desde la edición
     modal: str = ""         # se empuja por un MODAL, no escribiendo ("insumo")
     detalle: bool = False   # característica del insumo (camposDetalle), no un
@@ -118,7 +119,23 @@ CAMPOS: list[CampoComparable] = [
     CampoComparable("id_Departamento", "Departamento", "departamento",
                     clave_datos="id_Departamento", columna="departamento",
                     control="select", ng_model="filtrosAgregar.id_DepartamentoResguardo"),
-    CampoComparable("de_Ubicacion", "Ubicación", "ubicacion",
+    # Las tres de ubicación, en el mismo orden que el portal las pide. La
+    # principal va ANTES que la sub porque al empujar Excel→SIPP se aplican en
+    # este orden y el portal limpia la sub al cambiar la principal.
+    #
+    # Su lado SIPP llega por el listado del PORTAL («Actualizar información del
+    # SIPP»), no por la API, que no trae ubicación: hasta entonces se comparan
+    # contra vacío, igual que situación, costo o centros de costo.
+    CampoComparable("id_Ubicacion", "Ubicación principal", "ubicacion_principal",
+                    clave_datos="id_Ubicacion", control="select",
+                    sin_acentos=True,
+                    ng_model="filtrosAgregar.id_Ubicacion"),
+    CampoComparable("id_SubUbicacion", "Sub ubicación", "sububicacion",
+                    clave_datos="id_SubUbicacion", control="select",
+                    sin_acentos=True,
+                    ng_model="filtrosAgregar.id_SubUbicacion"),
+    # El texto libre de siempre, que el portal renombró al estrenar el catálogo.
+    CampoComparable("de_Ubicacion", "Detallado de ubicación", "ubicacion",
                     clave_datos="de_Ubicacion",
                     ng_model="filtrosAgregar.de_Ubicacion"),
     # No es una limitación del RPA: el formulario de EDICIÓN del portal no deja
@@ -238,10 +255,15 @@ def _texto(valor) -> str:
     return "" if valor is None else str(valor).strip()
 
 
-def _clave_comparar(valor, control: str) -> str:
+def _clave_comparar(valor, control: str, sin_acentos: bool = False) -> str:
     """Normaliza un valor para DECIDIR si dos lados son iguales (no para mostrar).
     Costos como número (4500 == 4,500.00), fechas por su parte AAAA-MM-DD/DD-MM,
-    texto sin distinguir mayúsculas ni espacios repetidos."""
+    texto sin distinguir mayúsculas ni espacios repetidos.
+
+    `sin_acentos` además ignora los acentos, y no es cosmético: el portal
+    considera el MISMO nombre dos ubicaciones que solo difieren en eso (su
+    `normalizar` hace NFD + minúsculas antes de rechazar duplicados), así que
+    marcarlas como diferencia invitaría a un empuje que no cambia nada."""
     s = _texto(valor)
     if not s:
         return ""
@@ -252,7 +274,11 @@ def _clave_comparar(valor, control: str) -> str:
             pass
     if control == "date":
         return s[:10]
-    return " ".join(s.upper().split())
+    s = " ".join(s.upper().split())
+    if sin_acentos:
+        s = unicodedata.normalize("NFD", s)
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s
 
 
 def _mostrar(valor, control: str) -> str:
@@ -281,7 +307,8 @@ def comparar(registro) -> list[Diferencia]:
     for c in campos:
         v_sipp = _valor_detalle(info, c) if c.detalle else info.get(c.clave_sipp)
         v_excel = valor_excel(registro, c)
-        difiere = _clave_comparar(v_sipp, c.control) != _clave_comparar(v_excel, c.control)
+        difiere = (_clave_comparar(v_sipp, c.control, c.sin_acentos)
+                   != _clave_comparar(v_excel, c.control, c.sin_acentos))
         resultado.append(Diferencia(
             campo=c,
             sipp_crudo=_texto(v_sipp),

@@ -457,6 +457,11 @@ class SeccionRegistroActivos:
                                        "o un Excel"),
                 boton_secundario("Buscar en SIPP", ft.Icons.SEARCH, self._buscar),
                 boton_herramienta(
+                    "Cargar ubicaciones", ft.Icons.ADD_LOCATION_ALT,
+                    self._cargar_ubicaciones,
+                    tooltip="Registra en el SIPP las ubicaciones y sub-ubicaciones\n"
+                            "de la plantilla que aún no están en su catálogo"),
+                boton_herramienta(
                     "Traer detalles del SIPP", ft.Icons.FACT_CHECK,
                     self._traer_detalles,
                     tooltip="Marca, Modelo, RAM… de los activos dados de alta, "
@@ -2646,6 +2651,17 @@ class SeccionRegistroActivos:
             # No quedan como «no dado de alta»: eso invitaría al RPA a duplicarlos.
             # Se quedan pendientes, que es lo que realmente son.
             extras.append(f"{sin_resolver} sin resolver (siguen pendientes)")
+        # Ubicaciones de catálogo que el SIPP todavía no tiene. Se revisa aquí
+        # —contra la caché, sin red— porque es el momento en que el usuario
+        # está viendo qué le falta para dar de alta, y un activo no puede
+        # seleccionar una ubicación que no existe en el portal.
+        faltan_ubic = sum(p.total_altas
+                          for _i, _n, p in self._ubicaciones_pendientes(registros))
+        if faltan_ubic:
+            extras.append(f"{faltan_ubic} ubicación(es)/sub-ubicación(es) de la "
+                          f"plantilla NO están en el catálogo del SIPP: "
+                          f"regístralas con «Cargar ubicaciones» antes de dar "
+                          f"de alta")
         if extras:
             msg += " · " + " · ".join(extras)
         self.app.avisar(msg, VERDE if not extras else NARANJA,
@@ -3642,6 +3658,18 @@ class SeccionRegistroActivos:
                     fila["observacion"] += (
                         f" · {', '.join(sipp.ultimos_en_descripcion)} en la "
                         f"Descripción (el insumo no tiene esos campos)")
+                # Un combo que el portal dejó vacío: el dato estaba en el
+                # levantamiento y NO quedó en el SIPP. Se nombra por su rótulo,
+                # no por su ng-model, que al usuario no le dice nada.
+                if sipp.ultimos_sin_aplicar:
+                    rotulos = {c.ng_model: c.etiqueta
+                               for c in campos_de_tipo(r.id_tipo_activo)
+                               if c.ng_model}
+                    sueltos = ", ".join(
+                        f"{rotulos.get(ng, ng)} («{val}»)"
+                        for ng, val in sipp.ultimos_sin_aplicar)
+                    fila["observacion"] += (
+                        f" · sin aplicar en el SIPP: {sueltos}")
                 # Una foto que el portal no admitió (pesa de más, formato raro)
                 # se perdía en silencio: el alta salía «correcta» sin imagen.
                 if sipp.ultimo_aviso_fotos:
@@ -4901,6 +4929,202 @@ class SeccionRegistroActivos:
                 "etiqueta repetida; quedan pendientes.", NARANJA)
             return quedan
         return pendientes
+
+    # ------------------------------- RPA: alta de ubicaciones de catálogo
+    @staticmethod
+    def _filas_ubicacion(registros) -> dict:
+        """{(id_empresa, nombre): [(sucursal, ubicación, sub-ubicación)]}.
+
+        Lo que la plantilla capturó en las dos columnas de catálogo, agrupado
+        por empresa porque la ubicación del SIPP cuelga de empresa+sucursal.
+        El texto libre («Detallado de ubicación») no entra: no es catálogo y no
+        se registra en ninguna parte.
+        """
+        por_empresa: dict = {}
+        for r in registros:
+            idemp = ID_POR_EMPRESA.get((r.empresa or "").strip())
+            if idemp is None:
+                continue
+            datos = r.datos() or {}
+            ubic = str(datos.get("id_Ubicacion") or "").strip()
+            sub = str(datos.get("id_SubUbicacion") or "").strip()
+            if not ubic and not sub:
+                continue
+            por_empresa.setdefault(
+                (idemp, (r.empresa or "").strip()), []).append(
+                    ((r.sucursal or "").strip(), ubic, sub))
+        return por_empresa
+
+    def _ubicaciones_pendientes(self, registros) -> list:
+        """[(id_empresa, nombre, Pendientes)] de lo que el SIPP no tiene aún."""
+        from core import ubicaciones_sipp
+
+        salida = []
+        for clave, filas in sorted(self._filas_ubicacion(registros).items(),
+                                   key=lambda kv: kv[0][1]):
+            pend = ubicaciones_sipp.faltantes(clave[0], filas)
+            if pend.ubicaciones or pend.problemas:
+                salida.append((clave[0], clave[1], pend))
+        return salida
+
+    async def _cargar_ubicaciones(self, _e=None) -> None:
+        """Registra en el SIPP las ubicaciones de la plantilla que no existen.
+
+        Va en un botón APARTE del alta de activos a propósito: son dos permisos
+        distintos —registrar un activo no autoriza a crear catálogo— y el área
+        quiere ver qué nombres se van a dar de alta antes de que existan para
+        toda la empresa.
+
+        Antes de crear relee el catálogo del portal: otra persona puede haberlas
+        registrado a mano desde el SIPP, y el duplicado lo rechaza el portal.
+        """
+        from core import ubicaciones_sipp
+
+        creds = credenciales.cargar()
+        if not creds or not creds[0]:
+            self.app.avisar("Configura primero las credenciales del SIPP "
+                            "(botón ⚙).", ROJO)
+            return
+        usuario, contrasena = creds
+
+        registros = db.listar_levantamiento()
+        filas_por_empresa = self._filas_ubicacion(registros)
+        pendientes = self._ubicaciones_pendientes(registros)
+        if not pendientes:
+            self.app.avisar(
+                "No hay ubicaciones de catálogo capturadas en el levantamiento, "
+                "o ya están todas en el SIPP.", VERDE)
+            return
+        total = sum(p.total_altas for _i, _n, p in pendientes)
+        problemas = [f"{nombre}: {p}"
+                     for _i, nombre, pend in pendientes for p in pend.problemas]
+        if not total:
+            # Todo lo capturado era irregistrable (sucursal desconocida, nombre
+            # fuera de los límites del portal, ubicación inactiva): no hay nada
+            # que mandar, pero hay que decir por qué.
+            self.app.avisar("No hay nada que registrar · " + " · ".join(problemas),
+                            NARANJA, duracion=12000)
+            return
+
+        # Vista previa. Se dice la SUCURSAL de cada una porque el nombre de una
+        # ubicación solo es único dentro de su sucursal: dos «Almacén» en
+        # sucursales distintas son dos ubicaciones legítimas.
+        lineas = []
+        for _idemp, nombre, pend in pendientes:
+            for u in pend.ubicaciones:
+                estado = "nueva" if u.crear_ubicacion else "ya existe"
+                subs = (f" + {len(u.sububicaciones)} sub-ubicación(es)"
+                        if u.sububicaciones else "")
+                lineas.append(f"• {nombre} / {u.sucursal}: «{u.nombre}» "
+                              f"({estado}){subs}")
+        decision: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def responder(valor: bool) -> None:
+            # Salida temprana obligatoria: `cerrar()` dispara `al_cerrar`, que
+            # vuelve a entrar aquí.
+            if decision.done():
+                return
+            decision.set_result(valor)
+            confirmacion.cerrar()
+
+        cuerpo = [
+            ft.Text(f"Se darán de alta {total} registro(s) en el catálogo de "
+                    f"ubicaciones del SIPP:", size=13,
+                    color=ft.Colors.ON_SURFACE, no_wrap=False),
+            ft.Column([ft.Text(l, size=12, color=GRIS, no_wrap=False)
+                       for l in lineas[:14]], spacing=2, tight=True),
+        ]
+        if len(lineas) > 14:
+            cuerpo.append(ft.Text(f"…y {len(lineas) - 14} ubicación(es) más.",
+                                  size=12, color=GRIS))
+        cuerpo.append(ft.Text(
+            "Se crean SIN responsable (el portal lo deja opcional) y activas. "
+            "Quedan disponibles para toda la empresa, no solo para esta carga.",
+            size=11, color=GRIS, no_wrap=False))
+        if problemas:
+            cuerpo.append(ft.Text("No se podrán registrar:", size=12,
+                                  color=NARANJA,
+                                  weight=ft.FontWeight.W_600))
+            cuerpo.extend(ft.Text(f"• {p}", size=11, color=NARANJA,
+                                  no_wrap=False) for p in problemas[:6])
+        confirmacion = Modal(self.page, "Cargar ubicaciones en el SIPP",
+                             ancho=620, al_cerrar=lambda: responder(False))
+        confirmacion.cuerpo.controls = cuerpo
+        confirmacion.set_acciones([
+            boton_herramienta("Cancelar", on_click=lambda _e: responder(False)),
+            boton_primario("Registrar en el SIPP", ft.Icons.ADD_LOCATION_ALT,
+                           lambda _e: responder(True)),
+        ])
+        confirmacion.abrir()
+        if not await decision:
+            return
+
+        ui_loop = asyncio.get_running_loop()
+        txt = ft.Text("Conectando al SIPP…", size=13)
+        barra = ft.ProgressBar()
+        modal = Modal(self.page, "Cargando ubicaciones en el SIPP", ancho=460)
+        modal.cuerpo.controls = [txt, barra]
+        modal.abrir()
+
+        def avance(texto: str, valor=None) -> None:
+            def aplicar() -> None:
+                txt.value = texto
+                barra.value = valor
+                modal.refrescar()
+            ui_loop.call_soon_threadsafe(aplicar)
+
+        resumen = {"ubicaciones": 0, "sububicaciones": 0}
+        errores: list = []
+
+        async def flujo() -> None:
+            async with SesionSipp(headless=True) as sipp:
+                await sipp.login(usuario, contrasena)
+                for idemp, nombre, _pend in pendientes:
+                    avance(f"{nombre}: revisando el catálogo…", None)
+                    try:
+                        await ubicaciones_sipp.refrescar_cache(sipp, idemp)
+                        # Se recalcula contra el catálogo RECIÉN leído, no
+                        # contra la vista previa: lo que ya exista en el portal
+                        # no se vuelve a intentar.
+                        recalc = ubicaciones_sipp.faltantes(
+                            idemp, filas_por_empresa[(idemp, nombre)])
+                        if not recalc.ubicaciones:
+                            continue
+
+                        def progreso(hechos, total_emp, nombre=nombre):
+                            avance(f"{nombre}: {hechos}/{total_emp}",
+                                   hechos / total_emp if total_emp else None)
+
+                        res = await ubicaciones_sipp.crear(
+                            sipp, idemp, recalc.ubicaciones, progreso=progreso,
+                            mensaje=lambda m, nombre=nombre: avance(
+                                f"{nombre}: {m}", None))
+                        resumen["ubicaciones"] += res["ubicaciones"]
+                        resumen["sububicaciones"] += res["sububicaciones"]
+                        errores.extend(f"{nombre}: {e}" for e in res["errores"])
+                    except Exception as exc:  # noqa: BLE001 — se reporta y sigue
+                        errores.append(f"{nombre}: {mensaje_amigable(exc)}")
+
+        bucle = BucleRpa()
+        try:
+            await asyncio.wrap_future(bucle.enviar(flujo()))
+        except Exception as exc:  # noqa: BLE001 — se reporta al usuario
+            errores.append(mensaje_amigable(exc))
+        finally:
+            bucle.cerrar()
+            modal.cerrar()
+
+        creadas = resumen["ubicaciones"], resumen["sububicaciones"]
+        fallo = (" · " + " · ".join(errores[:4])) if errores else ""
+        if not any(creadas):
+            self.app.avisar("No se registró ninguna ubicación." + fallo, ROJO,
+                            duracion=12000)
+            return
+        self.app.avisar(
+            f"Registradas en el SIPP {creadas[0]} ubicación(es) y {creadas[1]} "
+            f"sub-ubicación(es). Ya se pueden dar de alta los activos con "
+            f"ellas." + fallo,
+            VERDE if not errores else NARANJA, duracion=9000 if errores else 7000)
 
     async def _traer_detalles(self, _e=None) -> None:
         """Baja del SIPP los «Detalles Insumo» de los activos dados de alta.
