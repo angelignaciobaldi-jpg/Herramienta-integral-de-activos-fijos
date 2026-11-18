@@ -136,8 +136,23 @@ CAMPOS_COMUNES: list[CampoActivo] = [
                 "Centro de costo", "select", grupo="Resguardo"),
     CampoActivo("id_Departamento", "filtrosAgregar.id_DepartamentoResguardo",
                 "Departamento", "select", grupo="Resguardo"),
-    CampoActivo("de_Ubicacion", "filtrosAgregar.de_Ubicacion", "Ubicación", "text",
-                grupo="Resguardo"),
+    # Ubicación de CATÁLOGO (módulo nuevo del SIPP). Van en este orden porque
+    # cuelgan en cascada: el portal deshabilita «Ubicación principal» hasta que
+    # hay sucursal de resguardo y «Sub ubicación» hasta que hay ubicación, y al
+    # cambiar la principal LIMPIA la sub (limpiarSubUbicacionResguardo), así que
+    # escribir la sub antes se perdería sin dejar rastro.
+    #
+    # No llevan `opciones`: el catálogo vive en el SIPP (caché
+    # `ubicaciones_sipp`), igual que sucursal o centro de costo, y el RPA elige
+    # la opción por su NOMBRE en el combo del portal.
+    CampoActivo("id_Ubicacion", "filtrosAgregar.id_Ubicacion",
+                "Ubicación principal", "select", grupo="Resguardo"),
+    CampoActivo("id_SubUbicacion", "filtrosAgregar.id_SubUbicacion",
+                "Sub ubicación", "select", grupo="Resguardo"),
+    # El texto libre de siempre, que el portal renombró al estrenar el catálogo:
+    # ya no es «la» ubicación, sino el detalle fino dentro de la sub-ubicación.
+    CampoActivo("de_Ubicacion", "filtrosAgregar.de_Ubicacion",
+                "Detallado de ubicación", "text", grupo="Resguardo"),
     CampoActivo("FH_ASIGNACION", "dt_FH_ASIGNACION", "Fecha de asignación", "date",
                 grupo="Resguardo"),
     # Características que el inventario en Excel trae para CUALQUIER activo. En el

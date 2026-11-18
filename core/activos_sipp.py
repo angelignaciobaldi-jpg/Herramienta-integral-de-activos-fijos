@@ -293,7 +293,13 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
     i_etq = _elegir_columna(cols, "DE_ETIQUETA")
     i_ins = _elegir_columna(cols, "NB_ACTIVOFIJO", "DE_DESCRIPCION")
     i_ser = _elegir_columna(cols, "DE_SERIEACTIVO")
+    # OJO: NB_UBICACION es el TEXTO LIBRE («Detallado de ubicación» en el
+    # portal), no el catálogo nuevo. La ubicación de catálogo viaja solo como
+    # ID, y su nombre hay que resolverlo contra la caché del catálogo.
     i_ubi = _elegir_columna(cols, "NB_UBICACION")
+    i_idubi = _elegir_columna(cols, "ID_UBICACION")
+    i_idsub = _elegir_columna(cols, "ID_SUBUBICACION")
+    i_empres = _elegir_columna(cols, "ID_EMPRESARESGUARDO", "ID_EMPRESA")
     i_emp = _elegir_columna(cols, "NB_EMPLEADORESGUARDO")
     i_suc = _elegir_columna(cols, "NB_SUCURSAL")
     i_dep = _elegir_columna(cols, "NB_DEPARTAMENTO")
@@ -334,11 +340,37 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
                 return ""
         return s
 
+    def _entero(valor):
+        try:
+            return int(str(valor).strip())
+        except (TypeError, ValueError):
+            return None
+
+    # Un mapa por empresa, armado la primera vez que se necesita. Se resuelve
+    # con la empresa de RESGUARDO porque de ahí cuelga la ubicación (es la de
+    # «Asignación del Activo»), que no siempre es la empresa que se descarga.
+    mapas: dict = {}
+
+    def _ubicacion_catalogo(f) -> tuple:
+        """(ubicación, sub-ubicación) por NOMBRE; vacías si no se resuelven."""
+        id_u = _entero(val(f, i_idubi))
+        if id_u is None:
+            return "", ""
+        idemp = _entero(val(f, i_empres)) or id_empresa
+        par = mapas.get(idemp)
+        if par is None:
+            par = db.mapa_ubicaciones(idemp)
+            mapas[idemp] = par
+        id_s = _entero(val(f, i_idsub))
+        return (par[0].get(id_u) or "",
+                (par[1].get((id_u, id_s)) or "") if id_s is not None else "")
+
     registros = []
     nombre_final = empresa_nombre
     for f in filas:
         if i_nomemp is not None and not nombre_final:
             nombre_final = val(f, i_nomemp)
+        nb_ubicacion, nb_sububicacion = _ubicacion_catalogo(f)
         registros.append({
             "etiqueta": str(val(f, i_etq) or "").strip(),
             "insumo": val(f, i_ins), "serie": val(f, i_ser),
@@ -352,6 +384,8 @@ async def descargar_activos(sesion, id_empresa: int, empresa_nombre: str = "") -
                 "situacion": val(f, i_sit),
                 "costo": val(f, i_costo),
                 "grupo_centro_costo": val(f, i_gcc),
+                "ubicacion_principal": nb_ubicacion,
+                "sububicacion": nb_sububicacion,
                 "centro_costo": val(f, i_cc),
                 "fecha_adquisicion": fecha(f, i_fadq),
                 "fecha_garantia": fecha(f, i_fgar),
